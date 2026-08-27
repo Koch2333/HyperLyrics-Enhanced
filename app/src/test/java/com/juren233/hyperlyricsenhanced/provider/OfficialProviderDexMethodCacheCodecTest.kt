@@ -105,6 +105,64 @@ class OfficialProviderDexMethodCacheCodecTest {
     }
 
     @Test
+    fun `cache key includes caller method semantics`() {
+        val base = OfficialProviderDexMethodQuery(
+            cacheKey = "kugou-lite-next-media-v2",
+            declaringClassName = "com.kugou.common.player.manager.QueuePlayerManager",
+            requiredCallerMethodNames = listOf("getNextMedia"),
+        )
+        val first = OfficialProviderDexMethodCacheCodec.cacheKey(
+            packageName = "com.kugou.android.lite",
+            processName = "com.kugou.android.lite.support",
+            versionCode = 11540,
+            lastUpdateTime = 1,
+            query = base,
+        )
+        assertNotEquals(
+            first,
+            OfficialProviderDexMethodCacheCodec.cacheKey(
+                packageName = "com.kugou.android.lite",
+                processName = "com.kugou.android.lite.support",
+                versionCode = 11540,
+                lastUpdateTime = 1,
+                query = base.copy(requiredCallerMethodNames = listOf("getPreMedia")),
+            ),
+        )
+    }
+
+    @Test
+    fun `cache key includes forbidden invoke semantics`() {
+        val base = OfficialProviderDexMethodQuery(
+            cacheKey = "qqmusic-hd-current-song-v4",
+            declaringClassName = "com.tencent.qqmusic.qplayer.core.player.MusicPlayerHelper",
+            forbiddenInvokedMethodDescriptors = listOf(
+                "Lcom/tencent/qqmusic/openapisdk/model/SongInfo;->getSongId()J",
+            ),
+        )
+        val first = OfficialProviderDexMethodCacheCodec.cacheKey(
+            packageName = "com.tencent.qqmusicpad",
+            processName = "com.tencent.qqmusicpad",
+            versionCode = 6_120_005L,
+            lastUpdateTime = 1L,
+            query = base,
+        )
+        assertNotEquals(
+            first,
+            OfficialProviderDexMethodCacheCodec.cacheKey(
+                packageName = "com.tencent.qqmusicpad",
+                processName = "com.tencent.qqmusicpad",
+                versionCode = 6_120_005L,
+                lastUpdateTime = 1L,
+                query = base.copy(
+                    forbiddenInvokedMethodDescriptors = listOf(
+                        "Lcom/tencent/qqmusic/openapisdk/model/SongInfo;->getSongName()Ljava/lang/String;",
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `cross version method baseline round trips structural identity`() {
         val baseline = OfficialProviderDexMethodBaseline(
             fieldCount = 18,

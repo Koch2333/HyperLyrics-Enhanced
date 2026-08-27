@@ -1,5 +1,6 @@
 package com.juren233.hyperlyricsenhanced.ui.page.hooksettings
 
+import android.content.Context
 import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
@@ -106,10 +107,21 @@ fun LyricProviderPage() {
     var isManualRefreshing by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val changeAppliedFormat = stringResource(R.string.provider_change_applied)
+    val changeAppliedSystemUiMessage = stringResource(
+        R.string.provider_change_applied_system_ui,
+    )
     val updateSuccessFormat = stringResource(R.string.provider_update_success)
+    val updateSuccessSystemUiMessage = stringResource(
+        R.string.provider_update_success_system_ui,
+    )
+    val repairSuccessFormat = stringResource(R.string.provider_repair_success)
+    val repairSuccessSystemUiMessage = stringResource(
+        R.string.provider_repair_success_system_ui,
+    )
     val removeSuccessMessage = stringResource(R.string.provider_remove_success)
     val unknownText = stringResource(R.string.unknown)
     val updateFailedFormat = stringResource(R.string.provider_update_failed)
+    val repairFailedFormat = stringResource(R.string.provider_repair_failed)
     val removeFailedFormat = stringResource(R.string.provider_remove_failed)
     val legacyProviderReleaseHome = stringResource(R.string.legacy_provider_release_home)
     val providerErrorTexts = rememberProviderErrorTexts()
@@ -135,7 +147,11 @@ fun LyricProviderPage() {
         }
         coroutineScope.launch {
             snackbarHostState.showSnackbar(
-                message = changeAppliedFormat.replace("%1\$s", item.catalog.displayName),
+                message = if (item.usesSystemMediaRuntime()) {
+                    changeAppliedSystemUiMessage
+                } else {
+                    changeAppliedFormat.replace("%1\$s", item.catalog.displayName)
+                },
                 duration = SnackbarDuration.Custom(2500L),
             )
         }
@@ -167,7 +183,11 @@ fun LyricProviderPage() {
                         )
                     }
                     snackbarHostState.showSnackbar(
-                        message = updateSuccessFormat.replace("%1\$s", item.catalog.displayName),
+                        message = if (item.usesSystemMediaRuntime()) {
+                            updateSuccessSystemUiMessage
+                        } else {
+                            updateSuccessFormat.replace("%1\$s", item.catalog.displayName)
+                        },
                         duration = SnackbarDuration.Custom(2500L),
                     )
                 }.onFailure { error ->
@@ -176,6 +196,56 @@ fun LyricProviderPage() {
                     }
                     snackbarHostState.showSnackbar(
                         message = updateFailedFormat.replace(
+                            "%1\$s",
+                            localizeProviderError(error.message, providerErrorTexts, unknownText),
+                        ),
+                        duration = SnackbarDuration.Custom(3500L),
+                    )
+                }
+            }
+        }
+    }
+
+    val repairOfficialProvider: (OfficialProviderItem) -> Unit = { item ->
+        if (item.catalog.id !in officialUiStateFlow.value.busyPluginIds) {
+            officialUiStateFlow.update {
+                it.copy(busyPluginIds = it.busyPluginIds + item.catalog.id)
+            }
+            coroutineScope.launch {
+                runCatching {
+                    OfficialProviderRepository.repair(context, item)
+                }.onSuccess { manifest ->
+                    officialUiStateFlow.update { state ->
+                        state.copy(
+                            items = state.items.map { current ->
+                                if (current.catalog.id == item.catalog.id) {
+                                    current.copy(
+                                        installedVersionCode = manifest.versionCode,
+                                        installedVersionName = manifest.versionName,
+                                        enabled = true,
+                                        needsRepair = false,
+                                    )
+                                } else {
+                                    current
+                                }
+                            },
+                            busyPluginIds = state.busyPluginIds - item.catalog.id,
+                        )
+                    }
+                    snackbarHostState.showSnackbar(
+                        message = if (item.usesSystemMediaRuntime()) {
+                            repairSuccessSystemUiMessage
+                        } else {
+                            repairSuccessFormat.replace("%1\$s", item.catalog.displayName)
+                        },
+                        duration = SnackbarDuration.Custom(2500L),
+                    )
+                }.onFailure { error ->
+                    officialUiStateFlow.update {
+                        it.copy(busyPluginIds = it.busyPluginIds - item.catalog.id)
+                    }
+                    snackbarHostState.showSnackbar(
+                        message = repairFailedFormat.replace(
                             "%1\$s",
                             localizeProviderError(error.message, providerErrorTexts, unknownText),
                         ),
@@ -288,6 +358,7 @@ fun LyricProviderPage() {
                         expandedStates = expandedStates,
                         onOfficialEnabledChange = setOfficialProviderEnabled,
                         onUpdateOfficial = updateOfficialProvider,
+                        onRepairOfficial = repairOfficialProvider,
                         onRemoveOfficial = removeOfficialProvider,
                         legacyProviderReleaseHome = legacyProviderReleaseHome,
                     )
@@ -312,12 +383,13 @@ fun OfficialProviderDownloadPage() {
     var isManualRefreshing by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val addSuccessFormat = stringResource(R.string.provider_add_success)
+    val addSuccessSystemUiMessage = stringResource(R.string.provider_add_success_system_ui)
     val unknownText = stringResource(R.string.unknown)
     val addFailedFormat = stringResource(R.string.provider_add_failed)
     val providerErrorTexts = rememberProviderErrorTexts()
 
     LaunchedEffect(Unit) {
-        refreshOfficialProviders(stateFlow)
+        refreshOfficialProviders(context, stateFlow)
     }
 
     val installProvider: (OfficialProviderItem) -> Unit = { item ->
@@ -326,10 +398,14 @@ fun OfficialProviderDownloadPage() {
             coroutineScope.launch {
                 runCatching {
                     OfficialProviderRepository.downloadAndInstall(context, item)
-                    refreshOfficialProviders(stateFlow)
+                    refreshOfficialProviders(context, stateFlow)
                 }.onSuccess {
                     snackbarHostState.showSnackbar(
-                        message = addSuccessFormat.replace("%1\$s", item.catalog.displayName),
+                        message = if (item.usesSystemMediaRuntime()) {
+                            addSuccessSystemUiMessage
+                        } else {
+                            addSuccessFormat.replace("%1\$s", item.catalog.displayName)
+                        },
                         duration = SnackbarDuration.Custom(2500L),
                     )
                 }.onFailure { error ->
@@ -378,7 +454,7 @@ fun OfficialProviderDownloadPage() {
                     coroutineScope.launch {
                         isManualRefreshing = true
                         try {
-                            refreshOfficialProviders(stateFlow)
+                            refreshOfficialProviders(context, stateFlow)
                         } finally {
                             isManualRefreshing = false
                         }
@@ -396,7 +472,10 @@ fun OfficialProviderDownloadPage() {
                 modifier = Modifier.fillMaxSize(),
             ) {
                 val lazyListState = rememberLazyListState()
-                val availableItems = state.value.items.filterNot { it.installed }
+                val availableItems = state.value.items.filter { item ->
+                    !item.installed &&
+                        OfficialProviderCatalog.shouldShowInDownloadList(item.catalog.id)
+                }
                 LazyColumn(
                     state = lazyListState,
                     modifier = Modifier.pageScrollModifiers(
@@ -454,6 +533,10 @@ fun OfficialProviderDownloadPage() {
                                                 stringResource(R.string.provider_status_unavailable)
                                             },
                                         )
+                                        if (item.catalog.id == "salt-player") {
+                                            append("\n")
+                                            append(stringResource(R.string.provider_salt_player_upgrade_hint))
+                                        }
                                         append("\n")
                                         append(item.catalog.targetPackages.joinToString())
                                     },
@@ -503,24 +586,27 @@ private suspend fun loadLocalProviderState(
             LyricProviderManager.loadProviders(context, providerUiStateFlow)
         }
         launch {
-            refreshInstalledProviderUpdates(officialUiStateFlow)
+            refreshInstalledProviderUpdates(context, officialUiStateFlow)
         }
     }
 }
 
 private suspend fun refreshInstalledProviderUpdates(
+    context: Context,
     stateFlow: MutableStateFlow<OfficialProviderUiState>,
 ) {
-    val remoteItems = runCatching { OfficialProviderRepository.loadItems() }.getOrNull() ?: return
+    val remoteItems = runCatching { OfficialProviderRepository.loadItems(context) }.getOrNull() ?: return
     val remoteById = remoteItems.associateBy { it.catalog.id }
     stateFlow.update { state ->
         state.copy(
             items = state.items.map { localItem ->
-                remoteById[localItem.catalog.id]?.copy(
+                val remoteItem = remoteById[localItem.catalog.id]
+                remoteItem?.copy(
                     installedVersionCode = localItem.installedVersionCode,
                     installedVersionName = localItem.installedVersionName
-                        ?: remoteById[localItem.catalog.id]?.installedVersionName,
+                        ?: remoteItem.installedVersionName,
                     enabled = localItem.enabled,
+                    needsRepair = localItem.needsRepair || remoteItem.needsRepair,
                 ) ?: localItem
             },
         )
@@ -568,6 +654,7 @@ private fun LazyListScope.providerSections(
     expandedStates: MutableMap<String, Boolean>,
     onOfficialEnabledChange: (OfficialProviderItem, Boolean) -> Unit,
     onUpdateOfficial: (OfficialProviderItem) -> Unit,
+    onRepairOfficial: (OfficialProviderItem) -> Unit,
     onRemoveOfficial: (OfficialProviderItem) -> Unit,
     legacyProviderReleaseHome: String,
 ) {
@@ -653,6 +740,10 @@ private fun LazyListScope.providerSections(
                             append(
                                 when {
                                     busy -> stringResource(R.string.provider_status_downloading)
+                                    item.needsRepair -> stringResource(
+                                        R.string.provider_status_needs_repair,
+                                        installedVersionName,
+                                    )
                                     item.enabled -> stringResource(
                                         R.string.provider_status_installed_enabled,
                                         installedVersionName,
@@ -676,6 +767,10 @@ private fun LazyListScope.providerSections(
                                 append("\n")
                                 append(description)
                             }
+                            if (item.catalog.id == "salt-player") {
+                                append("\n")
+                                append(stringResource(R.string.provider_salt_player_upgrade_hint))
+                            }
                             append("\n")
                             append(item.catalog.targetPackages.joinToString())
                         },
@@ -687,6 +782,11 @@ private fun LazyListScope.providerSections(
                             delayKey = RootConstants.KEY_HOOK_LYRICON_PROVIDER_DELAY_PREFIX + packageName,
                             onUpdate = if (item.updateAvailable && !busy) {
                                 { onUpdateOfficial(item) }
+                            } else {
+                                null
+                            },
+                            onRepair = if (item.needsRepair && !busy) {
+                                { onRepairOfficial(item) }
                             } else {
                                 null
                             },
@@ -843,6 +943,7 @@ private fun ProviderDelayEditor(
     description: String? = null,
     tags: List<ModuleTag> = emptyList(),
     onUpdate: (() -> Unit)? = null,
+    onRepair: (() -> Unit)? = null,
     onRemove: (() -> Unit)?,
 ) {
     val editorState = if (state != null) {
@@ -904,7 +1005,7 @@ private fun ProviderDelayEditor(
                 keyPoints = listOf(-5000f, -4000f, -3000f, -2000f, -1000f, 0f, 1000f, 2000f, 3000f, 4000f, 5000f),
                 hapticEffect = SliderDefaults.SliderHapticEffect.Step,
             )
-            if (onUpdate != null || onRemove != null) {
+            if (onUpdate != null || onRepair != null || onRemove != null) {
                 Spacer(modifier = Modifier.height(16.dp))
             }
             if (onUpdate != null) {
@@ -914,8 +1015,18 @@ private fun ProviderDelayEditor(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            if (onRemove != null) {
+            if (onRepair != null) {
                 if (onUpdate != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                TextButton(
+                    text = stringResource(R.string.provider_action_repair),
+                    onClick = onRepair,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (onRemove != null) {
+                if (onUpdate != null || onRepair != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 TextButton(
@@ -1027,12 +1138,16 @@ private fun localizeProviderError(
     }
 }
 
+private fun OfficialProviderItem.usesSystemMediaRuntime(): Boolean =
+    OfficialProviderCatalog.definitionForId(catalog.id)?.systemMediaRuntime == true
+
 private suspend fun refreshOfficialProviders(
+    context: Context,
     stateFlow: MutableStateFlow<OfficialProviderUiState>,
 ) {
     stateFlow.update { it.copy(isLoading = true, error = null) }
     runCatching {
-        OfficialProviderRepository.loadItems()
+        OfficialProviderRepository.loadItems(context)
     }.onSuccess { items ->
         stateFlow.update {
             it.copy(

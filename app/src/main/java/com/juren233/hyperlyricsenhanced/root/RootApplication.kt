@@ -2,9 +2,12 @@ package com.juren233.hyperlyricsenhanced.root
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.common.LogLevelPolicy
 import com.juren233.hyperlyricsenhanced.common.PreferenceDiagnostics
 import com.juren233.hyperlyricsenhanced.common.PrefsBridge
+import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.UIConstants
 import com.juren233.hyperlyricsenhanced.provider.OfficialProviderScopeManager
 import com.juren233.hyperlyricsenhanced.ui.utils.AppUtils
@@ -19,6 +22,7 @@ class RootApplication : Application() {
         super.onCreate()
         LocaleUtils.clearLegacyPlatformLocale(this)
         AppUtils.initPredictiveBackGesture(this)
+        applyBuildDefaultLogLevel()
         LogManager.init(this)
         PrefsBridge.init(this)
         appContext = this
@@ -36,6 +40,21 @@ class RootApplication : Application() {
                 OfficialProviderScopeManager.onServiceDied()
             }
         })
+    }
+
+    private fun applyBuildDefaultLogLevel() {
+        val prefs = getSharedPreferences(UIConstants.PREF_NAME, Context.MODE_PRIVATE)
+        val currentBuildKind = LogLevelPolicy.buildKind(BuildConfig.DEBUG)
+        if (prefs.getString(UIConstants.KEY_LOG_LEVEL_BUILD_KIND, null) == currentBuildKind) {
+            return
+        }
+        prefs.edit()
+            .putInt(
+                UIConstants.KEY_LOG_LEVEL,
+                LogLevelPolicy.defaultLevel(BuildConfig.DEBUG),
+            )
+            .putString(UIConstants.KEY_LOG_LEVEL_BUILD_KIND, currentBuildKind)
+            .commit()
     }
 
     companion object {
@@ -86,6 +105,39 @@ class RootApplication : Application() {
                         "remote_readback=${PreferenceDiagnostics.formatValue(key, readBack)}",
                 )
             }
+            broadcastPreferenceChange(group, key, value)
+        }
+
+        private fun broadcastPreferenceChange(group: String, key: String, value: Any?) {
+            if (group != UIConstants.PREF_NAME) return
+            if (!LivePreferenceRefreshPolicy.contains(key)) return
+            val intent = Intent(RootConstants.ACTION_REMOTE_PREFERENCE_CHANGED)
+                .setPackage("com.android.systemui")
+                .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_GROUP, group)
+                .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_KEY, key)
+            when (value) {
+                null -> intent.putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "clear")
+                is Boolean -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "boolean")
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_BOOLEAN, value)
+                is Int -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "int")
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_INT, value)
+                is Long -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "long")
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_LONG, value)
+                is Float -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "float")
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_FLOAT, value)
+                is String -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "string")
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_STRING, value)
+                else -> return
+            }
+            runCatching { appContext?.sendBroadcast(intent) }
+                .onFailure { error ->
+                    LogManager.w("PrefsBridge", "preference_broadcast_failed key=$key", error)
+                }
         }
 
         @JvmStatic

@@ -2,6 +2,9 @@
 
 package com.juren233.hyperlyricsenhanced.root.mediacard.notification
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
@@ -21,6 +24,8 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.view.animation.DecelerateInterpolator
+import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.ClassicAodSongInfoConfig
 import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.lyric.CjkLyricWhitespacePolicy
@@ -90,11 +95,15 @@ internal data class AodTextStyleConfig(
     val centerNonDuetSong: Boolean,
     val centerGroupVocals: Boolean,
     val pauseStyle: Int,
-    val translationDisplay: Boolean,
+    val translationDisplayMode: Int,
+    val translationFallback: Boolean,
     val swapTranslation: Boolean,
     val nextSongPreview: Boolean,
     val nextSongPreviewPosition: Int,
-)
+) {
+    val translationDisplay: Boolean
+        get() = translationDisplayMode != RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+}
 
 internal data class AodHorizontalMargins(
     val left: Int,
@@ -178,19 +187,47 @@ internal object AodMediaLyricPolicy {
         lyricBottom.coerceAtLeast(0) + bottomPadding.coerceAtLeast(0)
     )
 
-    fun centeredLyricTop(
+    fun lockScreenTargetCardHeight(
         nativeCardHeight: Int,
-        anchorBottom: Int,
-        lyricHeight: Int,
-        topGap: Int,
-        bottomPadding: Int
-    ): Int {
-        val minimumTop = anchorBottom.coerceAtLeast(0) + topGap.coerceAtLeast(0)
-        val availableHeight = nativeCardHeight.coerceAtLeast(0) -
-            bottomPadding.coerceAtLeast(0) - minimumTop
-        val freeSpace = (availableHeight - lyricHeight.coerceAtLeast(0)).coerceAtLeast(0)
-        return minimumTop + freeSpace / 2
+        lyricBottom: Int,
+        bottomPadding: Int,
+    ): Int = requiredCardHeight(
+        nativeCardHeight = nativeCardHeight,
+        lyricBottom = lyricBottom,
+        bottomPadding = bottomPadding,
+    )
+
+    fun lockScreenBackgroundTargetHeight(
+        targetCardHeight: Int,
+    ): Int = targetCardHeight.coerceAtLeast(0)
+
+    fun lockScreenNativeCardHeight(
+        fullAod: Boolean,
+        fullAodBaseHeight: Int,
+        playerBaseHeight: Int
+    ): Int = if (fullAod) {
+        fullAodBaseHeight.coerceAtLeast(0)
+    } else {
+        playerBaseHeight.coerceAtLeast(0)
     }
+
+    fun lockScreenHeightNeedsReassert(
+        appliedHeight: Int?,
+        currentLayoutHeight: Int?
+    ): Boolean = appliedHeight != null &&
+        appliedHeight > 0 &&
+        currentLayoutHeight != null &&
+        currentLayoutHeight != appliedHeight
+
+    fun lockScreenHeightNeedsRestore(
+        appliedHeight: Int?,
+        heightAnimationActive: Boolean,
+    ): Boolean = appliedHeight != null || heightAnimationActive
+
+    fun lockScreenLyricTop(
+        anchorBottom: Int,
+        topGap: Int
+    ): Int = anchorBottom.coerceAtLeast(0) + topGap.coerceAtLeast(0)
 
     fun contentAnchorBottom(albumBottom: Int, artistBottom: Int): Int =
         maxOf(albumBottom.coerceAtLeast(0), artistBottom.coerceAtLeast(0))
@@ -226,6 +263,36 @@ internal object AodMediaLyricPolicy {
         playerShown: Boolean
     ): Boolean = fullAod || (!interactive && playerShown)
 
+    fun readTranslationPronunciationMode(
+        prefs: SharedPreferences?,
+        key: String,
+        defaultValue: Int = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY_MODE
+    ): Int {
+        if (prefs == null) return defaultValue
+        val raw = try {
+            prefs.all[key]
+        } catch (_: Exception) {
+            null
+        }
+        return when (raw) {
+            is Int -> raw.coerceIn(
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF,
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_PRONUNCIATION
+            )
+            is Number -> raw.toInt().coerceIn(
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF,
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_PRONUNCIATION
+            )
+            is Boolean -> if (raw) RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_TRANSLATION
+            else RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+            is String -> raw.toIntOrNull()?.coerceIn(
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF,
+                RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_PRONUNCIATION
+            ) ?: defaultValue
+            else -> defaultValue
+        }
+    }
+
     fun assembleContent(
         main: String?,
         translation: String?,
@@ -248,53 +315,72 @@ internal object AodMediaLyricPolicy {
         duetLyrics: Boolean = RootConstants.DEFAULT_HOOK_AOD_DUET_LYRICS,
         centerNonDuetSong: Boolean = RootConstants.DEFAULT_HOOK_AOD_CENTER_NON_DUET_SONG,
         centerGroupVocals: Boolean = RootConstants.DEFAULT_HOOK_AOD_CENTER_GROUP_VOCALS,
-        translationDisplay: Boolean = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY,
+        translationDisplayMode: Int = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY_MODE,
+        translationFallback: Boolean = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK,
     ): AodLyricContent {
         val normalizedMain = main.normalized()
-        val normalizedTranslation = translation.normalized()
-            .takeIf { translationDisplay }
+        val rawTranslation = translation.normalized()
             .takeUnless { it == normalizedMain }
             .orEmpty()
-        val normalizedBacking = backing.normalized()
+        val rawBacking = backing.normalized()
             .takeUnless { it == normalizedMain }
             .orEmpty()
-        val normalizedBackingTranslation = backingTranslation.normalized()
-            .takeIf { translationDisplay }
-            .takeIf { normalizedBacking.isNotBlank() && it != normalizedBacking }
+        val rawBackingTranslation = backingTranslation.normalized()
+            .takeIf { rawBacking.isNotBlank() && it != rawBacking }
             .orEmpty()
-        val normalizedOverlappingMain = overlappingMain.normalized()
+        val rawOverlappingMain = overlappingMain.normalized()
             .takeUnless { it == normalizedMain }
             .orEmpty()
-        val normalizedOverlappingTranslation = overlappingTranslation.normalized()
-            .takeIf { translationDisplay }
+        val rawOverlappingTranslation = overlappingTranslation.normalized()
             .takeIf {
-                normalizedOverlappingMain.isNotBlank() &&
-                    it != normalizedOverlappingMain
+                rawOverlappingMain.isNotBlank() &&
+                    it != rawOverlappingMain
             }
             .orEmpty()
-        val normalizedOverlappingBacking = overlappingBacking.normalized()
+        val rawOverlappingBacking = overlappingBacking.normalized()
             .takeIf {
-                normalizedOverlappingMain.isNotBlank() &&
-                    it != normalizedOverlappingMain
+                rawOverlappingMain.isNotBlank() &&
+                    it != rawOverlappingMain
             }
             .orEmpty()
-        val normalizedOverlappingBackingTranslation = overlappingBackingTranslation.normalized()
-            .takeIf { translationDisplay }
+        val rawOverlappingBackingTranslation = overlappingBackingTranslation.normalized()
             .takeIf {
-                normalizedOverlappingBacking.isNotBlank() &&
-                    it != normalizedOverlappingBacking
+                rawOverlappingBacking.isNotBlank() &&
+                    it != rawOverlappingBacking
             }
             .orEmpty()
-        val romaFallback = roma.normalized()
-            .takeIf {
-                normalizedTranslation.isBlank() &&
-                    normalizedBacking.isBlank() &&
-                    it != normalizedMain
-            }
+        val rawRoma = roma.normalized()
+            .takeUnless { it == normalizedMain }
             .orEmpty()
-        val hasDisplayedTranslation = normalizedTranslation.isNotBlank() ||
-            normalizedBackingTranslation.isNotBlank() ||
-            romaFallback.isNotBlank()
+
+        var finalTranslation = ""
+        var finalBackingTranslation = ""
+        var finalOverlappingTranslation = ""
+        var finalOverlappingBackingTranslation = ""
+
+        when (translationDisplayMode) {
+            RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_TRANSLATION -> {
+                finalTranslation = rawTranslation
+                finalBackingTranslation = rawBackingTranslation
+                finalOverlappingTranslation = rawOverlappingTranslation
+                finalOverlappingBackingTranslation = rawOverlappingBackingTranslation
+                if (finalTranslation.isBlank() && translationFallback && rawRoma.isNotBlank() && rawBacking.isBlank()) {
+                    finalTranslation = rawRoma
+                }
+            }
+            RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_PRONUNCIATION -> {
+                finalTranslation = if (rawRoma.isNotBlank() && rawBacking.isBlank()) rawRoma else ""
+                if (finalTranslation.isBlank() && translationFallback) {
+                    finalTranslation = rawTranslation
+                    finalBackingTranslation = rawBackingTranslation
+                    finalOverlappingTranslation = rawOverlappingTranslation
+                    finalOverlappingBackingTranslation = rawOverlappingBackingTranslation
+                }
+            }
+        }
+
+        val hasDisplayedTranslation = finalTranslation.isNotBlank() ||
+            finalBackingTranslation.isNotBlank()
         val normalizedNext = next.normalized()
             .takeIf {
                 showNext &&
@@ -304,13 +390,13 @@ internal object AodMediaLyricPolicy {
             .orEmpty()
         return AodLyricContent(
             main = normalizedMain,
-            translation = normalizedTranslation.ifBlank { romaFallback },
-            backing = normalizedBacking,
-            backingTranslation = normalizedBackingTranslation,
-            overlappingMain = normalizedOverlappingMain,
-            overlappingTranslation = normalizedOverlappingTranslation,
-            overlappingBacking = normalizedOverlappingBacking,
-            overlappingBackingTranslation = normalizedOverlappingBackingTranslation,
+            translation = finalTranslation,
+            backing = rawBacking,
+            backingTranslation = finalBackingTranslation,
+            overlappingMain = rawOverlappingMain,
+            overlappingTranslation = finalOverlappingTranslation,
+            overlappingBacking = rawOverlappingBacking,
+            overlappingBackingTranslation = finalOverlappingBackingTranslation,
             next = normalizedNext,
             mainAlignment = lyricAlignment(
                 duetLyrics = duetLyrics,
@@ -323,7 +409,7 @@ internal object AodMediaLyricPolicy {
                 duetLyrics = duetLyrics,
                 centerNonDuetSong = centerNonDuetSong,
                 alignedRight = backingAlignedRight,
-                groupVocals = mainGroupVocals,
+                groupVocals = false,
                 centerGroupVocals = centerGroupVocals,
             ),
             overlappingAlignment = lyricAlignment(
@@ -349,6 +435,56 @@ internal object AodMediaLyricPolicy {
             ),
         )
     }
+
+    fun assembleContent(
+        main: String?,
+        translation: String?,
+        backing: String?,
+        backingTranslation: String?,
+        roma: String?,
+        overlappingMain: String? = null,
+        overlappingTranslation: String? = null,
+        overlappingBacking: String? = null,
+        overlappingBackingTranslation: String? = null,
+        next: String? = null,
+        showNext: Boolean = false,
+        mainAlignedRight: Boolean = false,
+        backingAlignedRight: Boolean = mainAlignedRight,
+        overlappingAlignedRight: Boolean = mainAlignedRight,
+        overlappingBackingAlignedRight: Boolean = overlappingAlignedRight,
+        mainGroupVocals: Boolean = false,
+        nextAlignedRight: Boolean = false,
+        nextGroupVocals: Boolean = false,
+        duetLyrics: Boolean = RootConstants.DEFAULT_HOOK_AOD_DUET_LYRICS,
+        centerNonDuetSong: Boolean = RootConstants.DEFAULT_HOOK_AOD_CENTER_NON_DUET_SONG,
+        centerGroupVocals: Boolean = RootConstants.DEFAULT_HOOK_AOD_CENTER_GROUP_VOCALS,
+        translationDisplay: Boolean,
+    ): AodLyricContent = assembleContent(
+        main = main,
+        translation = translation,
+        backing = backing,
+        backingTranslation = backingTranslation,
+        roma = roma,
+        overlappingMain = overlappingMain,
+        overlappingTranslation = overlappingTranslation,
+        overlappingBacking = overlappingBacking,
+        overlappingBackingTranslation = overlappingBackingTranslation,
+        next = next,
+        showNext = showNext,
+        mainAlignedRight = mainAlignedRight,
+        backingAlignedRight = backingAlignedRight,
+        overlappingAlignedRight = overlappingAlignedRight,
+        overlappingBackingAlignedRight = overlappingBackingAlignedRight,
+        mainGroupVocals = mainGroupVocals,
+        nextAlignedRight = nextAlignedRight,
+        nextGroupVocals = nextGroupVocals,
+        duetLyrics = duetLyrics,
+        centerNonDuetSong = centerNonDuetSong,
+        centerGroupVocals = centerGroupVocals,
+        translationDisplayMode = if (translationDisplay) RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_TRANSLATION
+        else RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF,
+        translationFallback = false,
+    )
 
     fun orderedLyricRows(swapTranslation: Boolean): List<AodLyricRow> =
         if (swapTranslation) {
@@ -436,6 +572,7 @@ object NotificationMediaAodLyricHooker {
     private const val LOCK_SCREEN_AOD_TOP_GAP_DP = 17f
     private const val LOCK_SCREEN_AOD_BOTTOM_GAP_DP = 21f
     private const val LOCK_SCREEN_AOD_SIDE_MARGIN_EXTRA_DP = 1f
+    private const val LOCK_SCREEN_AOD_HEIGHT_ANIMATION_MS = 160L
     // Hidden PowerManager level that permits frame submission while the display is dozing.
     private const val DRAW_WAKE_LOCK_LEVEL = 0x80
 
@@ -536,6 +673,22 @@ object NotificationMediaAodLyricHooker {
             }
             dozeRefreshApis[classLoader] = refreshApi
         }
+        var headerVisibilityHookCount = 0
+        runCatching { classLoader.loadClass(MEDIA_HEADER_VIEW_CLASS) }
+            .onSuccess { headerClass ->
+                runCatching {
+                    val setVisibility = headerClass.getDeclaredMethod(
+                        "setVisibility",
+                        Int::class.javaPrimitiveType,
+                    ).apply { isAccessible = true }
+                    xposedModule.deoptimize(setVisibility)
+                    handles += xposedModule.hook(setVisibility)
+                        .intercept(HeaderVisibilityHook())
+                    headerVisibilityHookCount++
+                }.onFailure {
+                    HookLogger.w(TAG, "安装锁屏媒体头可见性 Hook 失败", it)
+                }
+            }
         if (controllerHookCount != api.hookMethods.size) {
             handles.forEach(HookHandle::unhook)
             hookedClassLoaders.remove(classLoader)
@@ -545,7 +698,8 @@ object NotificationMediaAodLyricHooker {
             HookLogger.i(
                 TAG,
                 "息屏歌词 Hook 已初始化: methods=$controllerHookCount, " +
-                    "dozeConstructors=$dozeConstructorHookCount"
+                    "dozeConstructors=$dozeConstructorHookCount, " +
+                    "headerVisibility=$headerVisibilityHookCount"
             )
         }
     }
@@ -650,6 +804,16 @@ object NotificationMediaAodLyricHooker {
         positionPollScheduled = false
     }
 
+    fun hideLockScreenOverlays() = runOnMain {
+        synchronized(states) { states.values.toList() }.forEach { state ->
+            val overlay = state.overlay ?: return@forEach
+            if (overlay.root.isShown) {
+                overlay.root.visibility = View.GONE
+                HookLogger.i(TAG, "亮屏事件已隐藏锁屏 AOD 歌词覆盖层")
+            }
+        }
+    }
+
     private class ControllerHook(private val methodName: String) : Hooker {
         override fun intercept(chain: Chain): Any? {
             val controller = chain.thisObject ?: return chain.proceed()
@@ -709,6 +873,47 @@ object NotificationMediaAodLyricHooker {
                 }
             }
             updatePositionPolling()
+            return result
+        }
+    }
+
+    private class HeaderVisibilityHook : Hooker {
+        override fun intercept(chain: Chain): Any? {
+            val header = chain.thisObject as? View ?: return chain.proceed()
+            val newVisibility = (chain.args.firstOrNull() as? Int) ?: View.GONE
+            val becomesVisible = newVisibility == View.VISIBLE
+            val result = chain.proceed()
+            runOnMain {
+                var hiddenCount = 0
+                synchronized(states) { states.values.toList() }.forEach { state ->
+                    val overlay = state.overlay ?: return@forEach
+                    if (BuildConfig.DEBUG) {
+                        HookLogger.i(
+                            TAG,
+                            "AOD_HEADER_VIS header=0x" +
+                                System.identityHashCode(header).toString(16) +
+                                ", new=$newVisibility, shown=${overlay.root.isShown}, " +
+                                "matched=${
+                                    overlay.headerHeightController?.view === header
+                                }, overlayHeader=0x${
+                                    overlay.headerHeightController?.view
+                                        ?.let { System.identityHashCode(it).toString(16) }
+                                        ?: "null"
+                                }"
+                        )
+                    }
+                    if (becomesVisible && overlay.root.isShown) {
+                            overlay.root.visibility = View.GONE
+                        hiddenCount++
+                    }
+                }
+                if (becomesVisible && hiddenCount > 0) {
+                    HookLogger.i(
+                        TAG,
+                        "锁屏媒体头恢复可见，已立即隐藏 $hiddenCount 个 AOD 歌词覆盖层",
+                    )
+                }
+            }
             return result
         }
     }
@@ -808,17 +1013,18 @@ object NotificationMediaAodLyricHooker {
         val enabled = isEnabled()
         val show = AodMediaLyricPolicy.shouldShow(
             enabled = enabled,
-            fullAod = state.aodActive,
+            fullAod = state.fullAod,
             playing = state.playing,
             hasLyric = hasLyric,
             packageMatches = packageMatches,
             pauseStyle = textStyle.pauseStyle,
         )
-        updatePositionPolling()
-
-        if (!show) {
-            val reason = when {
+        val decisionReason = if (show) {
+            "policy_passed"
+        } else {
+            when {
                 !enabled -> "feature_disabled"
+                !state.fullAod && !interactive -> "waiting_full_aod"
                 !state.aodActive && interactive -> "screen_interactive"
                 !state.aodActive -> "player_hidden"
                 !state.playing &&
@@ -828,6 +1034,33 @@ object NotificationMediaAodLyricHooker {
                 !packageMatches -> "package_mismatch"
                 else -> "policy_rejected"
             }
+        }
+        AodEnvironmentDiagnostics.log(
+            context = player.context,
+            stage = "lockscreen_decision",
+            modulePrefs = prefs,
+            view = player,
+            runtime = AodRuntimeDiagnosticState(
+                surface = "lockscreen_media",
+                fullAod = state.fullAod,
+                playerShown = player.isShown,
+                playing = state.playing,
+                pauseStyle = textStyle.pauseStyle,
+                pauseAllowed = state.playing ||
+                    textStyle.pauseStyle == RootConstants.AOD_PAUSE_STYLE_KEEP_LYRICS,
+                hasContent = hasLyric,
+                packageMatches = packageMatches,
+                showDecision = show,
+                decisionReason = decisionReason,
+                overlayPresent = state.overlay != null,
+                overlayShown = state.overlay?.root?.isShown,
+            ),
+            dedupeKey = diagnosticKey,
+        )
+        updatePositionPolling()
+
+        if (!show) {
+            val reason = decisionReason
             DisplayDiagnosticLogger.log(
                 channel = "AOD_LOCK",
                 result = "hidden",
@@ -862,6 +1095,26 @@ object NotificationMediaAodLyricHooker {
                 result = "skipped",
                 reason = "overlay_unavailable",
                 extra = "actions=${actions.size}",
+                dedupeKey = diagnosticKey,
+            )
+            AodEnvironmentDiagnostics.log(
+                context = player.context,
+                stage = "lockscreen_overlay",
+                modulePrefs = prefs,
+                view = player,
+                runtime = AodRuntimeDiagnosticState(
+                    surface = "lockscreen_media",
+                    fullAod = state.fullAod,
+                    playerShown = player.isShown,
+                    playing = state.playing,
+                    pauseStyle = textStyle.pauseStyle,
+                    hasContent = hasLyric,
+                    packageMatches = packageMatches,
+                    showDecision = false,
+                    decisionReason = "overlay_unavailable",
+                    overlayPresent = false,
+                    overlayShown = false,
+                ),
                 dedupeKey = diagnosticKey,
             )
             restoreActions(state)
@@ -923,21 +1176,50 @@ object NotificationMediaAodLyricHooker {
                 translationColor
             }
         )
-        overlay.root.visibility = View.VISIBLE
-        overlay.root.bringToFront()
-        DisplayDiagnosticLogger.log(
-            channel = "AOD_LOCK",
-            result = "shown",
-            reason = "overlay_visible",
-            extra = "interactive=$interactive, playerShown=${player.isShown}, " +
-                "fullAod=${state.fullAod}, mediaPackage=${mediaPackage.orEmpty()}, " +
-                "contentChanged=$contentChanged, styleChanged=$styleChanged",
-            dedupeKey = diagnosticKey,
-        )
+        overlay.fullAodActive = state.fullAod
+        if (overlay.root.visibility == View.GONE) {
+            overlay.root.visibility = View.INVISIBLE
+        }
         overlay.root.post {
+            if (overlay.root.visibility == View.GONE) return@post
+            if (overlay.root.visibility == View.INVISIBLE) {
+                overlay.root.visibility = View.VISIBLE
+                overlay.root.bringToFront()
+                HookLogger.i(TAG, "锁屏 AOD 歌词已在原生控件隐藏完成后显示")
+            }
+            AodEnvironmentDiagnostics.log(
+                context = player.context,
+                stage = "lockscreen_overlay_visible",
+                modulePrefs = prefs,
+                view = overlay.root,
+                runtime = AodRuntimeDiagnosticState(
+                    surface = "lockscreen_media",
+                    fullAod = state.fullAod,
+                    playerShown = player.isShown,
+                    playing = state.playing,
+                    pauseStyle = textStyle.pauseStyle,
+                    pauseAllowed = true,
+                    hasContent = hasLyric,
+                    packageMatches = packageMatches,
+                    showDecision = true,
+                    decisionReason = "overlay_visible",
+                    overlayPresent = true,
+                    overlayShown = overlay.root.isShown,
+                ),
+                dedupeKey = diagnosticKey,
+            )
             updateLockScreenCardHeight(
                 overlay,
                 forceRemeasure = contentChanged || styleChanged,
+            )
+            DisplayDiagnosticLogger.log(
+                channel = "AOD_LOCK",
+                result = "shown",
+                reason = "overlay_visible",
+                extra = "interactive=$interactive, playerShown=${player.isShown}, " +
+                    "fullAod=${state.fullAod}, mediaPackage=${mediaPackage.orEmpty()}, " +
+                    "contentChanged=$contentChanged, styleChanged=$styleChanged",
+                dedupeKey = diagnosticKey,
             )
         }
         if (contentChanged || styleChanged) {
@@ -1013,9 +1295,10 @@ object NotificationMediaAodLyricHooker {
             pauseAllowed &&
             !fullAodActive &&
             hasContent
-
-        if (!show) {
-            val reason = when {
+        val decisionReason = if (show) {
+            "policy_passed"
+        } else {
+            when {
                 !enabled -> "feature_disabled"
                 !state.attached -> "view_detached"
                 !viewShown -> "view_hidden"
@@ -1025,6 +1308,30 @@ object NotificationMediaAodLyricHooker {
                 !hasContent -> "no_lyrics_or_song_info"
                 else -> "policy_rejected"
             }
+        }
+        AodEnvironmentDiagnostics.log(
+            context = view.context,
+            stage = "classic_decision",
+            modulePrefs = prefs,
+            view = view,
+            runtime = AodRuntimeDiagnosticState(
+                surface = "classic_aod_plugin",
+                fullAod = fullAodActive,
+                aodPanelShown = aodShown,
+                playing = state.playing,
+                pauseStyle = textStyle.pauseStyle,
+                pauseAllowed = pauseAllowed,
+                hasContent = hasContent,
+                showDecision = show,
+                decisionReason = decisionReason,
+                overlayPresent = state.overlay != null,
+                overlayShown = state.overlay?.root?.isShown,
+            ),
+            dedupeKey = diagnosticKey,
+        )
+
+        if (!show) {
+            val reason = decisionReason
             DisplayDiagnosticLogger.log(
                 channel = "AOD_CLASSIC",
                 result = "hidden",
@@ -1084,6 +1391,26 @@ object NotificationMediaAodLyricHooker {
         overlay.root.visibility = View.VISIBLE
         overlay.root.bringToFront()
         positionAodPluginOverlay(overlay)
+        AodEnvironmentDiagnostics.log(
+            context = view.context,
+            stage = "classic_overlay_visible",
+            modulePrefs = prefs,
+            view = overlay.root,
+            runtime = AodRuntimeDiagnosticState(
+                surface = "classic_aod_plugin",
+                fullAod = fullAodActive,
+                aodPanelShown = aodShown,
+                playing = state.playing,
+                pauseStyle = textStyle.pauseStyle,
+                pauseAllowed = pauseAllowed,
+                hasContent = hasContent,
+                showDecision = true,
+                decisionReason = "overlay_visible",
+                overlayPresent = true,
+                overlayShown = overlay.root.isShown,
+            ),
+            dedupeKey = diagnosticKey,
+        )
         DisplayDiagnosticLogger.log(
             channel = "AOD_CLASSIC",
             result = "shown",
@@ -1741,7 +2068,9 @@ object NotificationMediaAodLyricHooker {
 
         val params = createConstraintLayoutParams(player, album) ?: return null
         val playerSize = captureViewSize(player)
-        val backgroundSize = captureViewSize(api.getMediaBackground(holder) ?: player)
+        val backgroundView = api.getMediaBackground(holder) ?: player
+        val backgroundSize = captureViewSize(backgroundView)
+        val backgroundConstraints = BackgroundConstraints.create(backgroundView)
         val headerHeightController = MediaHeaderHeightController.create(player.parent as? View)
         val fullAodHeightId = context.resources.getIdentifier(
             "qs_media_session_height_expanded_fullAod",
@@ -1775,6 +2104,7 @@ object NotificationMediaAodLyricHooker {
             player = player,
             playerSize = playerSize,
             backgroundSize = backgroundSize,
+            backgroundConstraints = backgroundConstraints,
             headerHeightController = headerHeightController,
             drawWakeLock = drawWakeLock
         )
@@ -1885,13 +2215,19 @@ object NotificationMediaAodLyricHooker {
         val density = overlay.root.resources.displayMetrics.density
         val topGap = (LOCK_SCREEN_AOD_TOP_GAP_DP * density).toInt()
         val bottomGap = (LOCK_SCREEN_AOD_BOTTOM_GAP_DP * density).toInt()
-        val nativeCardHeight = overlay.backgroundSize.baseHeight
-        val lyricTop = AodMediaLyricPolicy.centeredLyricTop(
-            nativeCardHeight = nativeCardHeight,
+        val nativeCardHeight = AodMediaLyricPolicy.lockScreenNativeCardHeight(
+            fullAod = overlay.fullAodActive,
+            fullAodBaseHeight = overlay.backgroundSize.baseHeight,
+            playerBaseHeight = overlay.playerSize.baseHeight,
+        )
+        if (overlay.fullAodActive) {
+            overlay.backgroundConstraints?.pinToParentTop(overlay.player)
+        } else {
+            overlay.backgroundConstraints?.restore()
+        }
+        val lyricTop = AodMediaLyricPolicy.lockScreenLyricTop(
             anchorBottom = anchorBottom,
-            lyricHeight = overlay.root.measuredHeight,
-            topGap = topGap,
-            bottomPadding = bottomGap
+            topGap = topGap
         )
         val params = overlay.root.layoutParams as? ViewGroup.MarginLayoutParams
         val targetTopMargin = lyricTop - overlay.album.bottom
@@ -1900,29 +2236,76 @@ object NotificationMediaAodLyricHooker {
             overlay.root.layoutParams = params
         }
         val lyricBottom = lyricTop + overlay.root.measuredHeight
-        val targetHeight = AodMediaLyricPolicy.requiredCardHeight(
+        val targetHeight = AodMediaLyricPolicy.lockScreenTargetCardHeight(
             nativeCardHeight = nativeCardHeight,
             lyricBottom = lyricBottom,
-            bottomPadding = bottomGap
+            bottomPadding = bottomGap,
+        )
+        val backgroundTargetHeight = AodMediaLyricPolicy.lockScreenBackgroundTargetHeight(
+            targetCardHeight = targetHeight,
         )
 
         if (overlay.appliedCardHeight != targetHeight) {
-            resizeViewToHeight(overlay.backgroundSize.view, targetHeight)
-            resizeViewToHeight(overlay.player, targetHeight)
-            overlay.headerHeightController?.applyHeight(targetHeight)
+            animateLockScreenCardHeight(
+                overlay = overlay,
+                targetHeight = targetHeight,
+                backgroundTargetHeight = backgroundTargetHeight,
+            )
             overlay.appliedCardHeight = targetHeight
             HookLogger.i(
                 TAG,
-                "锁屏 AOD 媒体卡片已按歌词居中位置与实测高度调整: " +
+                "锁屏 AOD 媒体卡片高度动画开始: " +
                     "lyricTop=$lyricTop, lyricBottom=$lyricBottom, " +
                     "albumBottom=${overlay.album.bottom}, artistBottom=${overlay.artist.bottom}, " +
                     "topGap=$topGap, bottomGap=$bottomGap, " +
                     "nativeBackgroundHeight=$nativeCardHeight, " +
-                    "targetHeight=$targetHeight"
+                    "targetHeight=$targetHeight, " +
+                    "backgroundTargetHeight=$backgroundTargetHeight"
             )
-            overlay.backgroundSize.view.requestLayout()
-            overlay.player.requestLayout()
-            (overlay.player.parent as? View)?.requestLayout()
+        }
+        val appliedHeight = overlay.appliedCardHeight
+        if (
+            overlay.heightAnimator?.isRunning != true &&
+            (
+                AodMediaLyricPolicy.lockScreenHeightNeedsReassert(
+                    if (overlay.backgroundConstraints?.isPinned == true) {
+                        backgroundTargetHeight
+                    } else {
+                        appliedHeight
+                    },
+                    overlay.backgroundSize.view.layoutParams?.height,
+                ) ||
+                    AodMediaLyricPolicy.lockScreenHeightNeedsReassert(
+                        appliedHeight,
+                        overlay.player.layoutParams?.height,
+                    )
+            )
+        ) {
+            appliedHeight?.let { height ->
+                animateLockScreenCardHeight(
+                    overlay = overlay,
+                    targetHeight = height,
+                    backgroundTargetHeight = AodMediaLyricPolicy
+                        .lockScreenBackgroundTargetHeight(height),
+                )
+            }
+        }
+        if (BuildConfig.DEBUG) {
+            val background = overlay.backgroundSize.view
+            val driftKey = buildString {
+                append("applied=${overlay.appliedCardHeight}, target=$targetHeight")
+                append(", bgTarget=$backgroundTargetHeight")
+                append(", bg=${background.height}/${background.measuredHeight}/${background.layoutParams?.height}")
+                append(", bgTop=${background.top}, bgBottom=${background.bottom}")
+                append(", bgTransY=${background.translationY}")
+                append(", ").append(overlay.backgroundConstraints?.snapshot().orEmpty())
+                append(", player=${overlay.player.height}/${overlay.player.measuredHeight}/${overlay.player.layoutParams?.height}")
+                append(", ").append(overlay.headerHeightController?.actualHeightSnapshot().orEmpty())
+            }
+            if (driftKey != overlay.lastHeightDriftKey) {
+                overlay.lastHeightDriftKey = driftKey
+                HookLogger.i(TAG, "AOD_HEIGHT_VERIFY $driftKey shown=${overlay.root.isShown}")
+            }
         }
     }
 
@@ -1980,7 +2363,18 @@ object NotificationMediaAodLyricHooker {
     }
 
     private fun restorePlayerHeight(overlay: LyricOverlay, fullAod: Boolean = false) {
-        overlay.root.translationY = 0f
+        if (
+            !AodMediaLyricPolicy.lockScreenHeightNeedsRestore(
+                appliedHeight = overlay.appliedCardHeight,
+                heightAnimationActive = overlay.heightAnimator != null,
+            ) && overlay.backgroundConstraints?.isPinned != true
+        ) {
+            return
+        }
+        val animator = overlay.heightAnimator
+        overlay.heightAnimator = null
+        animator?.cancel()
+        overlay.backgroundConstraints?.restore()
         restoreViewSize(overlay.playerSize)
         resizeViewToHeight(
             overlay.backgroundSize.view,
@@ -1995,6 +2389,15 @@ object NotificationMediaAodLyricHooker {
         overlay.backgroundSize.view.requestLayout()
         overlay.player.requestLayout()
         (overlay.player.parent as? View)?.requestLayout()
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                TAG,
+                "AOD_HEIGHT_RESTORE fullAod=$fullAod, " +
+                    "bgH=${overlay.backgroundSize.view.height}, " +
+                    "playerH=${overlay.player.height}, " +
+                    overlay.headerHeightController?.actualHeightSnapshot().orEmpty()
+            )
+        }
     }
 
     private fun resizeViewToHeight(view: View, targetHeight: Int) {
@@ -2004,6 +2407,65 @@ object NotificationMediaAodLyricHooker {
             view.layoutParams = params
         }
     }
+
+    private fun animateLockScreenCardHeight(
+        overlay: LyricOverlay,
+        targetHeight: Int,
+        backgroundTargetHeight: Int = targetHeight,
+    ) {
+        val previousAnimator = overlay.heightAnimator
+        overlay.heightAnimator = null
+        previousAnimator?.cancel()
+        val background = overlay.backgroundSize.view
+        val player = overlay.player
+        val headerController = overlay.headerHeightController
+
+        val startBackgroundHeight = background.height.takeIf { it > 0 }
+            ?: (background.layoutParams?.height)?.takeIf { it >= 0 }
+            ?: overlay.backgroundSize.baseHeight
+        val startPlayerHeight = player.height.takeIf { it > 0 }
+            ?: (player.layoutParams?.height)?.takeIf { it >= 0 }
+            ?: overlay.playerSize.baseHeight
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = LOCK_SCREEN_AOD_HEIGHT_ANIMATION_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                val fraction = animation.animatedValue as Float
+                resizeViewToHeight(
+                    background,
+                    lerp(startBackgroundHeight, backgroundTargetHeight, fraction),
+                )
+                resizeViewToHeight(
+                    player,
+                    lerp(startPlayerHeight, targetHeight, fraction),
+                )
+                background.requestLayout()
+                player.requestLayout()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (overlay.heightAnimator !== animation) return
+                    overlay.heightAnimator = null
+                    resizeViewToHeight(background, backgroundTargetHeight)
+                    resizeViewToHeight(player, targetHeight)
+                    headerController?.applyFinalHeight(targetHeight)
+                    background.requestLayout()
+                    player.requestLayout()
+                    (player.parent as? View)?.requestLayout()
+                    HookLogger.i(
+                        TAG,
+                        "锁屏 AOD 媒体卡片高度动画完成: target=$targetHeight, " +
+                            "backgroundTarget=$backgroundTargetHeight",
+                    )
+                }
+            })
+        }
+        overlay.heightAnimator = animator
+        animator.start()
+    }
+
+    private fun lerp(start: Int, end: Int, fraction: Float): Int =
+        (start + (end - start) * fraction).roundToInt()
 
     private fun restoreViewSize(size: ViewSizeSnapshot) {
         val params = size.view.layoutParams
@@ -2246,7 +2708,8 @@ object NotificationMediaAodLyricHooker {
             centerNonDuetSong = style.centerNonDuetSong &&
                 LyriconDataBridge.currentSong?.lyrics.orEmpty().none { it.isAlignedRight },
             centerGroupVocals = style.centerGroupVocals,
-            translationDisplay = style.translationDisplay,
+            translationDisplayMode = style.translationDisplayMode,
+            translationFallback = style.translationFallback,
         )
     }
 
@@ -2341,10 +2804,15 @@ object NotificationMediaAodLyricHooker {
         pauseStyle = readAodPauseStyle(
             RootConstants.KEY_HOOK_LOCK_SCREEN_AOD_PAUSE_STYLE
         ),
-        translationDisplay = prefs?.getBoolean(
-            RootConstants.KEY_HOOK_LOCK_SCREEN_AOD_TRANSLATION_DISPLAY,
-            RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY,
-        ) ?: RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY,
+        translationDisplayMode = AodMediaLyricPolicy.readTranslationPronunciationMode(
+            prefs = prefs,
+            key = RootConstants.KEY_HOOK_LOCK_SCREEN_AOD_TRANSLATION_DISPLAY,
+            defaultValue = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY_MODE,
+        ),
+        translationFallback = prefs?.getBoolean(
+            RootConstants.KEY_HOOK_LOCK_SCREEN_AOD_TRANSLATION_FALLBACK,
+            RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK,
+        ) ?: RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK,
         swapTranslation = prefs?.getBoolean(
             RootConstants.KEY_HOOK_LOCK_SCREEN_AOD_SWAP_TRANSLATION,
             RootConstants.DEFAULT_HOOK_AOD_SWAP_TRANSLATION,
@@ -2399,10 +2867,15 @@ object NotificationMediaAodLyricHooker {
         pauseStyle = readAodPauseStyle(
             RootConstants.KEY_HOOK_CLASSIC_AOD_PAUSE_STYLE
         ),
-        translationDisplay = prefs?.getBoolean(
-            RootConstants.KEY_HOOK_CLASSIC_AOD_TRANSLATION_DISPLAY,
-            RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY,
-        ) ?: RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY,
+        translationDisplayMode = AodMediaLyricPolicy.readTranslationPronunciationMode(
+            prefs = prefs,
+            key = RootConstants.KEY_HOOK_CLASSIC_AOD_TRANSLATION_DISPLAY,
+            defaultValue = RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY_MODE,
+        ),
+        translationFallback = prefs?.getBoolean(
+            RootConstants.KEY_HOOK_CLASSIC_AOD_TRANSLATION_FALLBACK,
+            RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK,
+        ) ?: RootConstants.DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK,
         swapTranslation = prefs?.getBoolean(
             RootConstants.KEY_HOOK_CLASSIC_AOD_SWAP_TRANSLATION,
             RootConstants.DEFAULT_HOOK_AOD_SWAP_TRANSLATION,
@@ -2927,6 +3400,75 @@ object NotificationMediaAodLyricHooker {
         var baseHeight: Int
     )
 
+    private class BackgroundConstraints private constructor(
+        private val view: View,
+        private val originalTopMargin: Int,
+        private val originalBottomMargin: Int,
+        private val verticalBiasField: Field?,
+        private val originalVerticalBias: Float?,
+    ) {
+        var isPinned: Boolean = false
+            private set
+        fun pinToParentTop(player: View): Boolean {
+            if (isPinned) return true
+            val params = view.layoutParams as? ViewGroup.MarginLayoutParams ?: return false
+            val parent = view.parent as? View ?: return false
+            if (parent !== player) return false
+            verticalBiasField?.setFloat(params, 0f)
+            params.topMargin = 0
+            params.bottomMargin = 0
+            view.layoutParams = params
+            isPinned = true
+            if (BuildConfig.DEBUG) {
+                HookLogger.i(
+                    TAG,
+                    "full AOD mediaBg 已锚定父容器顶部: " +
+                        "backgroundTop=${view.top}, backgroundBottom=${view.bottom}, " +
+                        "backgroundTransY=${view.translationY}",
+                )
+            }
+            return true
+        }
+
+        fun restore() {
+            if (!isPinned) return
+            val params = view.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+            verticalBiasField?.let { field ->
+                originalVerticalBias?.let { value -> field.setFloat(params, value) }
+            }
+            params.topMargin = originalTopMargin
+            params.bottomMargin = originalBottomMargin
+            view.layoutParams = params
+            isPinned = false
+        }
+
+        fun snapshot(): String = runCatching {
+            val params = view.layoutParams as? ViewGroup.MarginLayoutParams
+                ?: return@runCatching "bgConstraintsUnavailable"
+            "bgPinned=$isPinned, " +
+                "bgTopMargin=${params.topMargin}, bgBottomMargin=${params.bottomMargin}, " +
+                "bgVerticalBias=${verticalBiasField?.getFloat(params)}"
+        }.getOrDefault("bgConstraintsUnavailable")
+
+        companion object {
+            fun create(view: View): BackgroundConstraints? {
+                if (view.parent == null) return null
+                val params = view.layoutParams as? ViewGroup.MarginLayoutParams ?: return null
+                val biasField = runCatching {
+                    params.javaClass.getField("verticalBias").apply { isAccessible = true }
+                }.getOrNull() ?: return null
+                val bias = runCatching { biasField.getFloat(params) }.getOrNull() ?: return null
+                return BackgroundConstraints(
+                    view = view,
+                    originalTopMargin = params.topMargin,
+                    originalBottomMargin = params.bottomMargin,
+                    verticalBiasField = biasField,
+                    originalVerticalBias = bias,
+                )
+            }
+        }
+    }
+
     private class LyricOverlay(
         val root: LinearLayout,
         val main: TextView,
@@ -2943,6 +3485,7 @@ object NotificationMediaAodLyricHooker {
         val player: ViewGroup,
         val playerSize: ViewSizeSnapshot,
         val backgroundSize: ViewSizeSnapshot,
+        val backgroundConstraints: BackgroundConstraints?,
         val headerHeightController: MediaHeaderHeightController?,
         val drawWakeLock: PowerManager.WakeLock,
         var appliedCardHeight: Int? = null,
@@ -2952,6 +3495,9 @@ object NotificationMediaAodLyricHooker {
         var appliedOverlappingAlignment: AodLyricAlignment? = null,
         var appliedOverlappingBackingAlignment: AodLyricAlignment? = null,
         var appliedNextAlignment: AodLyricAlignment? = null,
+        var lastHeightDriftKey: String? = null,
+        var fullAodActive: Boolean = false,
+        var heightAnimator: ValueAnimator? = null,
     )
 
     private class MediaHeaderHeightController private constructor(
@@ -2962,13 +3508,17 @@ object NotificationMediaAodLyricHooker {
         val originalHeight: Int,
         private val originalMinimumHeight: Int
     ) {
-        fun applyHeight(targetHeight: Int) {
-            if (targetHeight <= 0) return
-            lockScreenHeightField.setInt(view, targetHeight)
-            setAnimateHeightMethod.invoke(view, targetHeight)
-            setActualHeightMethod.invoke(view, targetHeight, false)
-            if (view.minimumHeight != targetHeight) {
-                view.minimumHeight = targetHeight
+        fun currentHeight(): Int = runCatching {
+            view.height.takeIf { it > 0 }
+                ?: lockScreenHeightField.getInt(view)
+        }.getOrDefault(0)
+
+        fun applyFinalHeight(height: Int) {
+            if (height <= 0) return
+            lockScreenHeightField.setInt(view, height)
+            setActualHeightMethod.invoke(view, height, false)
+            if (view.minimumHeight != height) {
+                view.minimumHeight = height
             }
             view.requestLayout()
             (view.parent as? View)?.requestLayout()
@@ -2984,6 +3534,13 @@ object NotificationMediaAodLyricHooker {
             view.requestLayout()
             (view.parent as? View)?.requestLayout()
         }
+
+        fun actualHeightSnapshot(): String = runCatching {
+            "headerH=${view.height}, headerM=${view.measuredHeight}, " +
+                "headerField=${lockScreenHeightField.getInt(view)}, " +
+                "headerLP=${view.layoutParams?.height}, headerMin=${view.minimumHeight}, " +
+                "headerTop=${view.top}, headerTransY=${view.translationY}"
+        }.getOrDefault("headerUnavailable")
 
         companion object {
             fun create(view: View?): MediaHeaderHeightController? {

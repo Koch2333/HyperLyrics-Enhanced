@@ -13,7 +13,13 @@ import android.content.Context
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.os.SystemClock
 import android.util.Log
+import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.common.UIConstants
+import com.juren233.hyperlyricsenhanced.common.dexkit.DexMethodWatchdog
+import com.juren233.hyperlyricsenhanced.common.dexkit.DexResolutionSource
+import com.juren233.hyperlyricsenhanced.common.dexkit.DexWatchdogEvent
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import org.luckypray.dexkit.DexKitBridge
@@ -22,8 +28,93 @@ import org.luckypray.dexkit.query.enums.StringMatchType
 import org.luckypray.dexkit.query.matchers.MethodMatcher
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+internal object OfficialProviderDexMethodSemanticFilter {
+    fun accepts(
+        invokedMethodDescriptors: Collection<String>,
+        forbiddenInvokedMethodDescriptors: Collection<String>,
+    ): Boolean {
+        if (forbiddenInvokedMethodDescriptors.isEmpty()) return true
+        val forbidden = forbiddenInvokedMethodDescriptors.toHashSet()
+        return invokedMethodDescriptors.none(forbidden::contains)
+    }
+}
+
+internal class OfficialProviderDexRepairGate {
+    private val started = AtomicBoolean(false)
+
+    fun tryStart(): Boolean = started.compareAndSet(false, true)
+}
+
+internal class OfficialProviderDexHookActivation {
+    private val generation = AtomicLong(0L)
+
+    fun current(): Long = generation.get()
+
+    fun replace(): Long = generation.incrementAndGet()
+
+    fun isActive(candidate: Long): Boolean = generation.get() == candidate
+}
+
+/**
+ * Tracks whether a Provider has already received Metadata for each MediaSession.
+ *
+ * Some players create and populate their MediaSession before the Provider Pack finishes
+ * installing its hooks. The first observed callback can therefore be setPlaybackState(), while
+ * the current Metadata is already available through MediaSession.controller. Missing snapshots
+ * remain retryable; a delivered snapshot or a real setMetadata() callback suppresses duplicates.
+ */
+internal class OfficialProviderMediaSessionMetadataGate {
+    enum class SnapshotDecision {
+        DELIVER,
+        MISSING_FIRST,
+        MISSING_REPEATED,
+        ALREADY_DELIVERED,
+        NO_SESSION,
+    }
+
+    private val deliveredSessions = WeakHashMap<Any, Unit>()
+    private val missingSessions = WeakHashMap<Any, Unit>()
+
+    @Synchronized
+    fun recordExplicit(session: Any?) {
+        session ?: return
+        deliveredSessions[session] = Unit
+        missingSessions.remove(session)
+    }
+
+    @Synchronized
+    fun release(session: Any?) {
+        session ?: return
+        deliveredSessions.remove(session)
+    }
+
+    @Synchronized
+    fun claimSnapshot(session: Any?, hasMetadata: Boolean): SnapshotDecision {
+        session ?: return SnapshotDecision.NO_SESSION
+        if (deliveredSessions.containsKey(session)) {
+            return SnapshotDecision.ALREADY_DELIVERED
+        }
+        if (!hasMetadata) {
+            return if (missingSessions.put(session, Unit) == null) {
+                SnapshotDecision.MISSING_FIRST
+            } else {
+                SnapshotDecision.MISSING_REPEATED
+            }
+        }
+        deliveredSessions[session] = Unit
+        missingSessions.remove(session)
+        return SnapshotDecision.DELIVER
+    }
+}
 
 /**
  * Static host for official Provider Packs.
@@ -38,16 +129,96 @@ internal class OfficialProviderHookHost(
     override val processName: String,
 ) : OfficialProviderHost {
     private val tag = "OfficialProviderHookHost"
-    private val dexHookTasks = ConcurrentHashMap.newKeySet<String>()
+    private val dexRegistrationLock = Any()
+    private val dexHookTasks = ConcurrentHashMap<String, DexHookRegistration>()
+    private val dexHookByQueryKey = ConcurrentHashMap<String, DexHookRegistration>()
+    private val dexBatchTasks = ConcurrentHashMap<String, DexBatchRegistration>()
+    private val dexBatchByQueryKey = ConcurrentHashMap<String, DexBatchRegistration>()
+    private val dexWatchdog = if (BuildConfig.DEBUG) {
+        DexMethodWatchdog { event -> logDexWatchdogEvent(event) }
+    } else {
+        null
+    }
+    private val dexWatchdogTimeoutScheduler: ScheduledExecutorService? = if (BuildConfig.DEBUG) {
+        Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "HLE-Provider-DexWatchdog").apply { isDaemon = true }
+        }
+    } else {
+        null
+    }
+
+    private val handledApplications = Collections.synchronizedSet(
+        Collections.newSetFromMap(WeakHashMap<Application, Boolean>()),
+    )
+    @Volatile
+    private var registeredApplicationCallback: OfficialProviderApplicationCallback? = null
+
+    private fun dispatchApplicationCreated(
+        application: Application,
+        callback: OfficialProviderApplicationCallback,
+        source: String,
+    ) {
+        if (application.packageName != packageName) return
+        if (!handledApplications.add(application)) return
+        runCatching { callback.onApplicationCreated(application) }
+            .onSuccess {
+                module.log(
+                    Log.INFO,
+                    tag,
+                    "官方 Provider 生命周期回调成功: package=$packageName source=$source app=${application::class.java.name}",
+                )
+            }
+            .onFailure { error ->
+                handledApplications.remove(application)
+                module.log(
+                    Log.ERROR,
+                    tag,
+                    "官方 Provider 生命周期回调失败: package=$packageName source=$source error=${error.message}",
+                    error,
+                )
+            }
+    }
+
+    private fun findCurrentApplication(): Application? = runCatching {
+        val activityThreadClass = Class.forName(
+            "android.app.ActivityThread",
+            false,
+            targetClassLoader,
+        )
+        val currentApplicationMethod = activityThreadClass.getDeclaredMethod("currentApplication")
+        currentApplicationMethod.invoke(null) as? Application
+    }.getOrNull()
+
+    fun ensureApplicationDispatched(source: String = "lazy_fallback") {
+        if (handledApplications.isNotEmpty()) return
+        val callback = registeredApplicationCallback ?: return
+        val app = findCurrentApplication() ?: return
+        dispatchApplicationCreated(app, callback, source)
+    }
 
     override fun hookApplication(callback: OfficialProviderApplicationCallback) {
-        val method = Instrumentation::class.java.getDeclaredMethod(
-            "callApplicationOnCreate",
-            Application::class.java,
-        )
-        module.hook(method).intercept(
-            ApplicationCreatedHooker(module, packageName, callback),
-        )
+        registeredApplicationCallback = callback
+        findCurrentApplication()?.let { app ->
+            dispatchApplicationCreated(app, callback, "current_application")
+        }
+
+        runCatching {
+            val method = Instrumentation::class.java.getDeclaredMethod(
+                "callApplicationOnCreate",
+                Application::class.java,
+            )
+            module.hook(method).intercept(
+                ApplicationCreatedHooker(this, callback),
+            )
+        }
+
+        runCatching {
+            val method = Application::class.java.getDeclaredMethod("onCreate")
+            module.hook(method).intercept(
+                ApplicationOnCreateHooker(this, callback),
+            )
+        }
+
         module.log(
             Log.INFO,
             tag,
@@ -55,10 +226,14 @@ internal class OfficialProviderHookHost(
         )
     }
 
+    override fun getBooleanPreference(key: String, default: Boolean): Boolean =
+        module.getRemotePreferences(UIConstants.PREF_NAME).getBoolean(key, default)
+
     override fun hookMediaSession(
         playbackStateCallback: OfficialProviderPlaybackStateCallback,
         metadataCallback: OfficialProviderMetadataCallback,
     ) {
+        val metadataGate = OfficialProviderMediaSessionMetadataGate()
         val mediaSessionClass = Class.forName(
             MediaSession::class.java.name,
             false,
@@ -69,7 +244,15 @@ internal class OfficialProviderHookHost(
             PlaybackState::class.java,
         )
         module.hook(setPlaybackState).intercept(
-            PlaybackStateHooker(module, packageName, playbackStateCallback),
+            PlaybackStateHooker(
+                host = this,
+                module = module,
+                packageName = packageName,
+                processName = processName,
+                callback = playbackStateCallback,
+                metadataCallback = metadataCallback,
+                metadataGate = metadataGate,
+            ),
         )
 
         val setMetadata = mediaSessionClass.getDeclaredMethod(
@@ -77,7 +260,13 @@ internal class OfficialProviderHookHost(
             MediaMetadata::class.java,
         )
         module.hook(setMetadata).intercept(
-            MetadataHooker(module, packageName, metadataCallback),
+            MetadataHooker(
+                host = this,
+                module = module,
+                packageName = packageName,
+                callback = metadataCallback,
+                metadataGate = metadataGate,
+            ),
         )
         module.log(
             Log.INFO,
@@ -91,6 +280,44 @@ internal class OfficialProviderHookHost(
         callback: OfficialProviderMethodCallback,
     ) {
         installAfterMethod(target, callback)
+    }
+
+    override fun hookMethodResult(
+        target: OfficialProviderMethodTarget,
+        callback: OfficialProviderMethodResultCallback,
+    ) {
+        require(target.className.isNotBlank()) { "Provider 结果 Hook className 不能为空" }
+        require(target.methodName.isNotBlank()) { "Provider 结果 Hook methodName 不能为空" }
+        val method = resolveMethod(target)
+        val descriptor = describe(target)
+        module.hook(method).intercept(
+            MethodResultHooker(
+                module = module,
+                descriptor = descriptor,
+                callback = callback,
+            ),
+        )
+        module.log(Log.INFO, tag, "官方 Provider 方法结果 Hook 已安装: target=$descriptor")
+    }
+
+    override fun hookAfterConstructor(
+        target: OfficialProviderConstructorTarget,
+        callback: OfficialProviderConstructorCallback,
+    ) {
+        require(target.className.isNotBlank()) { "Provider 构造 Hook className 不能为空" }
+        require(target.parameterTypeNames.all(String::isNotBlank)) {
+            "Provider 构造 Hook 参数类型不能为空"
+        }
+        val constructor = resolveConstructor(target)
+        val descriptor = describe(target)
+        module.hook(constructor).intercept(
+            AfterConstructorHooker(
+                module = module,
+                descriptor = descriptor,
+                callback = callback,
+            ),
+        )
+        module.log(Log.INFO, tag, "官方 Provider 构造 Hook 已安装: target=$descriptor")
     }
 
     override fun hookAfterDexMethod(
@@ -111,53 +338,22 @@ internal class OfficialProviderHookHost(
             lastUpdateTime = packageInfo.lastUpdateTime,
             query = query,
         )
-        if (!dexHookTasks.add(cacheKey)) return
-
-        Thread(
-            {
-                DexKitSession(application).use { session ->
-                    runCatching {
-                    val materializedQuery = materializeQuery(query, emptyMap())
-                    val target = resolveDexMethod(
-                        application,
-                        cacheKey,
-                        materializedQuery,
-                        session,
-                    )
-                    runCatching { installAfterMethod(target, callback) }
-                        .getOrElse { firstError ->
-                            invalidateDexMethodCache(application, cacheKey)
-                            module.log(
-                                Log.WARN,
-                                tag,
-                                "官方 Provider Hook 安装失败，清除缓存并重新查询: " +
-                                    "package=$packageName process=$processName key=${query.cacheKey}",
-                                firstError,
-                            )
-                            val repairedTarget = resolveDexMethod(
-                                application = application,
-                                cacheKey = cacheKey,
-                                query = materializedQuery.copy(preferredTarget = null),
-                                session = session,
-                            )
-                            installAfterMethod(repairedTarget, callback)
-                        }
-                }.onFailure { error ->
-                    module.log(
-                        Log.ERROR,
-                        tag,
-                        "官方 Provider DexKit Hook 失败: package=$packageName " +
-                            "process=$processName key=${query.cacheKey}",
-                        error,
-                    )
-                    }
-                }
-            },
-            "HLE-Provider-DexKit",
-        ).apply {
-            isDaemon = true
-            start()
+        val registration = synchronized(dexRegistrationLock) {
+            if (dexHookTasks.containsKey(cacheKey)) return
+            require(!dexBatchByQueryKey.containsKey(query.cacheKey)) {
+                "Provider DexKit 查询 cacheKey 已被批量解析注册: ${query.cacheKey}"
+            }
+            DexHookRegistration(
+                application = application,
+                query = query,
+                callback = callback,
+                runtimeCacheKey = cacheKey,
+            ).also { created ->
+                dexHookTasks[cacheKey] = created
+                dexHookByQueryKey[query.cacheKey] = created
+            }
         }
+        startDexHookResolution(registration, forceFresh = false, reason = "initial")
     }
 
     override fun resolveDexMethods(
@@ -170,6 +366,9 @@ internal class OfficialProviderHookHost(
         }
         require(queries.isNotEmpty()) { "Provider DexKit 查询列表不能为空" }
         queries.forEach(OfficialProviderDexMethodQueryValidator::validate)
+        require(queries.map { it.cacheKey }.distinct().size == queries.size) {
+            "Provider DexKit 批量查询 cacheKey 不能重复"
+        }
         val packageInfo = application.packageManager.getPackageInfo(packageName, 0)
         val taskKey = queries.joinToString("|") { query ->
             OfficialProviderDexMethodCacheCodec.cacheKey(
@@ -180,45 +379,73 @@ internal class OfficialProviderHookHost(
                 query = query,
             )
         }
-        if (!dexHookTasks.add(taskKey)) return
-
-        Thread(
-            {
-                DexKitSession(application).use { session ->
-                    runCatching {
-                    val resolvedByKey = LinkedHashMap<String, OfficialProviderMethodTarget>()
-                    queries.map { rawQuery ->
-                        val query = materializeQuery(rawQuery, resolvedByKey)
-                        val cacheKey = OfficialProviderDexMethodCacheCodec.cacheKey(
-                            packageName = packageName,
-                            processName = processName,
-                            versionCode = packageInfo.longVersionCode,
-                            lastUpdateTime = packageInfo.lastUpdateTime,
-                            query = query,
-                        )
-                        resolveDexMethod(application, cacheKey, query, session).also { target ->
-                            check(resolvedByKey.put(rawQuery.cacheKey, target) == null) {
-                                "Provider DexKit 查询 cacheKey 重复: ${rawQuery.cacheKey}"
-                            }
-                        }
-                    }
-                }.onSuccess(callback::onMethodsResolved)
-                    .onFailure { error ->
-                        module.log(
-                            Log.ERROR,
-                            tag,
-                            "官方 Provider DexKit 批量解析失败: package=$packageName " +
-                                "process=$processName keys=${queries.joinToString { it.cacheKey }}",
-                            error,
-                        )
-                    }
-                }
-            },
-            "HLE-Provider-DexKit",
-        ).apply {
-            isDaemon = true
-            start()
+        val registration = synchronized(dexRegistrationLock) {
+            if (dexBatchTasks.containsKey(taskKey)) return
+            val conflict = queries.firstOrNull { query ->
+                dexBatchByQueryKey.containsKey(query.cacheKey) ||
+                    dexHookByQueryKey.containsKey(query.cacheKey)
+            }
+            require(conflict == null) {
+                "Provider DexKit 查询 cacheKey 已被其他批次注册: ${conflict?.cacheKey}"
+            }
+            DexBatchRegistration(
+                application = application,
+                queries = queries.toList(),
+                callback = callback,
+                versionCode = packageInfo.longVersionCode,
+                lastUpdateTime = packageInfo.lastUpdateTime,
+            ).also { created ->
+                dexBatchTasks[taskKey] = created
+                queries.forEach { query -> dexBatchByQueryKey[query.cacheKey] = created }
+            }
         }
+        startDexBatchResolution(registration, forceFresh = false, reason = "initial")
+    }
+
+    override fun reportDexMethodValidation(
+        cacheKey: String,
+        valid: Boolean,
+        detail: String?,
+    ) {
+        if (cacheKey.isBlank()) return
+        val safeDetail = detail?.take(MAX_WATCHDOG_DETAIL_LENGTH)
+        dexWatchdog?.validation(cacheKey, valid, safeDetail)
+        if (!valid) {
+            val batch = dexBatchByQueryKey[cacheKey]
+            if (batch != null) {
+                requestDexBatchRepair(
+                    registration = batch,
+                    reason = "runtime_invalid:$cacheKey",
+                    detail = safeDetail,
+                )
+            } else {
+                dexHookByQueryKey[cacheKey]?.let { hook ->
+                    requestDexHookRepair(
+                        registration = hook,
+                        reason = "runtime_invalid:$cacheKey",
+                        detail = safeDetail,
+                    )
+                }
+            }
+        }
+    }
+
+    override fun reportDiagnostic(tag: String, message: String) {
+        if (!BuildConfig.DEBUG) return
+        val safeTag = tag
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .take(MAX_PROVIDER_DIAGNOSTIC_TAG_LENGTH)
+            .ifBlank { "Provider" }
+        val safeMessage = message
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .take(MAX_PROVIDER_DIAGNOSTIC_MESSAGE_LENGTH)
+        module.log(
+            Log.INFO,
+            "OfficialProvider/$safeTag",
+            safeMessage,
+        )
     }
 
     private fun resolveDexMethod(
@@ -226,14 +453,20 @@ internal class OfficialProviderHookHost(
         cacheKey: String,
         query: OfficialProviderDexMethodQuery,
         session: DexKitSession,
+        forceFresh: Boolean = false,
     ): OfficialProviderMethodTarget {
         val preferences = application.getSharedPreferences(
             DEX_METHOD_CACHE_PREFERENCES,
             Context.MODE_PRIVATE,
         )
-        val cachedTarget = OfficialProviderDexMethodCacheCodec.decode(
-            preferences.getString(cacheKey, null),
-        )?.takeIf { OfficialProviderDexMethodCacheCodec.matches(it, query) }
+        if (forceFresh) preferences.edit().remove(cacheKey).apply()
+        val cachedTarget = if (forceFresh) {
+            null
+        } else {
+            OfficialProviderDexMethodCacheCodec.decode(
+                preferences.getString(cacheKey, null),
+            )?.takeIf { OfficialProviderDexMethodCacheCodec.matches(it, query) }
+        }
 
         if (cachedTarget != null) {
             val cachedResolution = runCatching { resolveMethod(cachedTarget) }
@@ -244,6 +477,12 @@ internal class OfficialProviderHookHost(
                     tag,
                     "官方 Provider DexKit 缓存命中: package=$packageName " +
                         "process=$processName target=${describe(cachedTarget)}",
+                )
+                recordDexWatchdogResolution(
+                    query = query,
+                    source = DexResolutionSource.CACHE,
+                    cacheWritten = false,
+                    target = cachedTarget,
                 )
                 return cachedTarget
             }
@@ -260,6 +499,7 @@ internal class OfficialProviderHookHost(
         }
 
         query.preferredTarget
+            ?.takeIf { !forceFresh }
             ?.takeIf { OfficialProviderDexMethodCacheCodec.matches(it, query) }
             ?.let { preferredTarget ->
                 val preferredResolution = runCatching { resolveMethod(preferredTarget) }
@@ -276,6 +516,12 @@ internal class OfficialProviderHookHost(
                         tag,
                         "官方 Provider 首选目标命中并缓存: package=$packageName " +
                             "process=$processName target=${describe(preferredTarget)}",
+                    )
+                    recordDexWatchdogResolution(
+                        query = query,
+                        source = DexResolutionSource.PREFERRED_TARGET,
+                        cacheWritten = true,
+                        target = preferredTarget,
                     )
                     return preferredTarget
                 }
@@ -308,6 +554,9 @@ internal class OfficialProviderHookHost(
                     query.requiredInvokedMethodNames.forEach { methodName ->
                         addInvoke(MethodMatcher().name(methodName))
                     }
+                    query.requiredCallerMethodNames.forEach { methodName ->
+                        addCaller(MethodMatcher().name(methodName))
+                    }
                     query.parameterTypeNames?.let(::paramTypes)
                     query.returnTypeName?.let(::returnType)
                     query.returnTypeNamePrefix?.let { prefix ->
@@ -315,7 +564,28 @@ internal class OfficialProviderHookHost(
                     }
                 }
             }
-            val matches = bridge.findMethod(finder)
+            val found = bridge.findMethod(finder)
+            val semanticMatches = found.filter { method ->
+                if (query.forbiddenInvokedMethodDescriptors.isEmpty()) {
+                    true
+                } else {
+                    OfficialProviderDexMethodSemanticFilter.accepts(
+                        invokedMethodDescriptors = method.invokes.map { it.descriptor },
+                        forbiddenInvokedMethodDescriptors =
+                            query.forbiddenInvokedMethodDescriptors,
+                    )
+                }
+            }
+            if (semanticMatches.size != found.size) {
+                module.log(
+                    Log.INFO,
+                    tag,
+                    "官方 Provider DexKit 调用负约束过滤: package=$packageName " +
+                        "process=$processName key=${query.cacheKey} " +
+                        "before=${found.size} after=${semanticMatches.size}",
+                )
+            }
+            val matches = semanticMatches
                 .map { method ->
                     OfficialProviderMethodTarget(
                         className = method.className,
@@ -342,7 +612,220 @@ internal class OfficialProviderHookHost(
             "官方 Provider DexKit 查询并校验成功: package=$packageName " +
                 "process=$processName elapsedMs=$elapsedMs target=${describe(target)}",
         )
+        recordDexWatchdogResolution(
+            query = query,
+            source = DexResolutionSource.DEXKIT,
+            cacheWritten = true,
+            target = target,
+        )
         return target
+    }
+
+    private fun startDexBatchResolution(
+        registration: DexBatchRegistration,
+        forceFresh: Boolean,
+        reason: String,
+    ) {
+        if (!registration.resolutionRunning.compareAndSet(false, true)) return
+        Thread(
+            {
+                val result = DexKitSession(registration.application).use { session ->
+                    runCatching {
+                        val resolvedByKey = LinkedHashMap<String, OfficialProviderMethodTarget>()
+                        registration.queries.map { rawQuery ->
+                            val query = materializeQuery(rawQuery, resolvedByKey)
+                            val cacheKey = OfficialProviderDexMethodCacheCodec.cacheKey(
+                                packageName = packageName,
+                                processName = processName,
+                                versionCode = registration.versionCode,
+                                lastUpdateTime = registration.lastUpdateTime,
+                                query = query,
+                            )
+                            registration.runtimeCacheKeys.add(cacheKey)
+                            registerDexWatchdog(rawQuery.cacheKey, cacheKey)
+                            resolveDexMethod(
+                                application = registration.application,
+                                cacheKey = cacheKey,
+                                query = query,
+                                session = session,
+                                forceFresh = forceFresh,
+                            ).also { target ->
+                                check(resolvedByKey.put(rawQuery.cacheKey, target) == null) {
+                                    "Provider DexKit 查询 cacheKey 重复: ${rawQuery.cacheKey}"
+                                }
+                            }
+                        }
+                    }
+                }
+                registration.resolutionRunning.set(false)
+                result.onSuccess { targets ->
+                    if (forceFresh) {
+                        module.log(
+                            Log.INFO,
+                            tag,
+                            "官方 Provider DexKit 批量自修复成功: package=$packageName " +
+                                "process=$processName reason=$reason " +
+                                "keys=${registration.queries.joinToString { it.cacheKey }}",
+                        )
+                    }
+                    runCatching { registration.callback.onMethodsResolved(targets) }
+                        .onFailure { error ->
+                            module.log(
+                                Log.ERROR,
+                                tag,
+                                "官方 Provider DexKit 批量回调失败: package=$packageName " +
+                                    "process=$processName reason=$reason",
+                                error,
+                            )
+                        }
+                }.onFailure { error ->
+                    module.log(
+                        Log.ERROR,
+                        tag,
+                        "官方 Provider DexKit 批量解析失败: package=$packageName " +
+                            "process=$processName repair=$forceFresh reason=$reason " +
+                            "keys=${registration.queries.joinToString { it.cacheKey }}",
+                        error,
+                    )
+                    if (!forceFresh) {
+                        requestDexBatchRepair(
+                            registration = registration,
+                            reason = "initial_failure",
+                            detail = error.message,
+                        )
+                    }
+                }
+            },
+            "HLE-Provider-DexKit",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun startDexHookResolution(
+        registration: DexHookRegistration,
+        forceFresh: Boolean,
+        reason: String,
+    ) {
+        if (!registration.resolutionRunning.compareAndSet(false, true)) return
+        Thread(
+            {
+                val generation = registration.activation.current()
+                val result = DexKitSession(registration.application).use { session ->
+                    runCatching {
+                        val materializedQuery = materializeQuery(registration.query, emptyMap())
+                        registerDexWatchdog(
+                            registration.query.cacheKey,
+                            registration.runtimeCacheKey,
+                        )
+                        val target = resolveDexMethod(
+                            application = registration.application,
+                            cacheKey = registration.runtimeCacheKey,
+                            query = materializedQuery,
+                            session = session,
+                            forceFresh = forceFresh,
+                        )
+                        installAfterMethod(
+                            target = target,
+                            callback = OfficialProviderMethodCallback { receiver, arguments ->
+                                if (registration.activation.isActive(generation)) {
+                                    registration.callback.onMethodCalled(receiver, arguments)
+                                }
+                            },
+                            watchdogCacheKey = registration.query.cacheKey,
+                        )
+                        target
+                    }
+                }
+                registration.resolutionRunning.set(false)
+                result.onSuccess { target ->
+                    if (forceFresh) {
+                        module.log(
+                            Log.INFO,
+                            tag,
+                            "官方 Provider DexKit 单方法自修复成功: package=$packageName " +
+                                "process=$processName reason=$reason " +
+                                "key=${registration.query.cacheKey} target=${describe(target)}",
+                        )
+                    }
+                }.onFailure { error ->
+                    module.log(
+                        Log.ERROR,
+                        tag,
+                        "官方 Provider DexKit Hook 失败: package=$packageName " +
+                            "process=$processName repair=$forceFresh reason=$reason " +
+                            "key=${registration.query.cacheKey}",
+                        error,
+                    )
+                    if (!forceFresh) {
+                        requestDexHookRepair(
+                            registration = registration,
+                            reason = "initial_failure",
+                            detail = error.message,
+                        )
+                    }
+                }
+                if (!forceFresh && registration.repairRequested.get()) {
+                    startDexHookResolution(
+                        registration = registration,
+                        forceFresh = true,
+                        reason = registration.repairReason,
+                    )
+                }
+            },
+            "HLE-Provider-DexKit",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun requestDexHookRepair(
+        registration: DexHookRegistration,
+        reason: String,
+        detail: String?,
+    ) {
+        if (!registration.repairGate.tryStart()) return
+        registration.activation.replace()
+        registration.repairReason = reason
+        registration.repairRequested.set(true)
+        invalidateDexMethodCache(registration.application, registration.runtimeCacheKey)
+        val safeDetail = detail
+            ?.replace('\n', ' ')
+            ?.replace('\r', ' ')
+            ?.take(MAX_WATCHDOG_DETAIL_LENGTH)
+        module.log(
+            Log.WARN,
+            tag,
+            "官方 Provider DexKit 触发一次有界单方法自修复: package=$packageName " +
+                "process=$processName reason=$reason detail=$safeDetail " +
+                "key=${registration.query.cacheKey}",
+        )
+        startDexHookResolution(registration, forceFresh = true, reason = reason)
+    }
+
+    private fun requestDexBatchRepair(
+        registration: DexBatchRegistration,
+        reason: String,
+        detail: String?,
+    ) {
+        if (!registration.repairGate.tryStart()) return
+        registration.runtimeCacheKeys.forEach { cacheKey ->
+            invalidateDexMethodCache(registration.application, cacheKey)
+        }
+        val safeDetail = detail
+            ?.replace('\n', ' ')
+            ?.replace('\r', ' ')
+            ?.take(MAX_WATCHDOG_DETAIL_LENGTH)
+        module.log(
+            Log.WARN,
+            tag,
+            "官方 Provider DexKit 触发一次有界批量自修复: package=$packageName " +
+                "process=$processName reason=$reason detail=$safeDetail " +
+                "keys=${registration.queries.joinToString { it.cacheKey }}",
+        )
+        startDexBatchResolution(registration, forceFresh = true, reason = reason)
     }
 
     private fun materializeQuery(
@@ -389,15 +872,75 @@ internal class OfficialProviderHookHost(
         ).edit().remove(cacheKey).apply()
     }
 
+    private fun registerDexWatchdog(cacheKey: String, runtimeCacheKey: String) {
+        dexWatchdog?.register(cacheKey, runtimeCacheKey)
+    }
+
+    private fun recordDexWatchdogResolution(
+        query: OfficialProviderDexMethodQuery,
+        source: DexResolutionSource,
+        cacheWritten: Boolean,
+        target: OfficialProviderMethodTarget,
+    ) {
+        val watchdog = dexWatchdog ?: return
+        watchdog.resolved(
+            cacheKey = query.cacheKey,
+            source = source,
+            cacheWritten = cacheWritten,
+            target = describe(target),
+        )
+        armDexWatchdog(query.cacheKey)
+    }
+
+    private fun armDexWatchdog(cacheKey: String) {
+        val scheduler = dexWatchdogTimeoutScheduler ?: return
+        scheduler.schedule(
+            { dexWatchdog?.timeout(cacheKey) },
+            DEX_WATCHDOG_TIMEOUT_MS,
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    private fun logDexWatchdogEvent(event: DexWatchdogEvent) {
+        val detail = event.detail
+            ?.replace('\n', ' ')
+            ?.replace('\r', ' ')
+            ?.take(MAX_WATCHDOG_DETAIL_LENGTH)
+        module.log(
+            Log.INFO,
+            tag,
+            "[ProviderDexWatchdog] stage=${event.stage}, result=${event.result}, " +
+                "package=$packageName, process=$processName, key=${event.cacheKey}, " +
+                "runtimeKey=${event.runtimeCacheKey}, " +
+                "source=${event.source?.name?.lowercase()}, " +
+                "cacheWritten=${event.cacheWritten}, hookInstalled=${event.hookInstalled}, " +
+                "callbackCount=${event.callbackCount}, validationCount=${event.validationCount}, " +
+                "validObserved=${event.validObserved}, target=${event.target}, detail=$detail",
+        )
+    }
+
     private fun installAfterMethod(
         target: OfficialProviderMethodTarget,
         callback: OfficialProviderMethodCallback,
+        watchdogCacheKey: String? = null,
     ) {
         require(target.className.isNotBlank()) { "Provider Hook className 不能为空" }
         require(target.methodName.isNotBlank()) { "Provider Hook methodName 不能为空" }
         val method = resolveMethod(target)
         val descriptor = describe(target)
-        module.hook(method).intercept(AfterMethodHooker(module, descriptor, callback))
+        module.hook(method).intercept(
+            AfterMethodHooker(
+                module = module,
+                descriptor = descriptor,
+                callback = callback,
+                onFirstCallback = watchdogCacheKey?.let { key ->
+                    { dexWatchdog?.callback(key) }
+                },
+            ),
+        )
+        watchdogCacheKey?.let { key ->
+            dexWatchdog?.hookInstalled(key, descriptor)
+        }
         module.log(Log.INFO, tag, "官方 Provider 方法 Hook 已安装: target=$descriptor")
     }
 
@@ -412,6 +955,17 @@ internal class OfficialProviderHookHost(
             require(Modifier.isStatic(modifiers) == target.isStatic) {
                 "Provider Hook static 约束不匹配"
             }
+        }
+    }
+
+    /** 根据原始二进制类名和参数描述符解析精确构造函数。 */
+    private fun resolveConstructor(
+        target: OfficialProviderConstructorTarget,
+    ): java.lang.reflect.Constructor<*> {
+        val targetClass = Class.forName(target.className, false, targetClassLoader)
+        val parameterTypes = target.parameterTypeNames.map(::resolveParameterType).toTypedArray()
+        return targetClass.getDeclaredConstructor(*parameterTypes).apply {
+            isAccessible = true
         }
     }
 
@@ -574,6 +1128,14 @@ internal class OfficialProviderHookHost(
         append(if (target.isStatic) "[static]" else "[instance]")
     }
 
+    /** 生成用于中文诊断日志的构造函数描述。 */
+    private fun describe(target: OfficialProviderConstructorTarget): String = buildString {
+        append(target.className)
+        append("#<init>(")
+        append(target.parameterTypeNames.joinToString())
+        append(')')
+    }
+
     private fun resolveParameterType(typeName: String): Class<*> = when (typeName) {
         "boolean" -> Boolean::class.javaPrimitiveType!!
         "byte" -> Byte::class.javaPrimitiveType!!
@@ -592,53 +1154,68 @@ internal class OfficialProviderHookHost(
     }
 
     private class ApplicationCreatedHooker(
-        private val module: XposedModule,
-        private val expectedPackageName: String,
+        private val host: OfficialProviderHookHost,
         private val callback: OfficialProviderApplicationCallback,
     ) : XposedInterface.Hooker {
-        private val firstCallbackRecorded = AtomicBoolean(false)
-
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
             val application = chain.args.firstOrNull() as? Application
-            if (application?.packageName == expectedPackageName) {
-                runCatching { callback.onApplicationCreated(application) }
-                    .onSuccess {
-                        if (firstCallbackRecorded.compareAndSet(false, true)) {
-                            module.log(
-                                Log.INFO,
-                                "OfficialProviderHookHost",
-                                "官方 Provider 生命周期 Hook 首次命中: " +
-                                    "package=$expectedPackageName",
-                            )
-                        }
-                    }
-                    .onFailure { error ->
-                        module.log(
-                            Log.ERROR,
-                            "OfficialProviderHookHost",
-                            "官方 Provider 生命周期回调失败: " +
-                                "package=$expectedPackageName error=${error.message}",
-                        )
-                    }
+            if (application != null) {
+                host.dispatchApplicationCreated(application, callback, "instrumentation")
+            }
+            return result
+        }
+    }
+
+    private class ApplicationOnCreateHooker(
+        private val host: OfficialProviderHookHost,
+        private val callback: OfficialProviderApplicationCallback,
+    ) : XposedInterface.Hooker {
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            val result = chain.proceed()
+            val application = chain.thisObject as? Application
+            if (application != null) {
+                host.dispatchApplicationCreated(application, callback, "application_on_create")
             }
             return result
         }
     }
 
     private class PlaybackStateHooker(
+        private val host: OfficialProviderHookHost,
         private val module: XposedModule,
         private val packageName: String,
+        private val processName: String,
         private val callback: OfficialProviderPlaybackStateCallback,
+        private val metadataCallback: OfficialProviderMetadataCallback,
+        private val metadataGate: OfficialProviderMediaSessionMetadataGate,
     ) : XposedInterface.Hooker {
         private val firstCallbackRecorded = AtomicBoolean(false)
+        private val callbackSequence = AtomicLong(0L)
 
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
+            host.ensureApplicationDispatched("media_session_playback_state")
+            val state = chain.args.firstOrNull() as? PlaybackState
+            val sequence = callbackSequence.incrementAndGet()
+            deliverCurrentMetadataSnapshot(chain.thisObject as? MediaSession)
             runCatching {
-                callback.onPlaybackStateChanged(chain.args.firstOrNull() as? PlaybackState)
+                callback.onPlaybackStateChanged(state)
             }.onSuccess {
-                if (firstCallbackRecorded.compareAndSet(false, true)) {
+                val firstHit = firstCallbackRecorded.compareAndSet(false, true)
+                if (BuildConfig.DEBUG) {
+                    val now = SystemClock.elapsedRealtime()
+                    module.log(
+                        Log.INFO,
+                        "OfficialProviderHookHost",
+                        "[LyricPositionDiag] stage=media_session_state_hook, " +
+                            "result=callback_completed, firstHit=$firstHit, sequence=$sequence, " +
+                            "player=$packageName, process=$processName, state=${state?.state}, " +
+                            "position=${state?.position}, updatedAt=${state?.lastPositionUpdateTime}, " +
+                            "now=$now, anchorAgeMs=${state?.lastPositionUpdateTime?.let { now - it }}, " +
+                            "speed=${state?.playbackSpeed}, buffered=${state?.bufferedPosition}",
+                    )
+                } else if (firstHit) {
                     module.log(
                         Log.INFO,
                         "OfficialProviderHookHost",
@@ -655,17 +1232,78 @@ internal class OfficialProviderHookHost(
             }
             return result
         }
+
+        private fun deliverCurrentMetadataSnapshot(session: MediaSession?) {
+            val snapshot = runCatching { session?.controller?.metadata }
+                .onFailure { error ->
+                    module.log(
+                        Log.ERROR,
+                        "OfficialProviderHookHost",
+                        "官方 Provider MediaSession Metadata 快照读取失败: " +
+                            "package=$packageName error=${error.message}",
+                    )
+                }
+                .getOrNull()
+            when (metadataGate.claimSnapshot(session, snapshot != null)) {
+                OfficialProviderMediaSessionMetadataGate.SnapshotDecision.DELIVER -> {
+                    runCatching {
+                        metadataCallback.onMetadataChanged(snapshot)
+                    }.onSuccess {
+                        if (BuildConfig.DEBUG) {
+                            module.log(
+                                Log.INFO,
+                                "OfficialProviderHookHost",
+                                "[MediaSessionSnapshotDiag] " +
+                                    "stage=media_session_metadata_snapshot, result=delivered, " +
+                                    "player=$packageName, process=$processName, " +
+                                    "mediaId=${snapshot?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)}, " +
+                                    "title=${snapshot?.getString(MediaMetadata.METADATA_KEY_TITLE)}",
+                            )
+                        }
+                    }.onFailure { error ->
+                        metadataGate.release(session)
+                        module.log(
+                            Log.ERROR,
+                            "OfficialProviderHookHost",
+                            "官方 Provider MediaSession Metadata 快照回调失败: " +
+                                "package=$packageName error=${error.message}",
+                        )
+                    }
+                }
+
+                OfficialProviderMediaSessionMetadataGate.SnapshotDecision.MISSING_FIRST -> {
+                    if (BuildConfig.DEBUG) {
+                        module.log(
+                            Log.INFO,
+                            "OfficialProviderHookHost",
+                            "[MediaSessionSnapshotDiag] " +
+                                "stage=media_session_metadata_snapshot, result=missing_retryable, " +
+                                "player=$packageName, process=$processName",
+                        )
+                    }
+                }
+
+                OfficialProviderMediaSessionMetadataGate.SnapshotDecision.MISSING_REPEATED,
+                OfficialProviderMediaSessionMetadataGate.SnapshotDecision.ALREADY_DELIVERED,
+                OfficialProviderMediaSessionMetadataGate.SnapshotDecision.NO_SESSION -> Unit
+            }
+        }
     }
 
     private class MetadataHooker(
+        private val host: OfficialProviderHookHost,
         private val module: XposedModule,
         private val packageName: String,
         private val callback: OfficialProviderMetadataCallback,
+        private val metadataGate: OfficialProviderMediaSessionMetadataGate,
     ) : XposedInterface.Hooker {
         private val firstCallbackRecorded = AtomicBoolean(false)
 
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
+            host.ensureApplicationDispatched("media_session_metadata")
+            val session = chain.thisObject
+            metadataGate.recordExplicit(session)
             runCatching {
                 callback.onMetadataChanged(chain.args.firstOrNull() as? MediaMetadata)
             }.onSuccess {
@@ -677,6 +1315,7 @@ internal class OfficialProviderHookHost(
                     )
                 }
             }.onFailure { error ->
+                metadataGate.release(session)
                 module.log(
                     Log.ERROR,
                     "OfficialProviderHookHost",
@@ -692,21 +1331,22 @@ internal class OfficialProviderHookHost(
         private val module: XposedModule,
         private val descriptor: String,
         private val callback: OfficialProviderMethodCallback,
+        private val onFirstCallback: (() -> Unit)? = null,
     ) : XposedInterface.Hooker {
         private val firstCallbackRecorded = AtomicBoolean(false)
 
         override fun intercept(chain: XposedInterface.Chain): Any? {
             val result = chain.proceed()
+            if (firstCallbackRecorded.compareAndSet(false, true)) {
+                onFirstCallback?.invoke()
+                module.log(
+                    Log.INFO,
+                    "OfficialProviderHookHost",
+                    "官方 Provider 方法 Hook 首次命中: target=$descriptor",
+                )
+            }
             runCatching {
                 callback.onMethodCalled(chain.thisObject, chain.args.toTypedArray())
-            }.onSuccess {
-                if (firstCallbackRecorded.compareAndSet(false, true)) {
-                    module.log(
-                        Log.INFO,
-                        "OfficialProviderHookHost",
-                        "官方 Provider 方法 Hook 首次命中: target=$descriptor",
-                    )
-                }
             }.onFailure { error ->
                 module.log(
                     Log.ERROR,
@@ -716,6 +1356,96 @@ internal class OfficialProviderHookHost(
             }
             return result
         }
+    }
+
+    /** 允许 Provider 在失败时回退原值的前提下观察或包装方法返回值。 */
+    private class MethodResultHooker(
+        private val module: XposedModule,
+        private val descriptor: String,
+        private val callback: OfficialProviderMethodResultCallback,
+    ) : XposedInterface.Hooker {
+        private val firstCallbackRecorded = AtomicBoolean(false)
+
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            val original = chain.proceed()
+            if (firstCallbackRecorded.compareAndSet(false, true)) {
+                module.log(
+                    Log.INFO,
+                    "OfficialProviderHookHost",
+                    "官方 Provider 方法结果 Hook 首次命中: target=$descriptor",
+                )
+            }
+            return runCatching {
+                callback.onMethodReturned(
+                    chain.thisObject,
+                    chain.args.toTypedArray(),
+                    original,
+                )
+            }.onFailure { error ->
+                module.log(
+                    Log.ERROR,
+                    "OfficialProviderHookHost",
+                    "官方 Provider 方法结果回调失败: target=$descriptor error=${error.message}",
+                )
+            }.getOrDefault(original)
+        }
+    }
+
+    /** 在原构造函数完成后转发实例和原始参数，并记录首次真实命中。 */
+    private class AfterConstructorHooker(
+        private val module: XposedModule,
+        private val descriptor: String,
+        private val callback: OfficialProviderConstructorCallback,
+    ) : XposedInterface.Hooker {
+        private val firstCallbackRecorded = AtomicBoolean(false)
+
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            val result = chain.proceed()
+            if (firstCallbackRecorded.compareAndSet(false, true)) {
+                module.log(
+                    Log.INFO,
+                    "OfficialProviderHookHost",
+                    "官方 Provider 构造 Hook 首次命中: target=$descriptor",
+                )
+            }
+            runCatching {
+                callback.onConstructed(chain.thisObject, chain.args.toTypedArray())
+            }.onFailure { error ->
+                module.log(
+                    Log.ERROR,
+                    "OfficialProviderHookHost",
+                    "官方 Provider 构造回调失败: target=$descriptor error=${error.message}",
+                )
+            }
+            return result
+        }
+    }
+
+    private class DexBatchRegistration(
+        val application: Application,
+        val queries: List<OfficialProviderDexMethodQuery>,
+        val callback: OfficialProviderDexMethodsCallback,
+        val versionCode: Long,
+        val lastUpdateTime: Long,
+    ) {
+        val repairGate = OfficialProviderDexRepairGate()
+        val resolutionRunning = AtomicBoolean(false)
+        val runtimeCacheKeys = ConcurrentHashMap.newKeySet<String>()
+    }
+
+    private class DexHookRegistration(
+        val application: Application,
+        val query: OfficialProviderDexMethodQuery,
+        val callback: OfficialProviderMethodCallback,
+        val runtimeCacheKey: String,
+    ) {
+        val repairGate = OfficialProviderDexRepairGate()
+        val resolutionRunning = AtomicBoolean(false)
+        val activation = OfficialProviderDexHookActivation()
+        val repairRequested = AtomicBoolean(false)
+
+        @Volatile
+        var repairReason: String = "runtime_invalid"
     }
 
     fun logInstalled(pluginId: String) {
@@ -732,6 +1462,10 @@ internal class OfficialProviderHookHost(
         const val DEX_METHOD_BASELINE_PREFERENCES =
             "com.juren233.hyperlyricsenhanced.official_provider_dex_method_baselines"
         const val CLASS_COUNT_TOLERANCE = 4
+        const val DEX_WATCHDOG_TIMEOUT_MS = 30_000L
+        const val MAX_WATCHDOG_DETAIL_LENGTH = 256
+        const val MAX_PROVIDER_DIAGNOSTIC_TAG_LENGTH = 64
+        const val MAX_PROVIDER_DIAGNOSTIC_MESSAGE_LENGTH = 1_024
         const val TWO_GIB_BYTES = 2L * 1024L * 1024L * 1024L
         val dexKitLoaded = AtomicBoolean(false)
         val dexKitLoadLock = Any()

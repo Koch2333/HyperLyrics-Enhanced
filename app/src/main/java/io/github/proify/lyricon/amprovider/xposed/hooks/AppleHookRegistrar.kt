@@ -11,6 +11,7 @@ import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import io.github.libxposed.api.XposedModule
 import io.github.proify.lyricon.amprovider.xposed.ProviderLogger
+import io.github.proify.lyricon.amprovider.xposed.AppleMusicDexKitWatchdog
 import io.github.proify.lyricon.amprovider.xposed.internal.ArgumentRewriteHook
 import io.github.proify.lyricon.amprovider.xposed.internal.CallbackHook
 import io.github.proify.lyricon.amprovider.xposed.internal.ConditionalVoidSkipHook
@@ -77,11 +78,36 @@ internal class AppleHookRegistrar(
     ) = installHooker(executable, ArgumentRewriteHook(rewrite))
 
     private fun installHooker(executable: Executable, hooker: Hooker) {
-        runCatching { module.deoptimize(executable) }
         val moduleId = activeModuleId.get() ?: "unscoped"
-        module.hook(executable).intercept(
-            if (BuildConfig.DEBUG) callbackTracer.wrap(moduleId, executable, hooker) else hooker
-        )
+        var current = executable
+        var retried = false
+        while (true) {
+            try {
+                runCatching { module.deoptimize(current) }
+                module.hook(current).intercept(
+                    if (BuildConfig.DEBUG) {
+                        callbackTracer.wrap(moduleId, current, hooker)
+                    } else {
+                        hooker
+                    },
+                )
+                AppleMusicDexKitWatchdog.hookInstalled(current)
+                return
+            } catch (failure: Throwable) {
+                val replacement = if (!retried) {
+                    AppleMusicDexKitWatchdog.hookInstallFailed(current, failure)
+                } else {
+                    null
+                }
+                if (replacement == null) throw failure
+                ProviderLogger.info(
+                    "Apple Music DexKit 方法安装失败后重试: " +
+                        "old=${current.toGenericString()}, new=${replacement.toGenericString()}",
+                )
+                current = replacement
+                retried = true
+            }
+        }
     }
 }
 
@@ -97,10 +123,26 @@ internal class AppleHookCallbackTracer(
         delegate: Hooker,
     ): Hooker = object : Hooker {
         override fun intercept(chain: Chain): Any? = withModule(moduleId) {
+            AppleMusicDexKitWatchdog.callback(executable)
             if (firstCallbackModuleIds.add(moduleId)) {
                 onFirstCallback(moduleId, executable)
             }
-            delegate.intercept(chain)
+            runCatching { delegate.intercept(chain) }
+                .onSuccess {
+                    AppleMusicDexKitWatchdog.validation(
+                        executable = executable,
+                        valid = true,
+                        detail = "module=$moduleId callback_completed",
+                    )
+                }
+                .onFailure { error ->
+                    AppleMusicDexKitWatchdog.validation(
+                        executable = executable,
+                        valid = false,
+                        detail = "module=$moduleId ${error::class.java.simpleName}: ${error.message}",
+                    )
+                }
+                .getOrThrow()
         }
     }
 }

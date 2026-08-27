@@ -1,6 +1,7 @@
 package com.juren233.hyperlyricsenhanced.ui.page.hooksettings
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -29,7 +30,10 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-fun AppleMusicOptimizationPage() {
+fun AppleMusicOptimizationPage(
+    outerPadding: PaddingValues = PaddingValues(),
+    showNavigationIcon: Boolean = true,
+) {
     val prefs = rememberHookPrefs()
     val saveConfig = rememberHookConfigSaver(prefs)
     var contentUiLanguage by remember {
@@ -75,35 +79,11 @@ fun AppleMusicOptimizationPage() {
             )
         )
     }
-    var onlineFallback by remember {
+    var volumeBalance by remember {
         mutableStateOf(
             prefs.getBoolean(
-                RootConstants.KEY_HOOK_APPLE_MUSIC_ONLINE_FALLBACK,
-                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_ONLINE_FALLBACK,
-            )
-        )
-    }
-    var fallbackQqFirst by remember {
-        mutableStateOf(
-            prefs.getBoolean(
-                RootConstants.KEY_HOOK_APPLE_MUSIC_FALLBACK_QQ_FIRST,
-                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_FALLBACK_QQ_FIRST,
-            )
-        )
-    }
-    var onlineTranslation by remember {
-        mutableStateOf(
-            prefs.getBoolean(
-                RootConstants.KEY_HOOK_APPLE_MUSIC_MATCH_ONLINE_TRANSLATION,
-                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_MATCH_ONLINE_TRANSLATION,
-            )
-        )
-    }
-    var translationQqFirst by remember {
-        mutableStateOf(
-            prefs.getBoolean(
-                RootConstants.KEY_HOOK_APPLE_MUSIC_TRANSLATION_QQ_FIRST,
-                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_TRANSLATION_QQ_FIRST,
+                RootConstants.KEY_HOOK_APPLE_MUSIC_VOLUME_BALANCE,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_VOLUME_BALANCE,
             )
         )
     }
@@ -123,11 +103,27 @@ fun AppleMusicOptimizationPage() {
             )
         )
     }
+    var fillMissingLyrics by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_FILL_MISSING_LYRICS,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_FILL_MISSING_LYRICS,
+            )
+        )
+    }
     var hideMandarinPinyin by remember {
         mutableStateOf(
             prefs.getBoolean(
                 RootConstants.KEY_HOOK_APPLE_MUSIC_HIDE_MANDARIN_PINYIN,
                 RootConstants.DEFAULT_HOOK_APPLE_MUSIC_HIDE_MANDARIN_PINYIN,
+            )
+        )
+    }
+    var lunaBeatWordLyrics by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS,
             )
         )
     }
@@ -293,77 +289,9 @@ fun AppleMusicOptimizationPage() {
     XposedLyricSettingPage(
         title = stringResource(R.string.title_apple_music_optimization_page),
         subtitle = stringResource(R.string.summary_apple_music_optimization_page),
+        outerPadding = outerPadding,
+        showNavigationIcon = showNavigationIcon,
     ) {
-        item(key = "global_lyrics_title") {
-            SmallTitle(text = stringResource(R.string.title_apple_music_global_lyrics))
-        }
-        item(key = "apple_music_global_lyrics") {
-            Card(
-                modifier = Modifier
-                    .padding(horizontal = 12.dp)
-                    .fillMaxWidth()
-            ) {
-                SwitchPreference(
-                    title = stringResource(R.string.title_apple_music_online_fallback),
-                    summary = stringResource(R.string.summary_apple_music_online_fallback),
-                    checked = onlineFallback,
-                    onCheckedChange = {
-                        onlineFallback = it
-                        saveConfig(RootConstants.KEY_HOOK_APPLE_MUSIC_ONLINE_FALLBACK, it)
-                    },
-                )
-                AnimatedVisibility(visible = onlineFallback) {
-                    SwitchPreference(
-                        title = stringResource(R.string.title_apple_music_fallback_qq_first),
-                        summary = stringResource(
-                            R.string.summary_apple_music_fallback_qq_first
-                        ),
-                        checked = fallbackQqFirst,
-                        onCheckedChange = {
-                            fallbackQqFirst = it
-                            saveConfig(
-                                RootConstants.KEY_HOOK_APPLE_MUSIC_FALLBACK_QQ_FIRST,
-                                it,
-                            )
-                        },
-                    )
-                }
-                SwitchPreference(
-                    title = stringResource(
-                        R.string.title_apple_music_match_online_translation
-                    ),
-                    summary = stringResource(
-                        R.string.summary_apple_music_match_online_translation
-                    ),
-                    checked = onlineTranslation,
-                    onCheckedChange = {
-                        onlineTranslation = it
-                        saveConfig(
-                            RootConstants.KEY_HOOK_APPLE_MUSIC_MATCH_ONLINE_TRANSLATION,
-                            it,
-                        )
-                    },
-                )
-                AnimatedVisibility(visible = onlineTranslation) {
-                    SwitchPreference(
-                        title = stringResource(
-                            R.string.title_apple_music_translation_qq_first
-                        ),
-                        summary = stringResource(
-                            R.string.summary_apple_music_translation_qq_first
-                        ),
-                        checked = translationQqFirst,
-                        onCheckedChange = {
-                            translationQqFirst = it
-                            saveConfig(
-                                RootConstants.KEY_HOOK_APPLE_MUSIC_TRANSLATION_QQ_FIRST,
-                                it,
-                            )
-                        },
-                    )
-                }
-            }
-        }
         item(key = "app_content_title") {
             SmallTitle(text = stringResource(R.string.title_apple_music_app_content))
         }
@@ -445,6 +373,18 @@ fun AppleMusicOptimizationPage() {
                     .fillMaxWidth()
             ) {
                 SwitchPreference(
+                    title = stringResource(R.string.title_apple_music_volume_balance),
+                    summary = stringResource(R.string.summary_apple_music_volume_balance),
+                    checked = volumeBalance,
+                    onCheckedChange = { enabled ->
+                        volumeBalance = enabled
+                        saveConfig(
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_VOLUME_BALANCE,
+                            enabled,
+                        )
+                    },
+                )
+                SwitchPreference(
                     title = stringResource(
                         R.string.title_apple_music_notification_open_full_player
                     ),
@@ -453,6 +393,22 @@ fun AppleMusicOptimizationPage() {
                         notificationOpenFullPlayer = enabled
                         saveConfig(
                             RootConstants.KEY_HOOK_APPLE_MUSIC_NOTIFICATION_OPEN_FULL_PLAYER,
+                            enabled,
+                        )
+                    },
+                )
+                SwitchPreference(
+                    title = stringResource(
+                        R.string.title_apple_music_fill_missing_lyrics
+                    ),
+                    summary = stringResource(
+                        R.string.summary_apple_music_fill_missing_lyrics
+                    ),
+                    checked = fillMissingLyrics,
+                    onCheckedChange = { enabled ->
+                        fillMissingLyrics = enabled
+                        saveConfig(
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_FILL_MISSING_LYRICS,
                             enabled,
                         )
                     },
@@ -482,6 +438,22 @@ fun AppleMusicOptimizationPage() {
                         hideMandarinPinyin = enabled
                         saveConfig(
                             RootConstants.KEY_HOOK_APPLE_MUSIC_HIDE_MANDARIN_PINYIN,
+                            enabled,
+                        )
+                    },
+                )
+                SwitchPreference(
+                    title = stringResource(
+                        R.string.title_apple_music_lunabeat_word_lyrics
+                    ),
+                    summary = stringResource(
+                        R.string.summary_apple_music_lunabeat_word_lyrics
+                    ),
+                    checked = lunaBeatWordLyrics,
+                    onCheckedChange = { enabled ->
+                        lunaBeatWordLyrics = enabled
+                        saveConfig(
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS,
                             enabled,
                         )
                     },

@@ -9,6 +9,8 @@ package io.github.proify.lyricon.central.provider.player
 import android.os.SystemClock
 import android.util.Log
 import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.provider.OfficialProviderControlProtocol
+import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import io.github.proify.lyricon.central.Constants
 import io.github.proify.lyricon.central.provider.player.PlayerRecorder.LyricType.NONE
 import io.github.proify.lyricon.central.provider.player.PlayerRecorder.LyricType.SONG
@@ -24,12 +26,17 @@ import kotlin.concurrent.write
 internal class ActivePlayerCoordinator(
     private val officialProviderPreference: (String) -> Boolean? = { null },
     private val decisionLogger: (String) -> Unit = { message -> Log.i(TAG, message) },
+    activeAudioPlaybackMonitor: ActiveAudioPlaybackMonitor = ActiveAudioPlaybackMonitor { null },
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
+    private val audioConflictConfirmationMs: Long = AUDIO_CONFLICT_CONFIRMATION_MS,
 ) : PlayerListener {
 
     private val debug = Constants.isDebug()
     private val lock = ReentrantReadWriteLock()
     private val listeners = CopyOnWriteArraySet<ActivePlayerListener>()
     private val loggedSourceDecisions = ConcurrentHashMap<String, String>()
+    private val audioSuppressedPlayers = HashSet<String>()
+    private val audioConflictFirstSeenAt = HashMap<String, Long>()
 
     @Volatile
     private var activeRecorder: PlayerRecorder? = null
@@ -38,7 +45,13 @@ internal class ActivePlayerCoordinator(
 
     @Volatile
     private var activeIsPlaying: Boolean = false
+    @Volatile
+    private var audioPlaybackMonitor = activeAudioPlaybackMonitor
     private var lastPositionDiagnosticAtMs = 0L
+
+    fun setActiveAudioPlaybackMonitor(monitor: ActiveAudioPlaybackMonitor) {
+        audioPlaybackMonitor = monitor
+    }
 
     fun addListener(listener: ActivePlayerListener) {
         if (listeners.add(listener)) {
@@ -59,6 +72,8 @@ internal class ActivePlayerCoordinator(
     fun notifyProviderInvalid(provider: ProviderInfo) {
         val shouldNotify = lock.write {
             if (activeInfo == provider) {
+                audioSuppressedPlayers.remove(provider.playerPackageName)
+                audioConflictFirstSeenAt.remove(provider.playerPackageName)
                 activeRecorder = null
                 activeIsPlaying = false
                 true
@@ -90,6 +105,8 @@ internal class ActivePlayerCoordinator(
                 !isProviderAllowed(currentInfo)
             ) {
                 removedInfo = currentInfo
+                audioSuppressedPlayers.remove(currentInfo.playerPackageName)
+                audioConflictFirstSeenAt.remove(currentInfo.playerPackageName)
                 activeRecorder = null
                 activeIsPlaying = false
             }
@@ -118,7 +135,7 @@ internal class ActivePlayerCoordinator(
 
     override fun onPlaybackStateChanged(recorder: PlayerRecorder, isPlaying: Boolean) {
         if (debug) Log.d(TAG, "onPlaybackStateChanged: $isPlaying")
-        dispatchIfActive(recorder) {
+        dispatchIfActive(recorder, reportsPlaybackState = true) {
             it.onPlaybackStateChanged(isPlaying)
         }
     }
@@ -182,18 +199,49 @@ internal class ActivePlayerCoordinator(
         recorder: PlayerRecorder,
         allowDuplicateIfSwitching: Boolean = true,
         diagnosticPosition: Long? = null,
+        reportsPlaybackState: Boolean = false,
         crossinline notifier: (ActivePlayerListener) -> Unit
     ) {
         val recorderInfo = recorder.providerInfo
-        val recorderPlaying = recorder.isPlaying
+        val reportedPlaying = recorder.isPlaying
+        val audioConflict = audioPlaybackMonitor.conflictFor(
+            recorderInfo.playerPackageName,
+        )
+        val eventTimeMs = elapsedRealtime()
+        var recorderPlaying = reportedPlaying
+        var audioSuppressed = false
+        var audioConflictConfirmed = false
         var isSwitched = false
         var shouldBroadcastOriginal = false
+        var effectivePlaybackChanged = false
         var decision = "unknown"
+        var transitionedFromSuppression = false
         var previousInfo: ProviderInfo? = null
         var resultingInfo: ProviderInfo? = null
         var invalidActiveCleared = false
 
         lock.write {
+            when (audioConflict) {
+                true -> {
+                    val firstSeenAt = audioConflictFirstSeenAt.getOrPut(
+                        recorderInfo.playerPackageName,
+                    ) { eventTimeMs }
+                    audioConflictConfirmed =
+                        eventTimeMs - firstSeenAt >= audioConflictConfirmationMs
+                    if (audioConflictConfirmed) {
+                        audioSuppressedPlayers += recorderInfo.playerPackageName
+                    }
+                }
+                false -> {
+                    audioConflictFirstSeenAt.remove(recorderInfo.playerPackageName)
+                    transitionedFromSuppression =
+                        audioSuppressedPlayers.remove(recorderInfo.playerPackageName)
+                }
+                null -> audioConflictFirstSeenAt.remove(recorderInfo.playerPackageName)
+            }
+            audioSuppressed = recorderInfo.playerPackageName in audioSuppressedPlayers
+            recorderPlaying = reportedPlaying && !audioSuppressed
+
             var currentInfo = activeInfo
             previousInfo = currentInfo
             if (currentInfo != null && !isProviderAllowed(currentInfo)) {
@@ -210,9 +258,16 @@ internal class ActivePlayerCoordinator(
                     ProviderSourcePriority.BUILT_IN -> "dropped_source_not_allowed"
                 }
             } else if (currentInfo === recorderInfo) {
+                effectivePlaybackChanged = activeIsPlaying != recorderPlaying
                 activeIsPlaying = recorderPlaying
-                shouldBroadcastOriginal = true
-                decision = "accepted_active"
+                shouldBroadcastOriginal = !audioSuppressed
+                decision = if (audioSuppressed) {
+                    "suppressed_active_audio_output"
+                } else {
+                    "accepted_active"
+                }
+            } else if (audioSuppressed) {
+                decision = "dropped_audio_output"
             } else {
                 val samePlayer = currentInfo?.playerPackageName == recorderInfo.playerPackageName
                 val priorityComparison = if (currentInfo == null || !samePlayer) {
@@ -262,6 +317,10 @@ internal class ActivePlayerCoordinator(
                 previousInfo = previousInfo,
                 resultingInfo = resultingInfo,
                 recorderPlaying = recorderPlaying,
+                reportedPlaying = reportedPlaying,
+                audioConflict = audioConflict,
+                audioConflictConfirmed = audioConflictConfirmed,
+                audioSuppressed = audioSuppressed,
                 position = position,
                 decision = decision,
                 isSwitched = isSwitched,
@@ -280,12 +339,36 @@ internal class ActivePlayerCoordinator(
             broadcast { syncNewProviderState(recorder, it) }
         }
 
+        if (!isSwitched && effectivePlaybackChanged &&
+            (!reportsPlaybackState || audioSuppressed)
+        ) {
+            broadcast { it.onPlaybackStateChanged(recorderPlaying) }
+        }
+
         if (shouldBroadcastOriginal) {
             broadcast(notifier)
+        }
+
+        // A transient audio conflict can suppress the very first Song of a cold-started Provider.
+        // Playback state and position recover through the normal path once the conflict clears,
+        // but the cached lyric is only replayed when the next setSong arrives. Re-dispatch the
+        // recorded lyric exactly on the suppressed -> unsuppressed transition so the first Song
+        // is not lost forever and AOD/Super Island recover without a track switch.
+        if (transitionedFromSuppression && !isSwitched && recorderInfo === activeInfo) {
+            broadcast {
+                when (recorder.lyricType) {
+                    SONG -> it.onSongChanged(recorder.song)
+                    TEXT -> it.onSendText(recorder.text)
+                    NONE -> Unit
+                }
+            }
         }
     }
 
     private fun isProviderAllowed(providerInfo: ProviderInfo): Boolean {
+        if (providerInfo.metadata?.get(OfficialProviderControlProtocol.CONTROL_ONLY_METADATA_KEY) == "true") {
+            return false
+        }
         val preference = officialProviderPreference(providerInfo.playerPackageName) ?: return true
         return when (ProviderSourcePriorityResolver.resolve(providerInfo)) {
             ProviderSourcePriority.BUILT_IN -> true
@@ -309,22 +392,29 @@ internal class ActivePlayerCoordinator(
         previousInfo: ProviderInfo?,
         resultingInfo: ProviderInfo?,
         recorderPlaying: Boolean,
+        reportedPlaying: Boolean,
+        audioConflict: Boolean?,
+        audioConflictConfirmed: Boolean,
+        audioSuppressed: Boolean,
         position: Long,
         decision: String,
         isSwitched: Boolean,
         broadcastOriginal: Boolean,
     ) {
         if (!BuildConfig.DEBUG) return
-        val now = SystemClock.elapsedRealtime()
+        val now = elapsedRealtime()
         if (now - lastPositionDiagnosticAtMs < POSITION_DIAGNOSTIC_INTERVAL_MS) return
         lastPositionDiagnosticAtMs = now
-        Log.i(
+        HookLogger.i(
             TAG,
             "[LyricPositionDiag] stage=central_route, decision=$decision, " +
                 "incoming=${recorderInfo.providerPackageName}/${recorderInfo.playerPackageName}, " +
                 "previous=${previousInfo?.providerPackageName}/${previousInfo?.playerPackageName}, " +
                 "result=${resultingInfo?.providerPackageName}/${resultingInfo?.playerPackageName}, " +
-                "position=$position, incomingPlaying=$recorderPlaying, " +
+                "position=$position, reportedPlaying=$reportedPlaying, " +
+                "effectivePlaying=$recorderPlaying, audioConflict=$audioConflict, " +
+                "audioConflictConfirmed=$audioConflictConfirmed, " +
+                "audioSuppressed=$audioSuppressed, " +
                 "activePlaying=$activeIsPlaying, switched=$isSwitched, " +
                 "broadcast=$broadcastOriginal, listeners=${listeners.size}"
         )
@@ -365,5 +455,6 @@ internal class ActivePlayerCoordinator(
     private companion object {
         private const val TAG = "ActivePlayerCoordinator"
         private const val POSITION_DIAGNOSTIC_INTERVAL_MS = 5_000L
+        private const val AUDIO_CONFLICT_CONFIRMATION_MS = 200L
     }
 }

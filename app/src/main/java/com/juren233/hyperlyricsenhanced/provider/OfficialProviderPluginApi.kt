@@ -46,6 +46,27 @@ interface OfficialProviderHost {
     )
 
     /**
+     * 在精确方法返回后读取并转换返回值。
+     *
+     * 回调失败时 Host 保留原始返回值，避免 Provider 的观察逻辑破坏目标 App 调用链。
+     */
+    fun hookMethodResult(
+        target: OfficialProviderMethodTarget,
+        callback: OfficialProviderMethodResultCallback,
+    )
+
+    /**
+     * 为精确的构造函数描述符安装执行后 Hook。
+     *
+     * 构造函数使用独立目标类型，避免 Provider Pack 把反编译器显示的 `<init>`
+     * 当作普通反射方法名进行查找。
+     */
+    fun hookAfterConstructor(
+        target: OfficialProviderConstructorTarget,
+        callback: OfficialProviderConstructorCallback,
+    )
+
+    /**
      * Resolves an obfuscation-sensitive method from the original target DEX.
      *
      * The host first tries a previously verified exact descriptor. DexKit is
@@ -63,6 +84,65 @@ interface OfficialProviderHost {
         queries: List<OfficialProviderDexMethodQuery>,
         callback: OfficialProviderDexMethodsCallback,
     )
+
+    /**
+     * Reports whether a DexKit-resolved target produced valid business data.
+     *
+     * [cacheKey] is the stable [OfficialProviderDexMethodQuery.cacheKey], not the
+     * versioned host cache key. Providers should report every real parse attempt;
+     * the first invalid result invalidates the registered query or batch and starts
+     * at most one cache-bypassing repair pass. Repaired single-method Hooks deactivate
+     * the previous callback generation. Debug builds additionally record bounded
+     * first-hit diagnostics.
+     *
+     * The default implementation keeps Provider Packs that do not need validation
+     * source-compatible. Packs that call this method must raise minCoreVersionCode.
+     */
+    fun reportDexMethodValidation(
+        cacheKey: String,
+        valid: Boolean,
+        detail: String? = null,
+    ) = Unit
+
+    /** Emits bounded debug-only diagnostics through the host's exported log channel. */
+    fun reportDiagnostic(
+        tag: String,
+        message: String,
+    ) = Unit
+
+    /**
+     * 读取主模块远端 Hook 配置中的布尔键，Provider Pack 用它决定本地歌词策略。
+     *
+     * 例如椒盐音乐在“优先使用在线源”开启时跳过内置歌词与同目录歌词读取。
+     * 默认实现返回 [default]，保持旧 Provider Pack 的二进制兼容；调用此方法的
+     * Pack 应相应提高 manifest 的 minCoreVersionCode，避免在旧主模块上静默降级。
+     */
+    fun getBooleanPreference(key: String, default: Boolean): Boolean = default
+}
+
+/**
+ * Optional Provider Pack entry point for packs that run in SystemUI and observe
+ * the target player's public MediaSession instead of entering the player process.
+ */
+interface OfficialProviderSystemMediaPlugin {
+    fun installSystemMedia(host: OfficialProviderSystemMediaHost)
+
+    fun releaseSystemMedia()
+}
+
+interface OfficialProviderSystemMediaHost {
+    val application: Application
+    val playerPackageName: String
+
+    fun subscribe(callback: OfficialProviderSystemMediaCallback): OfficialProviderSystemMediaSubscription
+}
+
+fun interface OfficialProviderSystemMediaCallback {
+    fun onMediaChanged(metadata: MediaMetadata?, playbackState: PlaybackState?)
+}
+
+fun interface OfficialProviderSystemMediaSubscription {
+    fun release()
 }
 
 fun interface OfficialProviderApplicationCallback {
@@ -83,6 +163,11 @@ data class OfficialProviderMethodTarget(
     val parameterTypeNames: List<String> = emptyList(),
     val returnTypeName: String,
     val isStatic: Boolean,
+)
+
+data class OfficialProviderConstructorTarget(
+    val className: String,
+    val parameterTypeNames: List<String> = emptyList(),
 )
 
 enum class OfficialProviderDexTypeSource {
@@ -125,7 +210,98 @@ data class OfficialProviderDexMethodQuery(
     val returnTypeReference: OfficialProviderDexTypeReference? = null,
     val returnTypeMatchesDeclaringClass: Boolean = false,
     val isStatic: Boolean? = null,
+    val requiredCallerMethodNames: List<String> = emptyList(),
+    val forbiddenInvokedMethodDescriptors: List<String> = emptyList(),
 ) {
+    /**
+     * Binary-compatible constructor for Provider Packs built against the caller-constraint API.
+     *
+     * Forbidden invoke constraints were added as a trailing field so existing Packs keep the
+     * exact JVM constructor they were compiled against.
+     */
+    @Suppress("unused")
+    @Deprecated("Binary compatibility for Provider Packs", level = DeprecationLevel.HIDDEN)
+    constructor(
+        cacheKey: String,
+        preferredTarget: OfficialProviderMethodTarget? = null,
+        declaringClassName: String? = null,
+        declaringClassNamePrefix: String? = null,
+        declaringClassReference: OfficialProviderDexTypeReference? = null,
+        requiredStrings: List<String> = emptyList(),
+        requiredInvokedMethodDescriptors: List<String> = emptyList(),
+        requiredInvokedMethodNames: List<String> = emptyList(),
+        parameterTypeNames: List<String>? = null,
+        parameterTypeReferences: Map<Int, OfficialProviderDexTypeReference> = emptyMap(),
+        returnTypeName: String? = null,
+        returnTypeNamePrefix: String? = null,
+        returnTypeReference: OfficialProviderDexTypeReference? = null,
+        returnTypeMatchesDeclaringClass: Boolean = false,
+        isStatic: Boolean? = null,
+        requiredCallerMethodNames: List<String> = emptyList(),
+    ) : this(
+        cacheKey = cacheKey,
+        preferredTarget = preferredTarget,
+        declaringClassName = declaringClassName,
+        declaringClassNamePrefix = declaringClassNamePrefix,
+        declaringClassReference = declaringClassReference,
+        requiredStrings = requiredStrings,
+        requiredInvokedMethodDescriptors = requiredInvokedMethodDescriptors,
+        requiredInvokedMethodNames = requiredInvokedMethodNames,
+        parameterTypeNames = parameterTypeNames,
+        parameterTypeReferences = parameterTypeReferences,
+        returnTypeName = returnTypeName,
+        returnTypeNamePrefix = returnTypeNamePrefix,
+        returnTypeReference = returnTypeReference,
+        returnTypeMatchesDeclaringClass = returnTypeMatchesDeclaringClass,
+        isStatic = isStatic,
+        requiredCallerMethodNames = requiredCallerMethodNames,
+        forbiddenInvokedMethodDescriptors = emptyList(),
+    )
+
+    /**
+     * Binary-compatible constructor for Provider Packs built against plugin API v3.
+     *
+     * Caller constraints were added without changing the plugin API version because the
+     * extension is additive. New Packs that use it must still raise minCoreVersionCode.
+     */
+    @Suppress("unused")
+    @Deprecated("Binary compatibility for Provider Packs", level = DeprecationLevel.HIDDEN)
+    constructor(
+        cacheKey: String,
+        preferredTarget: OfficialProviderMethodTarget? = null,
+        declaringClassName: String? = null,
+        declaringClassNamePrefix: String? = null,
+        declaringClassReference: OfficialProviderDexTypeReference? = null,
+        requiredStrings: List<String> = emptyList(),
+        requiredInvokedMethodDescriptors: List<String> = emptyList(),
+        requiredInvokedMethodNames: List<String> = emptyList(),
+        parameterTypeNames: List<String>? = null,
+        parameterTypeReferences: Map<Int, OfficialProviderDexTypeReference> = emptyMap(),
+        returnTypeName: String? = null,
+        returnTypeNamePrefix: String? = null,
+        returnTypeReference: OfficialProviderDexTypeReference? = null,
+        returnTypeMatchesDeclaringClass: Boolean = false,
+        isStatic: Boolean? = null,
+    ) : this(
+        cacheKey = cacheKey,
+        preferredTarget = preferredTarget,
+        declaringClassName = declaringClassName,
+        declaringClassNamePrefix = declaringClassNamePrefix,
+        declaringClassReference = declaringClassReference,
+        requiredStrings = requiredStrings,
+        requiredInvokedMethodDescriptors = requiredInvokedMethodDescriptors,
+        requiredInvokedMethodNames = requiredInvokedMethodNames,
+        parameterTypeNames = parameterTypeNames,
+        parameterTypeReferences = parameterTypeReferences,
+        returnTypeName = returnTypeName,
+        returnTypeNamePrefix = returnTypeNamePrefix,
+        returnTypeReference = returnTypeReference,
+        returnTypeMatchesDeclaringClass = returnTypeMatchesDeclaringClass,
+        isStatic = isStatic,
+        requiredCallerMethodNames = emptyList(),
+        forbiddenInvokedMethodDescriptors = emptyList(),
+    )
+
     /**
      * Binary-compatible constructor used by Provider Packs built before ordered query references
      * were added. InMemoryDexClassLoader delegates this API package to the core class loader, so
@@ -160,6 +336,8 @@ data class OfficialProviderDexMethodQuery(
         returnTypeReference = null,
         returnTypeMatchesDeclaringClass = returnTypeMatchesDeclaringClass,
         isStatic = isStatic,
+        requiredCallerMethodNames = emptyList(),
+        forbiddenInvokedMethodDescriptors = emptyList(),
     )
 }
 
@@ -183,6 +361,12 @@ internal object OfficialProviderDexMethodQueryValidator {
         }
         require(query.requiredInvokedMethodNames.all(String::isNotBlank)) {
             "Provider DexKit 调用方法名不能包含空值"
+        }
+        require(query.requiredCallerMethodNames.all(String::isNotBlank)) {
+            "Provider DexKit 调用方方法名不能包含空值"
+        }
+        require(query.forbiddenInvokedMethodDescriptors.all(String::isNotBlank)) {
+            "Provider DexKit 禁止调用方法描述符不能包含空值"
         }
         require(query.parameterTypeReferences.keys.all { it >= 0 }) {
             "Provider DexKit 参数类型引用下标不能为负数"
@@ -237,9 +421,19 @@ internal object OfficialProviderDexMethodQueryValidator {
                 query.declaringClassReference != null ||
                 query.requiredStrings.isNotEmpty() ||
                 query.requiredInvokedMethodDescriptors.isNotEmpty() ||
-                query.requiredInvokedMethodNames.isNotEmpty(),
+                query.requiredInvokedMethodNames.isNotEmpty() ||
+                query.requiredCallerMethodNames.isNotEmpty() ||
+                query.forbiddenInvokedMethodDescriptors.isNotEmpty(),
         ) {
             "Provider DexKit 后备查询必须包含类名或特征字符串"
+        }
+        require(query.preferredTarget == null || query.requiredCallerMethodNames.isEmpty()) {
+            "Provider DexKit 调用方约束不能与未经语义校验的首选目标同时使用"
+        }
+        require(
+            query.preferredTarget == null || query.forbiddenInvokedMethodDescriptors.isEmpty(),
+        ) {
+            "Provider DexKit 禁止调用约束不能与未经语义校验的首选目标同时使用"
         }
         query.preferredTarget?.let { target ->
             require(target.className.isNotBlank()) { "Provider 首选 className 不能为空" }
@@ -251,6 +445,14 @@ internal object OfficialProviderDexMethodQueryValidator {
 
 fun interface OfficialProviderMethodCallback {
     fun onMethodCalled(receiver: Any?, arguments: Array<Any?>)
+}
+
+fun interface OfficialProviderMethodResultCallback {
+    fun onMethodReturned(receiver: Any?, arguments: Array<Any?>, result: Any?): Any?
+}
+
+fun interface OfficialProviderConstructorCallback {
+    fun onConstructed(instance: Any?, arguments: Array<Any?>)
 }
 
 fun interface OfficialProviderDexMethodsCallback {
@@ -274,6 +476,7 @@ data class OfficialProviderNextTrackFrame(
  * Reserved frames are consumed by Central and must never reach plain-text lyrics.
  */
 object OfficialProviderControlProtocol {
+    const val CONTROL_ONLY_METADATA_KEY = "hle.control_only"
     const val NEXT_TRACK_PREFIX = "\u001eHLE_OFFICIAL_NEXT_TRACK_V1|"
 
     private const val UPDATE_OPERATION = "U"

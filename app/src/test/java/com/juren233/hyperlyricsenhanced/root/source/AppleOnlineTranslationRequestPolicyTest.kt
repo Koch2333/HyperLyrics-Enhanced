@@ -66,7 +66,28 @@ class AppleOnlineTranslationRequestPolicyTest {
         )
         assertTrue(
             AppleOnlineTranslationRequestPolicy.attemptKey(first) ==
-                AppleOnlineTranslationRequestPolicy.attemptKey(second)
+            AppleOnlineTranslationRequestPolicy.attemptKey(second)
+        )
+    }
+
+    @Test
+    fun `original album arrival creates a new translation attempt`() {
+        val withoutAlbum = song("満ちてゆく", "藤井 風")
+        val withAlbum = song(
+            originalTitle = "満ちてゆく",
+            originalArtist = "藤井 風",
+            originalAlbum = "LOVE ALL SERVE ALL"
+        )
+
+        assertTrue(
+            AppleOnlineTranslationRequestPolicy.originalMetadataChanged(
+                withoutAlbum,
+                withAlbum
+            )
+        )
+        assertNotEquals(
+            AppleOnlineTranslationRequestPolicy.attemptKey(withoutAlbum),
+            AppleOnlineTranslationRequestPolicy.attemptKey(withAlbum)
         )
     }
 

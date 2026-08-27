@@ -76,6 +76,26 @@ class AppleSongMapperTest {
     }
 
     @Test
+    fun `builds main text from words when Apple line text is blank`() {
+        val appleSong = AppleSong(
+            lyrics = mutableListOf(
+                LyricLine(
+                    htmlLineText = "",
+                    words = mutableListOf(
+                        LyricWord(text = "Shape"),
+                        LyricWord(text = "shifter"),
+                    ),
+                )
+            )
+        )
+
+        val mappedLine = AppleSongMapper.map(appleSong).lyrics.orEmpty().single()
+
+        assertEquals("Shapeshifter", mappedLine.text)
+        assertEquals(listOf("Shape", "shifter"), mappedLine.words.orEmpty().map { it.text })
+    }
+
+    @Test
     fun `keeps the background vocals line text when it is available`() {
         val appleSong = AppleSong(
             lyrics = mutableListOf(

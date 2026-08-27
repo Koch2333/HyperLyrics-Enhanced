@@ -13,6 +13,49 @@ import org.junit.Test
 
 class OfficialProviderDexMethodQueryValidatorTest {
     @Test
+    fun `keeps method result hook provider ABI`() {
+        assertNotNull(
+            OfficialProviderHost::class.java.getDeclaredMethod(
+                "hookMethodResult",
+                OfficialProviderMethodTarget::class.java,
+                OfficialProviderMethodResultCallback::class.java,
+            ),
+        )
+        assertNotNull(
+            OfficialProviderMethodResultCallback::class.java.getDeclaredMethod(
+                "onMethodReturned",
+                Any::class.java,
+                Array<Any?>::class.java,
+                Any::class.java,
+            ),
+        )
+    }
+
+    @Test
+    fun `keeps exact constructor hook provider ABI`() {
+        assertNotNull(
+            OfficialProviderHost::class.java.getDeclaredMethod(
+                "hookAfterConstructor",
+                OfficialProviderConstructorTarget::class.java,
+                OfficialProviderConstructorCallback::class.java,
+            ),
+        )
+        assertNotNull(
+            OfficialProviderConstructorTarget::class.java.getDeclaredConstructor(
+                String::class.java,
+                List::class.java,
+            ),
+        )
+        assertNotNull(
+            OfficialProviderConstructorCallback::class.java.getDeclaredMethod(
+                "onConstructed",
+                Any::class.java,
+                Array<Any?>::class.java,
+            ),
+        )
+    }
+
+    @Test
     fun `accepts exact declaring class without required strings`() {
         OfficialProviderDexMethodQueryValidator.validate(
             OfficialProviderDexMethodQuery(
@@ -84,6 +127,96 @@ class OfficialProviderDexMethodQueryValidatorTest {
     }
 
     @Test
+    fun `accepts caller method name as semantic anchor`() {
+        OfficialProviderDexMethodQueryValidator.validate(
+            OfficialProviderDexMethodQuery(
+                cacheKey = "kugou-lite-next-media-v2",
+                requiredCallerMethodNames = listOf("getNextMedia"),
+                parameterTypeNames = emptyList(),
+                returnTypeName = "com.kugou.common.player.manager.IMedia",
+                isStatic = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `rejects blank caller method name`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            OfficialProviderDexMethodQueryValidator.validate(
+                OfficialProviderDexMethodQuery(
+                    cacheKey = "blank-caller",
+                    requiredCallerMethodNames = listOf(" "),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects preferred target with caller semantic constraint`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            OfficialProviderDexMethodQueryValidator.validate(
+                OfficialProviderDexMethodQuery(
+                    cacheKey = "unsafe-preferred-caller",
+                    preferredTarget = OfficialProviderMethodTarget(
+                        className = "example.QueuePlayerManager",
+                        methodName = "P0",
+                        returnTypeName = "example.IMedia",
+                        isStatic = false,
+                    ),
+                    requiredCallerMethodNames = listOf("getNextMedia"),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `accepts forbidden invoke descriptor as semantic anchor`() {
+        OfficialProviderDexMethodQueryValidator.validate(
+            OfficialProviderDexMethodQuery(
+                cacheKey = "qqmusic-hd-current-song-v4",
+                forbiddenInvokedMethodDescriptors = listOf(
+                    "Lcom/tencent/qqmusic/openapisdk/model/SongInfo;->getSongId()J",
+                ),
+                parameterTypeNames = emptyList(),
+                returnTypeName = "com.tencent.qqmusic.openapisdk.model.SongInfo",
+                isStatic = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `rejects blank forbidden invoke descriptor`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            OfficialProviderDexMethodQueryValidator.validate(
+                OfficialProviderDexMethodQuery(
+                    cacheKey = "blank-forbidden-invoke",
+                    forbiddenInvokedMethodDescriptors = listOf(" "),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects preferred target with forbidden invoke constraint`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            OfficialProviderDexMethodQueryValidator.validate(
+                OfficialProviderDexMethodQuery(
+                    cacheKey = "unsafe-preferred-forbidden-invoke",
+                    preferredTarget = OfficialProviderMethodTarget(
+                        className = "example.MusicPlayerHelper",
+                        methodName = "l0",
+                        returnTypeName = "example.SongInfo",
+                        isStatic = false,
+                    ),
+                    forbiddenInvokedMethodDescriptors = listOf(
+                        "Lexample/SongInfo;->getSongId()J",
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `keeps the pre-reference provider pack constructors`() {
         val oldParameters = arrayOf(
             String::class.java,
@@ -103,6 +236,71 @@ class OfficialProviderDexMethodQueryValidatorTest {
         assertNotNull(
             OfficialProviderDexMethodQuery::class.java.getDeclaredConstructor(
                 *oldParameters,
+                Int::class.javaPrimitiveType!!,
+                DefaultConstructorMarker::class.java,
+            ),
+        )
+    }
+
+    @Test
+    fun `keeps the plugin api v3 provider pack constructors`() {
+        val v3Parameters = arrayOf(
+            String::class.java,
+            OfficialProviderMethodTarget::class.java,
+            String::class.java,
+            String::class.java,
+            OfficialProviderDexTypeReference::class.java,
+            List::class.java,
+            List::class.java,
+            List::class.java,
+            List::class.java,
+            Map::class.java,
+            String::class.java,
+            String::class.java,
+            OfficialProviderDexTypeReference::class.java,
+            Boolean::class.javaPrimitiveType!!,
+            Boolean::class.javaObjectType,
+        )
+        assertNotNull(
+            OfficialProviderDexMethodQuery::class.java.getDeclaredConstructor(*v3Parameters),
+        )
+        assertNotNull(
+            OfficialProviderDexMethodQuery::class.java.getDeclaredConstructor(
+                *v3Parameters,
+                Int::class.javaPrimitiveType!!,
+                DefaultConstructorMarker::class.java,
+            ),
+        )
+    }
+
+    @Test
+    fun `keeps the caller constraint provider pack constructors`() {
+        val callerConstraintParameters = arrayOf(
+            String::class.java,
+            OfficialProviderMethodTarget::class.java,
+            String::class.java,
+            String::class.java,
+            OfficialProviderDexTypeReference::class.java,
+            List::class.java,
+            List::class.java,
+            List::class.java,
+            List::class.java,
+            Map::class.java,
+            String::class.java,
+            String::class.java,
+            OfficialProviderDexTypeReference::class.java,
+            Boolean::class.javaPrimitiveType!!,
+            Boolean::class.javaObjectType,
+            List::class.java,
+        )
+        assertNotNull(
+            OfficialProviderDexMethodQuery::class.java.getDeclaredConstructor(
+                *callerConstraintParameters,
+            ),
+        )
+        assertNotNull(
+            OfficialProviderDexMethodQuery::class.java.getDeclaredConstructor(
+                *callerConstraintParameters,
                 Int::class.javaPrimitiveType!!,
                 DefaultConstructorMarker::class.java,
             ),

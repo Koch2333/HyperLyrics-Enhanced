@@ -26,7 +26,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
+import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.R
+import com.juren233.hyperlyricsenhanced.common.LogLevelPolicy
 import com.juren233.hyperlyricsenhanced.common.PrefsBridge
 import com.juren233.hyperlyricsenhanced.common.UIConstants
 import com.juren233.hyperlyricsenhanced.ui.navigation.LocalNavigator
@@ -35,6 +37,8 @@ import com.juren233.hyperlyricsenhanced.ui.utils.BlurredBar
 import com.juren233.hyperlyricsenhanced.ui.utils.LocaleUtils
 import com.juren233.hyperlyricsenhanced.ui.utils.pageScrollModifiers
 import com.juren233.hyperlyricsenhanced.ui.utils.rememberBlurBackdrop
+import com.juren233.hyperlyricsenhanced.utils.LOG_EXPORT_LEVEL_DEBUG
+import com.juren233.hyperlyricsenhanced.utils.LogExportEnvironmentCollector
 import com.juren233.hyperlyricsenhanced.utils.LogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -79,6 +83,15 @@ fun SettingsPage() {
     val snackbarHostState = remember { SnackbarHostState() }
     val backupRestoreHelper = com.juren233.hyperlyricsenhanced.utils.rememberBackupRestoreHelper(snackbarHostState)
     val exportHeader = stringResource(R.string.export_header)
+    val exportEnvironmentTitle = stringResource(R.string.export_environment_title)
+    val exportDeviceModelFormat = stringResource(R.string.format_export_device_model)
+    val exportSystemVersionFormat = stringResource(R.string.format_export_system_version)
+    val exportAndroidVersionFormat = stringResource(R.string.format_export_android_version)
+    val exportCurrentMusicAppFormat = stringResource(R.string.format_export_current_music_app)
+    val exportMusicAppVersionFormat = stringResource(R.string.format_export_music_app_version)
+    val exportMusicAppInstallSourceFormat = stringResource(R.string.format_export_music_app_install_source)
+    val exportNotDetected = stringResource(R.string.export_not_detected)
+    val exportUnknown = stringResource(R.string.export_unknown)
     val exportTimeFormat = stringResource(R.string.format_export_time)
     val appLogsTitle = stringResource(R.string.title_app_logs)
     val moduleLogsTitle = stringResource(R.string.title_module_logs)
@@ -105,11 +118,40 @@ fun SettingsPage() {
                         )
                         writer.appendLine()
 
+                        val environment = LogExportEnvironmentCollector.collect(context)
+                        val musicApp = environment.musicApp
+                        val musicAppIdentity = musicApp?.let { "${it.label} (${it.packageName})" }
+                            ?: exportNotDetected
+                        val musicAppVersion = musicApp?.let { app ->
+                            val versionName = app.versionName.ifBlank { exportUnknown }
+                            app.versionCode?.let { "$versionName ($it)" } ?: versionName
+                        } ?: exportNotDetected
+                        val installSource = when {
+                            musicApp == null -> exportNotDetected
+                            musicApp.installSourcePackageName == null -> exportUnknown
+                            else -> {
+                                val packageName = musicApp.installSourcePackageName
+                                val label = musicApp.installSourceLabel
+                                    ?.ifBlank { packageName }
+                                    ?: packageName
+                                "$label ($packageName)"
+                            }
+                        }
+
+                        writer.appendLine("========== $exportEnvironmentTitle ==========")
+                        writer.appendLine(String.format(exportDeviceModelFormat, environment.deviceModel))
+                        writer.appendLine(String.format(exportSystemVersionFormat, environment.systemVersion))
+                        writer.appendLine(String.format(exportAndroidVersionFormat, environment.androidVersion))
+                        writer.appendLine(String.format(exportCurrentMusicAppFormat, musicAppIdentity))
+                        writer.appendLine(String.format(exportMusicAppVersionFormat, musicAppVersion))
+                        writer.appendLine(String.format(exportMusicAppInstallSourceFormat, installSource))
+                        writer.appendLine()
+
                         writer.appendLine("========== $appLogsTitle ==========")
                         val appEntries = LogManager.exportLogs(
                             context = context,
                             isAppLog = true,
-                            selectedLevel = "ALL",
+                            selectedLevel = LOG_EXPORT_LEVEL_DEBUG,
                             writer = writer,
                         )
                         if (appEntries == 0) writer.appendLine(noLogsFoundMsg)
@@ -119,7 +161,7 @@ fun SettingsPage() {
                         val moduleEntries = LogManager.exportLogs(
                             context = context,
                             isAppLog = false,
-                            selectedLevel = "ALL",
+                            selectedLevel = LOG_EXPORT_LEVEL_DEBUG,
                             writer = writer,
                         )
                         if (moduleEntries == 0) writer.appendLine(noLogsFoundMsg)
@@ -256,7 +298,14 @@ private fun LazyListScope.settingsSections(
         val navigator = LocalNavigator.current
         val context = LocalContext.current
         val prefs = remember { context.getSharedPreferences(UIConstants.PREF_NAME, Context.MODE_PRIVATE) }
-        var logLevel by remember { mutableIntStateOf(prefs.getInt(UIConstants.KEY_LOG_LEVEL, UIConstants.DEFAULT_LOG_LEVEL)) }
+        var logLevel by remember {
+            mutableIntStateOf(
+                prefs.getInt(
+                    UIConstants.KEY_LOG_LEVEL,
+                    LogLevelPolicy.defaultLevel(BuildConfig.DEBUG),
+                )
+            )
+        }
         val logLevelOptions = listOf(stringResource(R.string.log_level_normal), stringResource(R.string.log_level_verbose))
         Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth()) {
             Column {

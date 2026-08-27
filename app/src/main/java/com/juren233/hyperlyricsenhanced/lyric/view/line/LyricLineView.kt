@@ -11,6 +11,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Shader
+import android.graphics.Typeface
 import android.text.TextPaint
 import android.util.AttributeSet
 import android.view.Choreographer
@@ -31,14 +32,14 @@ import com.juren233.hyperlyricsenhanced.lyric.view.sp
 import kotlin.math.ceil
 
 open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
-    View(context, attrs), UpdatableColor {
+    View(context, attrs), UpdatableColor, LyricTextPaintOwner {
 
     init {
         isHorizontalFadingEdgeEnabled = true
         setFadingEdgeLength(10.dp)
     }
 
-    val textPaint: TextPaint = TextPaintX().apply { textSize = 24f.sp }
+    override val textPaint: TextPaint = TextPaintX().apply { textSize = 24f.sp }
 
     val model: LyricModel get() = _model
     private var _model: LyricModel = emptyLyricModel()
@@ -81,6 +82,15 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             invalidate()
         }
 
+    var alignRight: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            syncRenderer.alignRight = value
+            scrollRenderer.alignRight = value
+            invalidate()
+        }
+
     var playListener: LyricPlayListener? = null
         set(value) {
             field = value
@@ -112,7 +122,24 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     private val lineState = LineState()
     private val scrollRenderer = ScrollTextRenderer()
     private val syncRenderer = WordSyncRenderer(this)
+    private val lineShadowRenderer = LineShadowRenderer()
+
+    override fun forEachDrawingTextPaint(action: (TextPaint) -> Unit) {
+        // Host shadow parameters live only on textPaint. Word-sync color paints remain untouched.
+        action(textPaint)
+    }
+
     private val animator = Animator()
+
+    private var baseTypeface: Typeface = Typeface.DEFAULT
+    private var narrowTypeface: Typeface? = null
+
+    private val currentTypefaceSelector: ((Char) -> Typeface)?
+        get() {
+            val narrow = narrowTypeface ?: return null
+            val base = baseTypeface
+            return { ch -> if (ch.isCjk()) base else narrow }
+        }
 
     private var activeRenderer: LineRenderer = scrollRenderer
 
@@ -156,6 +183,13 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         invalidate()
     }
 
+    private fun applyCurrentTypeface() {
+        textPaint.typeface = baseTypeface
+        syncRenderer.setTypeface(baseTypeface)
+        syncRenderer.typefaceSelector = currentTypefaceSelector
+        scrollRenderer.typefaceSelector = currentTypefaceSelector
+    }
+
     fun setLyric(rawLine: LyricLine?) {
         val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
 
@@ -164,6 +198,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         scrollStarted = false
 
         _model = line?.normalize()?.createModel() ?: emptyLyricModel()
+        applyCurrentTypeface()
         activeRenderer = if (_model.isPlainText) scrollRenderer else syncRenderer
         refreshSizes()
         updateColorsIfReady()
@@ -177,8 +212,9 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         this.centerIfPossible = center
         updateColor(text.color, highlight.background, highlight.foreground)
         setTextSize(text.size)
-        textPaint.typeface = text.typeface
-        syncRenderer.setTypeface(text.typeface)
+        baseTypeface = text.typeface
+        narrowTypeface = text.narrowTypeface
+        applyCurrentTypeface()
         syncRenderer.isGradientEnabled = gradient
 
         scrollRenderer.apply {
@@ -291,7 +327,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     fun refreshSizes() {
-        _model.updateSizes(textPaint)
+        _model.updateSizes(textPaint, currentTypefaceSelector)
     }
 
     fun relayout() {
@@ -314,6 +350,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         lineState.reset()
         scrollRenderer.reset(lineState)
         syncRenderer.reset(lineState)
+        lineShadowRenderer.clear()
         _model = emptyLyricModel()
         activeRenderer = scrollRenderer
         refreshSizes()
@@ -341,13 +378,36 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
                 textPaint,
                 measuredWidth,
                 measuredHeight,
-                centerIfPossible
+                centerIfPossible,
+                alignRight
             )
             if (playbackActive && !isStaticPreview && isShown) postInvalidateOnAnimation()
         } else {
-            activeRenderer.draw(canvas, _model, textPaint, lineState, measuredWidth, measuredHeight)
+            drawShadowAndContent(canvas, measuredWidth)
         }
     }
+
+    private fun drawShadowAndContent(canvas: Canvas, availableWidth: Int) {
+        lineShadowRenderer.draw(
+            canvas = canvas,
+            model = _model,
+            sourcePaint = textPaint,
+            typefaceSelector = currentTypefaceSelector,
+            fontSignature = currentFontSignature(),
+            viewWidth = availableWidth,
+            viewHeight = measuredHeight,
+            scrollOffset = lineState.scrollOffset,
+            centerIfPossible = centerIfPossible,
+            alignRight = alignRight,
+            ghostSpacing = ghostSpacing,
+        )
+        textPaint.withoutShadowLayer {
+            activeRenderer.draw(canvas, _model, textPaint, lineState, availableWidth, measuredHeight)
+        }
+    }
+
+    private fun currentFontSignature(): Int =
+        31 * System.identityHashCode(baseTypeface) + System.identityHashCode(narrowTypeface)
 
     override fun getLeftFadingEdgeStrength(): Float {
         if (lineWidth <= width || horizontalFadingEdgeLength <= 0) return 0f
@@ -446,8 +506,9 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         val availableWidth = measuredWidth.toFloat()
         return when {
             textWidth >= availableWidth -> 0f
-            isAlignedRight -> availableWidth - textWidth
+            alignRight -> availableWidth - textWidth
             centerIfPossible -> (availableWidth - textWidth) / 2f
+            isAlignedRight -> availableWidth - textWidth
             else -> 0f
         }
     }
@@ -508,4 +569,17 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             }
         }
     }
+}
+
+private fun Char.isCjk(): Boolean {
+    val block = Character.UnicodeBlock.of(this)
+    return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
+        block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A ||
+        block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B ||
+        block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS ||
+        block == Character.UnicodeBlock.HIRAGANA ||
+        block == Character.UnicodeBlock.KATAKANA ||
+        block == Character.UnicodeBlock.HANGUL_SYLLABLES ||
+        block == Character.UnicodeBlock.HANGUL_JAMO ||
+        block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO
 }

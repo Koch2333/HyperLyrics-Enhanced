@@ -5,11 +5,13 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.media.MediaMetadataHelper
 import com.juren233.hyperlyricsenhanced.root.HookEntry
 import com.juren233.hyperlyricsenhanced.root.LyriconDataBridge
 import com.juren233.hyperlyricsenhanced.lyric.view.RichLyricLineView
 import com.juren233.hyperlyricsenhanced.lyric.view.SpaceGateRichLyricLineView
+import com.juren233.hyperlyricsenhanced.lyric.view.line.LyricTextPaintOwner
 import com.juren233.hyperlyricsenhanced.root.island.view.MaxWidthFrameLayout
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 
@@ -45,7 +47,58 @@ internal object IslandLyricTextInjector {
 
         IslandHostFacade.applyHostSettings(rootView, prefs)
         IslandViewRegistry.refreshInjectedViews(rootView)
+        if (changed) {
+            IslandAlbumCoverStyleHooker.refreshLeftContentTextShadows()
+        }
+        if (BuildConfig.DEBUG && (changed || config.adjacentBackgroundTranslation)) {
+            logGradientShadowDiagnostic(rootView, config, changed, phase = "inject_return")
+            rootView.post {
+                logGradientShadowDiagnostic(rootView, config, changed, phase = "posted_after_content")
+            }
+        }
         return changed
+    }
+
+    private fun logGradientShadowDiagnostic(
+        rootView: ViewGroup,
+        config: IslandSlotRuntimeConfig,
+        changed: Boolean,
+        phase: String,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        HookLogger.i(
+            TAG,
+            "[GradientShadowDiag] phase=$phase, changed=$changed, " +
+                "activeMode=${config.activeMode}, leftMode=${config.leftMode}, " +
+                "rightMode=${config.rightMode}, adjacent=${config.adjacentBackgroundTranslation}, " +
+                "supported=${config.supportsAdjacentBackgroundTranslation}, " +
+                "targetLeft=${config.adjacentTranslationTargetIsLeft}, " +
+                "left=${describeShadowSlot(rootView, IslandProbeUtils.LEFT_TEST_VIEW_TAG)}, " +
+                "right=${describeShadowSlot(rootView, IslandProbeUtils.RIGHT_TEST_VIEW_TAG)}",
+        )
+    }
+
+    private fun describeShadowSlot(rootView: ViewGroup, tag: String): String {
+        val target = rootView.findViewWithTag<View>(tag) ?: return "missing"
+        val paints = ArrayList<String>()
+        fun collect(view: View) {
+            if (view is LyricTextPaintOwner) {
+                view.forEachDrawingTextPaint { paint ->
+                    paints += "${view.javaClass.name}@${System.identityHashCode(view).toString(16)}" +
+                        "/paint@${System.identityHashCode(paint).toString(16)}" +
+                        "(attached=${view.isAttachedToWindow},visibility=${view.visibility}," +
+                        "shadow=${paint.getShadowLayerRadius()}/${paint.getShadowLayerDx()}/" +
+                        "${paint.getShadowLayerDy()}/0x${paint.getShadowLayerColor().toUInt().toString(16)})"
+                }
+            }
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) collect(view.getChildAt(index))
+            }
+        }
+        collect(target)
+        return "${target.javaClass.name}@${System.identityHashCode(target).toString(16)}" +
+            "(attached=${target.isAttachedToWindow},visibility=${target.visibility}," +
+            "tag=${target.tag},paints=[${paints.joinToString(" | ")}])"
     }
 
     fun restoreExistingSlotsLightweight(rootView: ViewGroup): Boolean {
@@ -96,6 +149,20 @@ internal object IslandLyricTextInjector {
             rootView.findViewWithTag<View>(IslandProbeUtils.RIGHT_TEST_VIEW_TAG) != null
     }
 
+    fun hasVisibleInjectedContent(rootView: ViewGroup): Boolean {
+        fun isVisible(tag: String): Boolean {
+            return rootView.findViewWithTag<View>(tag)
+                ?.visibility
+                ?.let { visibility -> visibility != View.GONE }
+                ?: false
+        }
+
+        return isVisible(IslandProbeUtils.LEFT_TEST_WRAPPER_TAG) ||
+            isVisible(IslandProbeUtils.RIGHT_TEST_WRAPPER_TAG) ||
+            isVisible(IslandProbeUtils.LEFT_TEST_VIEW_TAG) ||
+            isVisible(IslandProbeUtils.RIGHT_TEST_VIEW_TAG)
+    }
+
     fun refreshCurrentContent(rootView: ViewGroup, includeLyricSlots: Boolean = true, force: Boolean = false, suppressAnimation: Boolean = false): Boolean {
         val prefs = HookEntry.instance?.prefs ?: return false
         val config = IslandSlotRuntimeConfig.from(prefs)
@@ -126,6 +193,70 @@ internal object IslandLyricTextInjector {
         if (config.rightMode == 7) {
             freezeLyricView(rootView.findViewWithTag(IslandProbeUtils.RIGHT_TEST_VIEW_TAG), position)
         }
+    }
+
+    fun resumeInjectedContentMotion(rootView: ViewGroup, playbackActive: Boolean) {
+        val prefs = HookEntry.instance?.prefs ?: return
+        val config = IslandSlotRuntimeConfig.from(prefs)
+        var resumed = 0
+        if (config.shouldInjectLeft) {
+            resumed += resumeSlotMotion(
+                rootView.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG),
+                config.leftMode,
+                config,
+                playbackActive,
+            )
+        }
+        if (config.shouldInjectRight) {
+            resumed += resumeSlotMotion(
+                rootView.findViewWithTag(IslandProbeUtils.RIGHT_TEST_VIEW_TAG),
+                config.rightMode,
+                config,
+                playbackActive,
+            )
+        }
+        if (BuildConfig.DEBUG && resumed > 0) {
+            HookLogger.d(
+                TAG,
+                "真实岛内容动画已恢复: playbackActive=$playbackActive, targets=$resumed",
+            )
+        }
+    }
+
+    private fun resumeSlotMotion(
+        view: View?,
+        mode: Int,
+        config: IslandSlotRuntimeConfig,
+        playbackActive: Boolean,
+    ): Int {
+        when (view) {
+            is RichLyricLineView -> {
+                view.setPlaybackActive(playbackActive)
+                if (IslandContentMotionResumePolicy.shouldRequestMarquee(
+                        mode = mode,
+                        playbackActive = playbackActive,
+                        lyricMarqueeEnabled = config.lyricMarqueeEnabled,
+                        metadataMarqueeEnabled = config.metadataMarqueeEnabled,
+                    )
+                ) {
+                    view.requestStartMarquee()
+                }
+            }
+            is SpaceGateRichLyricLineView -> {
+                view.setPlaybackActive(playbackActive)
+                if (IslandContentMotionResumePolicy.shouldRequestMarquee(
+                        mode = mode,
+                        playbackActive = playbackActive,
+                        lyricMarqueeEnabled = config.lyricMarqueeEnabled,
+                        metadataMarqueeEnabled = config.metadataMarqueeEnabled,
+                    )
+                ) {
+                    view.requestStartMarquee()
+                }
+            }
+            else -> return 0
+        }
+        return 1
     }
 
     private fun freezeLyricView(view: View?, position: Long) {
@@ -213,8 +344,14 @@ internal object IslandLyricTextInjector {
         val wrapper = container.findViewWithTag<View>("${viewTag}_WRAPPER") as? MaxWidthFrameLayout
             ?: return false
         val targetView = wrapper.findViewWithTag<View>(viewTag) ?: return false
+        val prefs = HookEntry.instance?.prefs ?: return false
+        val config = IslandSlotRuntimeConfig.from(prefs)
+        val widthPx = config.widthPx(rootView, parentName) ?: return false
 
-        var changed = false
+        // Apply user geometry before making the fake/real content visible. Otherwise MIUI can
+        // start its return animation with the default wrapper padding and the next refresh
+        // changes it again, producing a visible layout jump.
+        var changed = updateWrapper(wrapper, widthPx, config, parentName)
         wrapper.keepVisible = true
         if (container.visibility != View.VISIBLE) {
             container.visibility = View.VISIBLE
@@ -228,6 +365,7 @@ internal object IslandLyricTextInjector {
             targetView.visibility = View.VISIBLE
             changed = true
         }
+        changed = forceWrapperLayout(wrapper, container, widthPx) || changed
         hideNativeChildren(container, wrapper)
         return changed
     }
@@ -237,8 +375,13 @@ internal object IslandLyricTextInjector {
             ?: return false
         val targetView = wrapper.findViewWithTag<View>(viewTag) ?: return false
         val container = wrapper.parent as? ViewGroup ?: return false
+        val parentName = findIslandParentName(wrapper) ?: return false
+        val prefs = HookEntry.instance?.prefs ?: return false
+        val config = IslandSlotRuntimeConfig.from(prefs)
+        val widthPx = config.widthPx(rootView, parentName) ?: return false
 
-        var changed = false
+        // Same pre-visibility synchronization for module-level fake/real restores.
+        var changed = updateWrapper(wrapper, widthPx, config, parentName)
         wrapper.keepVisible = true
         if (container.visibility != View.VISIBLE) {
             container.visibility = View.VISIBLE
@@ -252,8 +395,27 @@ internal object IslandLyricTextInjector {
             targetView.visibility = View.VISIBLE
             changed = true
         }
+        changed = forceWrapperLayout(wrapper, container, widthPx) || changed
         hideNativeChildren(container, wrapper)
         return changed
+    }
+
+    private fun findIslandParentName(view: View): String? {
+        var current = view.parent as? View
+        while (current != null) {
+            val name = if (current.id != View.NO_ID) {
+                runCatching { current.resources.getResourceEntryName(current.id) }.getOrNull()
+            } else {
+                null
+            }
+            if (name == IslandProbeUtils.LEFT_PARENT_NAME ||
+                name == IslandProbeUtils.RIGHT_PARENT_NAME
+            ) {
+                return name
+            }
+            current = current.parent as? View
+        }
+        return null
     }
 
     private fun updateWrapper(wrapper: MaxWidthFrameLayout, widthPx: Int, config: IslandSlotRuntimeConfig, parentName: String): Boolean {
@@ -413,5 +575,17 @@ internal object IslandLyricTextInjector {
             val child = container.getChildAt(i)
             child.visibility = if (child == keepView) View.VISIBLE else View.GONE
         }
+    }
+}
+
+internal object IslandContentMotionResumePolicy {
+    fun shouldRequestMarquee(
+        mode: Int,
+        playbackActive: Boolean,
+        lyricMarqueeEnabled: Boolean,
+        metadataMarqueeEnabled: Boolean,
+    ): Boolean {
+        if (!playbackActive) return false
+        return if (mode == 7) lyricMarqueeEnabled else mode in 1..6 && metadataMarqueeEnabled
     }
 }

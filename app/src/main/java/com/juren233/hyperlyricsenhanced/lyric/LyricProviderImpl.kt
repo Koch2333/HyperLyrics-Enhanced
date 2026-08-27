@@ -4,6 +4,7 @@ import android.content.Context
 import com.juren233.hyperlyricsenhanced.common.lyric.LrcParser
 import com.juren233.hyperlyricsenhanced.online.LrcCacheManager
 import com.juren233.hyperlyricsenhanced.online.OnlineLyricTargeter
+import com.juren233.hyperlyricsenhanced.online.OnlineTranslationSourcePreferences
 import com.juren233.hyperlyricsenhanced.utils.LogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

@@ -6,6 +6,7 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
+import android.os.SystemClock
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import java.util.Collections
 import java.util.WeakHashMap
@@ -353,26 +354,62 @@ internal class AppleInAppMetadataApplier(
             ?.takeIf { mediaId == null || it.mediaId == mediaId }
         if (dispatcherRefresh == null && listenerRefresh == null) return
         val appliedAlias = mediaId?.let { id -> alias?.let { AppliedMetadataAlias(id, it) } }
+        val traceTargetId = mediaId ?: listenerRefresh?.mediaId ?: dispatcherRefresh?.mediaId
+        val postedAtNanos = SystemClock.elapsedRealtimeNanos()
         runtime.mainHandler.post {
+            val mainStartedAtNanos = SystemClock.elapsedRealtimeNanos()
+            AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                songId = traceTargetId,
+                stage = "metadata_refresh_main_started",
+                details = "queueWaitMs=${(mainStartedAtNanos - postedAtNanos) / 1_000_000.0}," +
+                    "thread=${Thread.currentThread().name}"
+            )
             var listenerHandled = false
+            var callbackTarget = "none"
+            var callbackInvocations = 0
             listenerRefresh?.let { refresh ->
                 val listener = refresh.listener.get()
                 val metadata = refresh.metadata.get()
                 if (listener != null && metadata != null) {
                     if (appliedAlias != null && callbackAppliedAliases[listener] == appliedAlias) {
                         listenerHandled = true
+                        callbackTarget = "listener_deduplicated"
                     } else {
+                        val callbackStartedAtNanos = SystemClock.elapsedRealtimeNanos()
+                        callbackInvocations += 1
+                        AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                            songId = refresh.mediaId,
+                            stage = "metadata_listener_callback_started",
+                            details = "thread=${Thread.currentThread().name}"
+                        )
                         runCatching { refresh.method.invoke(listener, metadata) }
                             .onSuccess {
                                 listenerHandled = true
+                                callbackTarget = "listener"
                                 appliedAlias?.let { callbackAppliedAliases[listener] = it }
                                 logMetadataIdentity(
                                     "in_app_now_playing_refresh",
                                     "refreshId=${refresh.mediaId}",
                                 )
+                                AppleSourceSwitchPerformanceDiagnostics.record(
+                                    songId = refresh.mediaId,
+                                    event = "metadata_callback_invoke",
+                                    durationNanos =
+                                        SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos,
+                                    details = "target=listener,success=true",
+                                )
                             }
                             .onFailure {
+                                callbackTarget = "listener_failed"
                                 ProviderLogger.error("Apple Music App 播放页元数据刷新失败", it)
+                                AppleSourceSwitchPerformanceDiagnostics.record(
+                                    songId = refresh.mediaId,
+                                    event = "metadata_callback_invoke",
+                                    durationNanos =
+                                        SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos,
+                                    details = "target=listener,success=false,error=" +
+                                        it.javaClass.simpleName,
+                                )
                             }
                     }
                 }
@@ -384,20 +421,124 @@ internal class AppleInAppMetadataApplier(
                     if (dispatcher != null && metadata != null &&
                         (appliedAlias == null || callbackAppliedAliases[dispatcher] != appliedAlias)
                     ) {
+                        val callbackStartedAtNanos = SystemClock.elapsedRealtimeNanos()
+                        callbackInvocations += 1
+                        AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                            songId = refresh.mediaId,
+                            stage = "metadata_dispatcher_callback_started",
+                            details = "thread=${Thread.currentThread().name}"
+                        )
                         runCatching { refresh.method.invoke(dispatcher, metadata) }
                             .onSuccess {
+                                callbackTarget = "dispatcher"
                                 appliedAlias?.let { callbackAppliedAliases[dispatcher] = it }
                                 logMetadataIdentity(
                                     "in_app_dispatcher_refresh",
                                     "refreshId=${refresh.mediaId}",
                                 )
+                                AppleSourceSwitchPerformanceDiagnostics.record(
+                                    songId = refresh.mediaId,
+                                    event = "metadata_callback_invoke",
+                                    durationNanos =
+                                        SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos,
+                                    details = "target=dispatcher,success=true",
+                                )
                             }
                             .onFailure {
+                                callbackTarget = "dispatcher_failed"
                                 ProviderLogger.error("Apple Music App 全局元数据刷新失败", it)
+                                AppleSourceSwitchPerformanceDiagnostics.record(
+                                    songId = refresh.mediaId,
+                                    event = "metadata_callback_invoke",
+                                    durationNanos =
+                                        SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos,
+                                    details = "target=dispatcher,success=false,error=" +
+                                        it.javaClass.simpleName,
+                                )
                             }
                     }
                 }
             }
+            AppleSourceSwitchPerformanceDiagnostics.record(
+                songId = traceTargetId,
+                event = "metadata_refresh_main_total",
+                durationNanos = SystemClock.elapsedRealtimeNanos() - mainStartedAtNanos,
+                details = "queueWaitMs=" +
+                    ((mainStartedAtNanos - postedAtNanos) / 1_000_000.0) +
+                    ",target=$callbackTarget,invocations=$callbackInvocations," +
+                    "listenerHandled=$listenerHandled",
+            )
+            AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                songId = traceTargetId,
+                stage = "metadata_refresh_main_finished",
+                details = "target=$callbackTarget,invocations=$callbackInvocations," +
+                    "listenerHandled=$listenerHandled,totalMs=" +
+                    ((SystemClock.elapsedRealtimeNanos() - mainStartedAtNanos) / 1_000_000.0) +
+                    ",thread=${Thread.currentThread().name}"
+            )
+        }
+    }
+
+    /**
+     * 重新触发当前 PlaybackItem 的 DataBinding 计算。
+     *
+     * Apple Music 6.5.1 的歌词按钮把 `e1.i(playbackItem)` 的首次结果缓存在
+     * `l7.N2` 绑定中；仅重放媒体元数据回调时，新旧 PlaybackItem 在 Hook 下会同时
+     * 返回相同的 `hasLyrics()`，差异比较因此不会重新绑定。这里使用原始 DEX 已确认的
+     * `BaseCollectionItemView -> androidx.databinding.a#notifyChange()` 路径，只使现有绑定
+     * 重新读取可用性，不修改 Apple 的歌词字段或来源优先级。
+     */
+    fun refreshPlaybackItemBindings(mediaId: String?) {
+        val targetId = mediaId?.takeIf(String::isNotBlank) ?: return
+        val postedAtNanos = SystemClock.elapsedRealtimeNanos()
+        runtime.mainHandler.post {
+            val mainStartedAtNanos = SystemClock.elapsedRealtimeNanos()
+            AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                songId = targetId,
+                stage = "playback_binding_refresh_main_started",
+                details = "queueWaitMs=${(mainStartedAtNanos - postedAtNanos) / 1_000_000.0}," +
+                    "thread=${Thread.currentThread().name}"
+            )
+            var candidates = 0
+            var standardCandidates = 0
+            var refreshed = 0
+            val notifiedItems = ArrayList<String>()
+            registry.livePlaybackItemRefs(targetId).forEach { ref ->
+                candidates += 1
+                if (ref.contract != InAppPlaybackItemContract.STANDARD) return@forEach
+                standardCandidates += 1
+                val playbackItem = ref.playbackItem.get() ?: return@forEach
+                val itemIdentity =
+                    "${playbackItem.javaClass.name}@" +
+                        System.identityHashCode(playbackItem).toString(16)
+                if (notifyPlaybackItemChanged(playbackItem, "歌词可用性刷新")) {
+                    refreshed += 1
+                    notifiedItems += itemIdentity
+                }
+            }
+            if (BuildConfig.DEBUG) {
+                ProviderLogger.diagnostic(
+                    "Apple Music 无歌词补充播放页绑定刷新: " +
+                        "id=$targetId, items=$refreshed, " +
+                        "notified=${notifiedItems.joinToString(prefix = "[", postfix = "]")}"
+                )
+            }
+            AppleSourceSwitchPerformanceDiagnostics.record(
+                songId = targetId,
+                event = "playback_binding_refresh_main_total",
+                durationNanos = SystemClock.elapsedRealtimeNanos() - mainStartedAtNanos,
+                units = refreshed.toLong(),
+                details = "queueWaitMs=" +
+                    ((mainStartedAtNanos - postedAtNanos) / 1_000_000.0) +
+                    ",candidates=$candidates,standard=$standardCandidates,notified=$refreshed",
+            )
+            AppleSourceSwitchPerformanceDiagnostics.stageForSong(
+                songId = targetId,
+                stage = "playback_binding_refresh_main_finished",
+                details = "candidates=$candidates,standard=$standardCandidates,notified=$refreshed," +
+                    "totalMs=${(SystemClock.elapsedRealtimeNanos() - mainStartedAtNanos) / 1_000_000.0}," +
+                    "thread=${Thread.currentThread().name}"
+            )
         }
     }
 
@@ -453,7 +594,7 @@ internal class AppleInAppMetadataApplier(
         }.isSuccess
     }
 
-    private fun notifyPlaybackItemChanged(playbackItem: Any, operation: String) {
+    private fun notifyPlaybackItemChanged(playbackItem: Any, operation: String): Boolean =
         runCatching {
             AppleReflection.call(
                 playbackItem,
@@ -461,15 +602,16 @@ internal class AppleInAppMetadataApplier(
                     AppleMusicRuntimeMember.CONTENT_ITEM_NOTIFY_CHANGE_METHOD,
                 ),
             )
+            true
         }
-            .onFailure {
+            .getOrElse {
                 ProviderLogger.error(
                     "Apple Music App PlaybackItem $operation 通知失败: " +
                         "class=${playbackItem.javaClass.name}",
                     it,
                 )
+                false
             }
-    }
 
     private fun setMetadataField(
         metadata: Any,

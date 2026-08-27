@@ -3,6 +3,7 @@ package com.juren233.hyperlyricsenhanced.root.island
 import android.content.SharedPreferences
 import android.view.View
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.common.IslandLyricPosition
 import com.juren233.hyperlyricsenhanced.common.lyric.AdjacentTranslationPolicy
 
 internal data class IslandSlotRuntimeConfig(
@@ -29,7 +30,8 @@ internal data class IslandSlotRuntimeConfig(
     val fontItalic: Boolean,
     val fadingEdgeLength: Int,
     val gradientProgress: Boolean,
-    val centerLyric: Boolean,
+    val leftLyricPosition: Int,
+    val rightLyricPosition: Int,
     val centerGroupVocals: Boolean,
     val lyricAnimationEnabled: Boolean,
     val lyricAnimationId: String,
@@ -46,22 +48,45 @@ internal data class IslandSlotRuntimeConfig(
     val metadataMarqueeInfinite: Boolean,
     val syllableRelative: Boolean,
     val syllableHighlight: Boolean,
-    val translationDisplay: Boolean,
+    val translationDisplayMode: Int,
+    val translationFallback: Boolean,
     val translationOnly: Boolean,
     val swapTranslation: Boolean,
     val nextLyricLine: Boolean,
     val adjacentBackgroundTranslation: Boolean,
     val extractCoverTextColor: Boolean,
     val extractCoverTextGradient: Boolean,
+    val customTextColorEnabled: Boolean,
+    val customTextColor: Int,
+    val monetTextColorEnabled: Boolean,
     val customFontPath: String,
+    val narrowLatinFont: Boolean,
     val wordMotionEnabled: Boolean,
     val wordMotionCjkLift: Float,
     val wordMotionCjkWave: Float,
     val wordMotionLatinLift: Float,
-    val wordMotionLatinWave: Float
+    val wordMotionLatinWave: Float,
 ) {
+    val translationDisplay: Boolean
+        get() = translationDisplayMode != RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+
     val isSplitMode: Boolean
         get() = activeMode == 1
+
+    fun lyricPosition(isLeft: Boolean): Int = if (isLeft) leftLyricPosition else rightLyricPosition
+
+    fun centerLyric(isLeft: Boolean): Boolean =
+        IslandLyricPosition.centers(lyricPosition(isLeft))
+
+    fun rightAlignLyric(isLeft: Boolean): Boolean =
+        IslandLyricPosition.alignsRight(lyricPosition(isLeft))
+
+    val groupVocalCenteringEnabled: Boolean
+        get() = IslandLyricPosition.supportsGroupVocalCentering(
+            lyricMode = activeMode,
+            leftContent = leftMode,
+            rightContent = rightMode
+        )
 
     val styleSignature: String = listOf(
         activeMode,
@@ -71,7 +96,8 @@ internal data class IslandSlotRuntimeConfig(
         fontItalic,
         fadingEdgeLength,
         gradientProgress,
-        centerLyric,
+        leftLyricPosition,
+        rightLyricPosition,
         centerGroupVocals,
         lyricAnimationEnabled,
         lyricAnimationId,
@@ -88,7 +114,8 @@ internal data class IslandSlotRuntimeConfig(
         metadataMarqueeInfinite,
         syllableRelative,
         syllableHighlight,
-        translationDisplay,
+        translationDisplayMode,
+        translationFallback,
         translationOnly,
         swapTranslation,
         nextLyricLine,
@@ -100,7 +127,11 @@ internal data class IslandSlotRuntimeConfig(
         nextSongPreviewWeight,
         extractCoverTextColor,
         extractCoverTextGradient,
+        customTextColorEnabled,
+        customTextColor,
+        monetTextColorEnabled,
         customFontPath,
+        narrowLatinFont,
         wordMotionEnabled,
         wordMotionCjkLift,
         wordMotionCjkWave,
@@ -191,11 +222,11 @@ internal data class IslandSlotRuntimeConfig(
     }
 
     fun paddingLeftPx(rootView: View, parentName: String): Int {
-        return (paddingLeftDp(parentName) * rootView.resources.displayMetrics.density).toInt().coerceAtLeast(0)
+        return (paddingLeftDp(parentName) * rootView.resources.displayMetrics.density).toInt()
     }
 
     fun paddingRightPx(rootView: View, parentName: String): Int {
-        return (paddingRightDp(parentName) * rootView.resources.displayMetrics.density).toInt().coerceAtLeast(0)
+        return (paddingRightDp(parentName) * rootView.resources.displayMetrics.density).toInt()
     }
 
     companion object {
@@ -258,7 +289,11 @@ internal data class IslandSlotRuntimeConfig(
         }
 
         fun from(prefs: SharedPreferences): IslandSlotRuntimeConfig {
-            val activeMode = prefs.getInt(RootConstants.KEY_HOOK_LYRIC_MODE, RootConstants.DEFAULT_HOOK_LYRIC_MODE)
+            val activeMode = runtimeInt(
+                prefs,
+                RootConstants.KEY_HOOK_LYRIC_MODE,
+                RootConstants.DEFAULT_HOOK_LYRIC_MODE
+            )
             val nextSongDurationSeconds = prefs.getInt(
                 RootConstants.KEY_HOOK_ISLAND_NEXT_SONG_DURATION,
                 RootConstants.DEFAULT_HOOK_ISLAND_NEXT_SONG_DURATION
@@ -269,8 +304,16 @@ internal data class IslandSlotRuntimeConfig(
             )
             return IslandSlotRuntimeConfig(
                 activeMode = activeMode,
-                leftMode = if (activeMode == 1) 7 else prefs.getInt(RootConstants.KEY_HOOK_ISLAND_CONTENT_LEFT, RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_LEFT),
-                rightMode = if (activeMode == 1) 7 else prefs.getInt(RootConstants.KEY_HOOK_ISLAND_CONTENT_RIGHT, RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_RIGHT),
+                leftMode = if (activeMode == 1) 7 else runtimeInt(
+                    prefs,
+                    RootConstants.KEY_HOOK_ISLAND_CONTENT_LEFT,
+                    RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_LEFT
+                ),
+                rightMode = if (activeMode == 1) 7 else runtimeInt(
+                    prefs,
+                    RootConstants.KEY_HOOK_ISLAND_CONTENT_RIGHT,
+                    RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_RIGHT
+                ),
                 showAlbum = prefs.getBoolean(RootConstants.KEY_HOOK_ISLAND_LEFT_ALBUM, RootConstants.DEFAULT_HOOK_ISLAND_LEFT_ALBUM),
                 showRhythm = prefs.getBoolean(RootConstants.KEY_HOOK_ISLAND_RIGHT_ICON, RootConstants.DEFAULT_HOOK_ISLAND_RIGHT_ICON),
                 leftPaddingLeftDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_LEFT_PADDING_LEFT, RootConstants.DEFAULT_HOOK_ISLAND_LEFT_PADDING_LEFT),
@@ -310,8 +353,19 @@ internal data class IslandSlotRuntimeConfig(
                 fontItalic = prefs.getBoolean(RootConstants.KEY_HOOK_FONT_ITALIC, RootConstants.DEFAULT_HOOK_FONT_ITALIC),
                 fadingEdgeLength = prefs.getInt(RootConstants.KEY_HOOK_FADING_EDGE_LENGTH, RootConstants.DEFAULT_HOOK_FADING_EDGE_LENGTH),
                 gradientProgress = prefs.getBoolean(RootConstants.KEY_HOOK_GRADIENT_PROGRESS, RootConstants.DEFAULT_HOOK_GRADIENT_PROGRESS),
-                centerLyric = prefs.getBoolean(RootConstants.KEY_HOOK_CENTER_LYRIC, RootConstants.DEFAULT_HOOK_CENTER_LYRIC),
-                centerGroupVocals = prefs.getBoolean(RootConstants.KEY_HOOK_CENTER_GROUP_VOCALS, RootConstants.DEFAULT_HOOK_CENTER_GROUP_VOCALS),
+                leftLyricPosition = resolveSideLyricPosition(
+                    prefs = prefs,
+                    key = RootConstants.KEY_HOOK_ISLAND_LEFT_LYRIC_POSITION
+                ),
+                rightLyricPosition = resolveSideLyricPosition(
+                    prefs = prefs,
+                    key = RootConstants.KEY_HOOK_ISLAND_RIGHT_LYRIC_POSITION
+                ),
+                centerGroupVocals = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_CENTER_GROUP_VOCALS,
+                    RootConstants.DEFAULT_HOOK_CENTER_GROUP_VOCALS
+                ),
                 lyricAnimationEnabled = prefs.getBoolean(RootConstants.KEY_HOOK_ANIM_ENABLE, RootConstants.DEFAULT_HOOK_ANIM_ENABLE),
                 lyricAnimationId = prefs.getString(RootConstants.KEY_HOOK_ANIM_ID, RootConstants.DEFAULT_HOOK_ANIM_ID) ?: RootConstants.DEFAULT_HOOK_ANIM_ID,
                 lyricMarqueeEnabled = prefs.getBoolean(RootConstants.KEY_HOOK_MARQUEE_MODE, RootConstants.DEFAULT_HOOK_MARQUEE_MODE),
@@ -327,14 +381,42 @@ internal data class IslandSlotRuntimeConfig(
                 metadataMarqueeInfinite = prefs.getBoolean(RootConstants.KEY_HOOK_MARQUEE_METADATA_INFINITE, RootConstants.DEFAULT_HOOK_MARQUEE_METADATA_INFINITE),
                 syllableRelative = prefs.getBoolean(RootConstants.KEY_HOOK_SYLLABLE_RELATIVE, RootConstants.DEFAULT_HOOK_SYLLABLE_RELATIVE),
                 syllableHighlight = prefs.getBoolean(RootConstants.KEY_HOOK_SYLLABLE_HIGHLIGHT, RootConstants.DEFAULT_HOOK_SYLLABLE_HIGHLIGHT),
-                translationDisplay = com.juren233.hyperlyricsenhanced.root.utils.TranslationHelper.isTranslationDisplayed(prefs),
+                translationDisplayMode = com.juren233.hyperlyricsenhanced.root.utils.TranslationHelper.getTranslationDisplayMode(prefs),
+                translationFallback = com.juren233.hyperlyricsenhanced.root.utils.TranslationHelper.isTranslationFallback(prefs),
                 translationOnly = prefs.getBoolean(RootConstants.KEY_HOOK_TRANSLATION_ONLY, RootConstants.DEFAULT_HOOK_TRANSLATION_ONLY),
                 swapTranslation = prefs.getBoolean(RootConstants.KEY_HOOK_SWAP_TRANSLATION, RootConstants.DEFAULT_HOOK_SWAP_TRANSLATION),
                 nextLyricLine = prefs.getBoolean(RootConstants.KEY_HOOK_NEXT_LYRIC_LINE, RootConstants.DEFAULT_HOOK_NEXT_LYRIC_LINE),
                 adjacentBackgroundTranslation = prefs.getBoolean(RootConstants.KEY_HOOK_ADJACENT_BACKGROUND_TRANSLATION, RootConstants.DEFAULT_HOOK_ADJACENT_BACKGROUND_TRANSLATION),
-                extractCoverTextColor = prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR),
-                extractCoverTextGradient = prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT),
+                extractCoverTextColor = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR,
+                    RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR
+                ),
+                extractCoverTextGradient = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT,
+                    RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT
+                ),
+                customTextColorEnabled = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED,
+                    RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR_ENABLED
+                ),
+                customTextColor = IslandRuntimePreferenceReader.getInt(
+                    prefs,
+                    RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR,
+                    RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR
+                ),
+                monetTextColorEnabled = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_MONET_TEXT_COLOR,
+                    RootConstants.DEFAULT_HOOK_MONET_TEXT_COLOR
+                ),
                 customFontPath = prefs.getString(RootConstants.KEY_HOOK_CUSTOM_FONT_PATH, null).orEmpty(),
+                narrowLatinFont = prefs.getBoolean(
+                    RootConstants.KEY_HOOK_NARROW_LATIN_FONT,
+                    RootConstants.DEFAULT_HOOK_NARROW_LATIN_FONT
+                ),
                 wordMotionEnabled = prefs.getBoolean(RootConstants.KEY_HOOK_WORD_MOTION_ENABLED, RootConstants.DEFAULT_HOOK_WORD_MOTION_ENABLED),
                 wordMotionCjkLift = prefs.getFloat(RootConstants.KEY_HOOK_WORD_MOTION_CJK_LIFT, RootConstants.DEFAULT_HOOK_WORD_MOTION_CJK_LIFT),
                 wordMotionCjkWave = prefs.getFloat(RootConstants.KEY_HOOK_WORD_MOTION_CJK_WAVE, RootConstants.DEFAULT_HOOK_WORD_MOTION_CJK_WAVE),
@@ -342,5 +424,45 @@ internal data class IslandSlotRuntimeConfig(
                 wordMotionLatinWave = prefs.getFloat(RootConstants.KEY_HOOK_WORD_MOTION_LATIN_WAVE, RootConstants.DEFAULT_HOOK_WORD_MOTION_LATIN_WAVE)
             )
         }
+
+    private fun resolveSideLyricPosition(
+        prefs: SharedPreferences,
+        key: String
+    ): Int {
+        val legacyGlobalPosition = IslandLyricPosition.resolve(
+            storedPosition = runtimeInt(
+                prefs,
+                RootConstants.KEY_HOOK_LYRIC_POSITION,
+                Int.MIN_VALUE
+            )
+                .takeUnless { it == Int.MIN_VALUE },
+            legacyCenterEnabled = runtimeBoolean(
+                prefs,
+                RootConstants.KEY_HOOK_CENTER_LYRIC,
+                RootConstants.DEFAULT_HOOK_CENTER_LYRIC
+            )
+        )
+        return IslandLyricPosition.resolveSide(
+            storedSidePosition = runtimeInt(prefs, key, Int.MIN_VALUE)
+                .takeUnless { it == Int.MIN_VALUE },
+            legacyGlobalPosition = legacyGlobalPosition,
+            legacyCenterEnabled = false
+        )
     }
+
+    private fun runtimeInt(
+        prefs: SharedPreferences,
+        key: String,
+        default: Int
+    ): Int = IslandRuntimePreferenceOverrides.getInt(
+        key,
+        prefs.getInt(key, default)
+    )
+
+    private fun runtimeBoolean(
+        prefs: SharedPreferences,
+        key: String,
+        default: Boolean
+    ): Boolean = IslandRuntimePreferenceReader.getBoolean(prefs, key, default)
+}
 }

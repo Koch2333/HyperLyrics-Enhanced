@@ -9,12 +9,33 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import com.juren233.hyperlyricsenhanced.R
+import com.juren233.hyperlyricsenhanced.common.IslandLyricPosition
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.ui.component.CustomFontColorPickerDialog
 import com.juren233.hyperlyricsenhanced.ui.component.NumberInputDialog
 import com.juren233.hyperlyricsenhanced.ui.component.TextInputDialog
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.XposedLyricSettingPage
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookConfigSaver
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookPrefs
+
+internal const val FONT_COLOR_MODE_DEFAULT = 0
+internal const val FONT_COLOR_MODE_MONET = 1
+internal const val FONT_COLOR_MODE_COVER = 2
+internal const val FONT_COLOR_MODE_COVER_GRADIENT = 3
+internal const val FONT_COLOR_MODE_CUSTOM = 4
+
+internal fun resolveFontColorMode(
+    customEnabled: Boolean,
+    monetEnabled: Boolean,
+    coverEnabled: Boolean,
+    coverGradient: Boolean,
+): Int = when {
+    customEnabled -> FONT_COLOR_MODE_CUSTOM
+    monetEnabled -> FONT_COLOR_MODE_MONET
+    !coverEnabled -> FONT_COLOR_MODE_DEFAULT
+    coverGradient -> FONT_COLOR_MODE_COVER_GRADIENT
+    else -> FONT_COLOR_MODE_COVER
+}
 
 @Composable
 fun LyricDisplayPage() {
@@ -24,19 +45,113 @@ fun LyricDisplayPage() {
     var textSize by remember { mutableIntStateOf(prefs.getInt(RootConstants.KEY_HOOK_TEXT_SIZE, RootConstants.DEFAULT_HOOK_TEXT_SIZE)) }
     var textSizeRatio by remember { mutableFloatStateOf(prefs.getFloat(RootConstants.KEY_HOOK_TEXT_SIZE_RATIO, RootConstants.DEFAULT_HOOK_TEXT_SIZE_RATIO)) }
     var fadingEdge by remember { mutableIntStateOf(prefs.getInt(RootConstants.KEY_HOOK_FADING_EDGE_LENGTH, RootConstants.DEFAULT_HOOK_FADING_EDGE_LENGTH)) }
-    var extractCoverColor by remember { mutableStateOf(prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR)) }
-    var extractCoverGradient by remember { mutableStateOf(prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT)) }
+    var customFontColorEnabled by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED,
+                RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR_ENABLED
+            )
+        )
+    }
+    var customFontColor by remember {
+        mutableIntStateOf(
+            prefs.getInt(
+                RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR,
+                RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR
+            )
+        )
+    }
+    var monetFontColorEnabled by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_MONET_TEXT_COLOR,
+                RootConstants.DEFAULT_HOOK_MONET_TEXT_COLOR
+            )
+        )
+    }
+    var fontColorMode by remember {
+        mutableIntStateOf(
+            resolveFontColorMode(
+                customEnabled = customFontColorEnabled,
+                monetEnabled = monetFontColorEnabled,
+                coverEnabled = prefs.getBoolean(
+                    RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR,
+                    RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR
+                ),
+                coverGradient = prefs.getBoolean(
+                    RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT,
+                    RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT
+                ),
+            )
+        )
+    }
     var customFontPath by remember { mutableStateOf(prefs.getString(RootConstants.KEY_HOOK_CUSTOM_FONT_PATH, null) ?: "") }
+    var narrowLatinFont by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_NARROW_LATIN_FONT,
+                RootConstants.DEFAULT_HOOK_NARROW_LATIN_FONT
+            )
+        )
+    }
     var fontWeight by remember { mutableIntStateOf(prefs.getInt(RootConstants.KEY_HOOK_FONT_WEIGHT, RootConstants.DEFAULT_HOOK_FONT_WEIGHT)) }
     var fontItalic by remember { mutableStateOf(prefs.getBoolean(RootConstants.KEY_HOOK_FONT_ITALIC, RootConstants.DEFAULT_HOOK_FONT_ITALIC)) }
-    var centerLyric by remember { mutableStateOf(prefs.getBoolean(RootConstants.KEY_HOOK_CENTER_LYRIC, RootConstants.DEFAULT_HOOK_CENTER_LYRIC)) }
+    val legacyLyricPosition = remember {
+        IslandLyricPosition.resolve(
+            storedPosition = prefs.getInt(RootConstants.KEY_HOOK_LYRIC_POSITION, Int.MIN_VALUE)
+                .takeUnless { it == Int.MIN_VALUE },
+            legacyCenterEnabled = prefs.getBoolean(
+                RootConstants.KEY_HOOK_CENTER_LYRIC,
+                RootConstants.DEFAULT_HOOK_CENTER_LYRIC
+            )
+        )
+    }
+    var leftLyricPosition by remember {
+        mutableIntStateOf(
+            IslandLyricPosition.resolveSide(
+                storedSidePosition = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_LEFT_LYRIC_POSITION, Int.MIN_VALUE)
+                    .takeUnless { it == Int.MIN_VALUE },
+                legacyGlobalPosition = legacyLyricPosition,
+                legacyCenterEnabled = false
+            )
+        )
+    }
+    var rightLyricPosition by remember {
+        mutableIntStateOf(
+            IslandLyricPosition.resolveSide(
+                storedSidePosition = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_RIGHT_LYRIC_POSITION, Int.MIN_VALUE)
+                    .takeUnless { it == Int.MIN_VALUE },
+                legacyGlobalPosition = legacyLyricPosition,
+                legacyCenterEnabled = false
+            )
+        )
+    }
     var centerGroupVocals by remember { mutableStateOf(prefs.getBoolean(RootConstants.KEY_HOOK_CENTER_GROUP_VOCALS, RootConstants.DEFAULT_HOOK_CENTER_GROUP_VOCALS)) }
+    val lyricMode = prefs.getInt(RootConstants.KEY_HOOK_LYRIC_MODE, RootConstants.DEFAULT_HOOK_LYRIC_MODE)
+    val leftContent = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_CONTENT_LEFT, RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_LEFT)
+    val rightContent = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_CONTENT_RIGHT, RootConstants.DEFAULT_HOOK_ISLAND_CONTENT_RIGHT)
+    val showCenterGroupVocals = IslandLyricPosition.supportsGroupVocalCentering(
+        lyricMode = lyricMode,
+        leftContent = leftContent,
+        rightContent = rightContent
+    )
 
     var showTextSizeDialog by remember { mutableStateOf(false) }
     var showTextSizeRatioDialog by remember { mutableStateOf(false) }
     var showFadingEdgeDialog by remember { mutableStateOf(false) }
     var showFontPathDialog by remember { mutableStateOf(false) }
     var showFontWeightDialog by remember { mutableStateOf(false) }
+    var showCustomFontColorDialog by remember { mutableStateOf(false) }
+
+    CustomFontColorPickerDialog(
+        show = showCustomFontColorDialog,
+        initialColor = customFontColor,
+        onDismiss = { showCustomFontColorDialog = false },
+        onConfirm = { color ->
+            customFontColor = color
+            saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR, color)
+        },
+    )
 
     NumberInputDialog(
         show = showTextSizeDialog,
@@ -110,16 +225,53 @@ fun LyricDisplayPage() {
             onTextSizeRatioClick = { showTextSizeRatioDialog = true },
             fadingEdge = fadingEdge,
             onFadingEdgeClick = { showFadingEdgeDialog = true },
-            extractCoverColor = extractCoverColor,
-            onExtractCoverColorChange = {
-                extractCoverColor = it
-                saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, it)
+            fontColorMode = fontColorMode,
+            onFontColorModeChange = { mode ->
+                fontColorMode = mode
+                when (mode) {
+                    FONT_COLOR_MODE_MONET -> {
+                        monetFontColorEnabled = true
+                        saveConfig(RootConstants.KEY_HOOK_MONET_TEXT_COLOR, true)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, false)
+                        customFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED, false)
+                    }
+                    FONT_COLOR_MODE_COVER -> {
+                        monetFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_MONET_TEXT_COLOR, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, true)
+                        customFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED, false)
+                    }
+                    FONT_COLOR_MODE_COVER_GRADIENT -> {
+                        monetFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_MONET_TEXT_COLOR, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, true)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, true)
+                        customFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED, false)
+                    }
+                    FONT_COLOR_MODE_CUSTOM -> {
+                        monetFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_MONET_TEXT_COLOR, false)
+                        customFontColorEnabled = true
+                        saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED, true)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, false)
+                    }
+                    else -> {
+                        monetFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_MONET_TEXT_COLOR, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, false)
+                        saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, false)
+                        customFontColorEnabled = false
+                        saveConfig(RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED, false)
+                    }
+                }
             },
-            extractCoverGradient = extractCoverGradient,
-            onExtractCoverGradientChange = {
-                extractCoverGradient = it
-                saveConfig(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, it)
-            },
+            customFontColor = customFontColor,
+            onCustomFontColorClick = { showCustomFontColorDialog = true },
             customFontPath = customFontPath,
             onFontPathClick = { showFontPathDialog = true },
             fontWeight = fontWeight,
@@ -129,12 +281,23 @@ fun LyricDisplayPage() {
                 fontItalic = it
                 saveConfig(RootConstants.KEY_HOOK_FONT_ITALIC, it)
             },
-            centerLyric = centerLyric,
-            onCenterLyricChange = {
-                centerLyric = it
-                saveConfig(RootConstants.KEY_HOOK_CENTER_LYRIC, it)
+            narrowLatinFont = narrowLatinFont,
+            onNarrowLatinFontChange = {
+                narrowLatinFont = it
+                saveConfig(RootConstants.KEY_HOOK_NARROW_LATIN_FONT, it)
+            },
+            leftLyricPosition = leftLyricPosition,
+            onLeftLyricPositionChange = {
+                leftLyricPosition = it
+                saveConfig(RootConstants.KEY_HOOK_ISLAND_LEFT_LYRIC_POSITION, it)
+            },
+            rightLyricPosition = rightLyricPosition,
+            onRightLyricPositionChange = {
+                rightLyricPosition = it
+                saveConfig(RootConstants.KEY_HOOK_ISLAND_RIGHT_LYRIC_POSITION, it)
             },
             centerGroupVocals = centerGroupVocals,
+            showCenterGroupVocals = showCenterGroupVocals,
             onCenterGroupVocalsChange = {
                 centerGroupVocals = it
                 saveConfig(RootConstants.KEY_HOOK_CENTER_GROUP_VOCALS, it)

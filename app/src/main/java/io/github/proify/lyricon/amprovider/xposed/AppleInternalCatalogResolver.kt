@@ -319,6 +319,7 @@ internal class AppleInternalCatalogResolver(
                             language = cachedAlias.language.takeIf(String::isNotBlank),
                             originKnown = true,
                             artistIds = emptyList(),
+                            album = cachedAlias.album,
                         )
                     )
                     return
@@ -1291,6 +1292,10 @@ internal class AppleInternalCatalogResolver(
                 )
             }
         }
+        val resolvedAlbum = originalAlbumFromResolution(
+            alias = originalAlias,
+            acceptableResults = acceptableResults,
+        )
         discardOriginalCandidates(metadata.id)
         val callbacks = synchronized(inFlight) { inFlight.remove(metadata.id).orEmpty() }
         ProviderLogger.info(
@@ -1303,6 +1308,7 @@ internal class AppleInternalCatalogResolver(
                 ?: sourceLanguage,
             originKnown = originKnown,
             artistIds = artistIds,
+            album = resolvedAlbum,
         )
         callbacks.forEach { callback -> callback(resolution) }
     }
@@ -1319,6 +1325,7 @@ internal class AppleInternalCatalogResolver(
             language = alias.language.takeIf(String::isNotBlank),
             originKnown = true,
             artistIds = emptyList(),
+            album = alias.album,
         )
         callbacks.forEach { callback -> callback(resolution) }
     }
@@ -2522,6 +2529,7 @@ internal class AppleInternalCatalogResolver(
         val language: String?,
         val originKnown: Boolean,
         val artistIds: List<String>,
+        val album: String? = null,
     )
 
     data class LocalizedLookup(
@@ -3176,3 +3184,15 @@ internal class AppleInternalCatalogResolver(
             )
     }
 }
+
+/**
+ * 原名专辑与标题/歌手别名置信度解耦：即使整首歌曲别名因标题相同或
+ * 合作署名被拒绝，也保留已解析的原地区专辑名，供桥接元数据与在线检索使用。
+ */
+internal fun originalAlbumFromResolution(
+    alias: AppleInternalCatalogResolver.Alias?,
+    acceptableResults: List<AppleInternalCatalogResolver.Alias>,
+): String? = alias?.album?.takeIf(String::isNotBlank)
+    ?: acceptableResults.firstNotNullOfOrNull { result ->
+        result.album.takeIf(String::isNotBlank)
+    }

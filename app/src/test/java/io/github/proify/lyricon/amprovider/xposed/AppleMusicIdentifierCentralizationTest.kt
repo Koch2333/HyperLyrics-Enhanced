@@ -6,6 +6,9 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -52,7 +55,7 @@ class AppleMusicIdentifierCentralizationTest {
     }
 
     @Test
-    fun `resolver repairs nested runtime members before refreshing baselines`() {
+    fun `resolver repairs members but refreshes trusted baselines only for exact targets`() {
         val relativeSourcePath =
             "src/main/java/io/github/proify/lyricon/amprovider/xposed/AppleMusicHookProfiles.kt"
         val sourceFile = listOf(File("app/$relativeSourcePath"), File(relativeSourcePath))
@@ -61,14 +64,98 @@ class AppleMusicIdentifierCentralizationTest {
 
         assertTrue(
             "精确类或方法仍可加载时，也必须先修复内部混淆成员",
-            source.contains("repairAndRecordClass(") &&
-                source.contains("repairAndRecordMethod(") &&
+            source.contains("private fun repairClass(") &&
+                source.contains("private fun repairMethod(") &&
                 source.contains("dexKitResolver?.repairRuntimeMembers("),
         )
         assertTrue(
-            "修复后的成员名必须覆盖旧基线，而不是继续记录失效标识",
+            "只有精确档案结果可以刷新跨版本可信基线",
+            source.contains("recordTrustedBaseline") &&
+                source.contains("if (recordTrustedBaseline)") &&
             source.indexOf("dexKitResolver?.repairRuntimeMembers(") <
                 source.lastIndexOf("dexKitResolver?.recordMethodBaseline("),
+        )
+    }
+
+    @Test
+    fun `DexKit fallback cannot overwrite trusted cross version baselines`() {
+        val relativeSourcePath =
+            "src/main/java/io/github/proify/lyricon/amprovider/xposed/AppleMusicDexKitResolver.kt"
+        val sourceFile = listOf(File("app/$relativeSourcePath"), File(relativeSourcePath))
+            .first(File::isFile)
+        val source = sourceFile.readText()
+        val classResolution = source.substring(
+            source.indexOf("fun resolveClasses("),
+            source.indexOf("fun resolveMethod("),
+        )
+        val methodResolution = source.substring(
+            source.indexOf("fun resolveMethod("),
+            source.indexOf("private fun disambiguateMatches("),
+        )
+
+        assertFalse(classResolution.contains("recordBaseline("))
+        assertFalse(methodResolution.contains("recordMethodBaseline("))
+        assertTrue(source.contains("hle_apple_music_dex_methods_v2"))
+        assertTrue(source.contains("AppleMusicDexKitCachePolicy.methodCacheKey"))
+        assertTrue(source.contains("AppleMusicDexKitCachePolicy.classCacheKey"))
+    }
+
+    @Test
+    fun `Apple Music 6 5 2 profile overrides every target that changed from 6 5 1`() {
+        val version = AppleMusicVersion("6.5.2", 1_586L)
+        assertNotNull(AppleMusicHookProfiles.profileFor(version))
+
+        fun targets(hookPoint: AppleMusicHookPoint) =
+            AppleMusicHookProfiles.exactTargets(version, hookPoint)
+
+        val listenNowBuilder = targets(AppleMusicHookPoint.LISTEN_NOW_MODEL_BUILDER).single()
+        assertEquals("buildStandardSwoosh\$lambda\$35", listenNowBuilder.methodName)
+        assertEquals(
+            "com.apple.android.music.common.F0",
+            listenNowBuilder.parameterTypeNames?.get(2),
+        )
+
+        assertEquals(
+            "com.apple.android.music.common.L",
+            targets(AppleMusicHookPoint.LISTEN_NOW_ARTWORK_RESOLVER).single().className,
+        )
+
+        val libraryBuild = targets(AppleMusicHookPoint.LIBRARY_EPOXY_BUILD).single()
+        assertEquals("com.apple.android.music.library2.M", libraryBuild.parameterTypeNames?.first())
+
+        val composeObserve = targets(AppleMusicHookPoint.COMPOSE_OBSERVE_AS_STATE).single()
+        assertEquals("C1.w", composeObserve.className)
+        assertEquals("e", composeObserve.methodName)
+        assertEquals(
+            listOf("androidx.lifecycle.G", "z0.n"),
+            composeObserve.parameterTypeNames,
+        )
+
+        assertEquals(
+            listOf("z1.q", "z1.i"),
+            targets(AppleMusicHookPoint.COMPOSE_TEXT_LAYOUT).map { it.className },
+        )
+        assertEquals(
+            "com.apple.android.music.utils.j1\$a",
+            targets(AppleMusicHookPoint.APPLE_TEXT_STYLE_UTILS).single().className,
+        )
+
+        assertEquals(
+            "z0.s0",
+            targets(AppleMusicHookPoint.COMPOSE_NEVER_EQUAL_POLICY).single().className,
+        )
+
+        val sourceMenu = targets(AppleMusicHookPoint.LYRICS_SOURCE_MENU_CLICK_LISTENER).single()
+        assertEquals("com.apple.android.music.player.fragment.d0", sourceMenu.className)
+        assertEquals("onClick", sourceMenu.methodName)
+        assertEquals(
+            "a",
+            sourceMenu.runtimeMemberNames[AppleMusicRuntimeMember.LYRICS_SOURCE_MENU_FRAGMENT_FIELD],
+        )
+
+        assertEquals(
+            "com.apple.android.music.player.e",
+            targets(AppleMusicHookPoint.IN_APP_GLOBAL_METADATA_DISPATCHER).single().className,
         )
     }
 }

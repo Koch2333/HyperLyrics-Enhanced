@@ -6,6 +6,9 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.TypedValue
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.common.color.CoverGradientTextContrastOptimizer
+import com.juren233.hyperlyricsenhanced.common.color.CoverTextGradientPaletteOptimizer
+import com.juren233.hyperlyricsenhanced.root.island.IslandRuntimePreferenceReader
 import com.juren233.hyperlyricsenhanced.lyric.view.Highlight
 import com.juren233.hyperlyricsenhanced.lyric.view.LyricViewStyle
 import com.juren233.hyperlyricsenhanced.lyric.view.Marquee
@@ -25,12 +28,14 @@ object LyricStyleHelper {
     }
 
     internal data class ColorResolution(
+        val useMonetColor: Boolean,
         val useCoverColor: Boolean,
         val useCoverGradient: Boolean,
         val paletteSource: CoverColorHelper.PaletteSource?,
         val requestedKey: String?,
         val resolvedKey: String?,
         val artworkSignature: Int?,
+        val contrastAdjustment: CoverGradientTextContrastOptimizer.Adjustment?,
         val fallbackReason: FallbackReason?,
         val primaryColors: IntArray,
         val backgroundColors: IntArray,
@@ -39,6 +44,26 @@ object LyricStyleHelper {
         val usesDefaultColors: Boolean
             get() = fallbackReason != null
     }
+
+    internal data class CustomTextColorPalette(
+        val primary: IntArray,
+        val background: IntArray,
+        val highlight: IntArray,
+    )
+
+    internal fun customTextColorPalette(color: Int): CustomTextColorPalette {
+        val alpha = (color ushr 24) and 0xFF
+        val backgroundAlpha = alpha * 3 / 4
+        val backgroundColor = (backgroundAlpha shl 24) or (color and 0x00FFFFFF)
+        return CustomTextColorPalette(
+            primary = intArrayOf(color),
+            background = intArrayOf(backgroundColor),
+            highlight = intArrayOf(color),
+        )
+    }
+
+    internal fun monetTextColorPalette(color: Int): CustomTextColorPalette =
+        customTextColorPalette(color)
 
     internal data class StyleBuildResult(
         val style: LyricViewStyle,
@@ -70,7 +95,8 @@ object LyricStyleHelper {
         mediaColorKey: String? = CoverColorHelper.currentMediaKey()
     ): StyleBuildResult {
         val fontSize = prefs.getInt(RootConstants.KEY_HOOK_TEXT_SIZE, RootConstants.DEFAULT_HOOK_TEXT_SIZE)
-        val tf = FontHelper.loadTypeface(prefs)
+        val baseTf = FontHelper.loadBaseTypeface(prefs)
+        val narrowTf = FontHelper.loadNarrowTypeface(prefs)
 
         val textSizeRatio = prefs.getFloat(RootConstants.KEY_HOOK_TEXT_SIZE_RATIO, RootConstants.DEFAULT_HOOK_TEXT_SIZE_RATIO)
         val primarySizePx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, fontSize.toFloat(), res.displayMetrics)
@@ -113,29 +139,103 @@ object LyricStyleHelper {
         }
 
         // Determine text colors: use cover colors if enabled, otherwise white
-        val useCoverColor = prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR)
-        val useCoverGradient = prefs.getBoolean(RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT, RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT)
+        val useCustomColor = IslandRuntimePreferenceReader.getBoolean(
+            prefs,
+            RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED,
+            RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR_ENABLED
+        )
+        val customTextColor = IslandRuntimePreferenceReader.getInt(
+            prefs,
+            RootConstants.KEY_HOOK_CUSTOM_TEXT_COLOR,
+            RootConstants.DEFAULT_HOOK_CUSTOM_TEXT_COLOR
+        )
+        val useMonetColor = IslandRuntimePreferenceReader.getBoolean(
+            prefs,
+            RootConstants.KEY_HOOK_MONET_TEXT_COLOR,
+            RootConstants.DEFAULT_HOOK_MONET_TEXT_COLOR
+        )
+        val useCoverColor = IslandRuntimePreferenceReader.getBoolean(
+            prefs,
+            RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_COLOR,
+            RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR
+        )
+        val useCoverGradient = IslandRuntimePreferenceReader.getBoolean(
+            prefs,
+            RootConstants.KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT,
+            RootConstants.DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT
+        )
+        val gradientCoverBackgroundActive =
+            IslandRuntimePreferenceReader.getBoolean(
+                prefs,
+                RootConstants.KEY_HOOK_ISLAND_LEFT_ALBUM,
+                RootConstants.DEFAULT_HOOK_ISLAND_LEFT_ALBUM,
+            ) &&
+                IslandRuntimePreferenceReader.getInt(
+                    prefs,
+                    RootConstants.KEY_HOOK_ISLAND_ALBUM_COVER_STYLE,
+                    RootConstants.DEFAULT_HOOK_ISLAND_ALBUM_COVER_STYLE,
+                ) == RootConstants.ISLAND_ALBUM_COVER_STYLE_GRADIENT
 
         val primaryColors: IntArray
         val bgColors: IntArray
         val hlColors: IntArray
         val resolvedPalette: CoverColorHelper.ResolvedPalette?
+        val contrastAdjustment: CoverGradientTextContrastOptimizer.Adjustment?
         val fallbackReason: FallbackReason?
 
-        if (useCoverColor) {
-            resolvedPalette = CoverColorHelper.resolveColors(
+        if (useCustomColor) {
+            val customPalette = customTextColorPalette(customTextColor)
+            resolvedPalette = null
+            contrastAdjustment = null
+            primaryColors = customPalette.primary
+            bgColors = customPalette.background
+            hlColors = customPalette.highlight
+            fallbackReason = null
+        } else if (useMonetColor) {
+            val monetPalette = monetTextColorPalette(resolveMonetTextColor(res))
+            resolvedPalette = null
+            contrastAdjustment = null
+            primaryColors = monetPalette.primary
+            bgColors = monetPalette.background
+            hlColors = monetPalette.highlight
+            fallbackReason = null
+        } else if (useCoverColor) {
+            resolvedPalette = CoverColorHelper.resolveTextColors(
                 bitmap = albumBitmap,
                 useGradient = useCoverGradient,
                 songKey = mediaColorKey
             )
             if (resolvedPalette != null) {
-                val darkColors = resolvedPalette.colors.second
+                val extractedTextColors = if (useCoverGradient) {
+                    CoverTextGradientPaletteOptimizer.optimize(resolvedPalette.colors.second)
+                } else {
+                    resolvedPalette.colors.second
+                }
+                contrastAdjustment = if (CoverGradientTextContrastOptimizer.shouldOptimize(
+                        useCustomColor = useCustomColor,
+                        useMonetColor = useMonetColor,
+                        useCoverColor = useCoverColor,
+                        gradientCoverBackgroundActive = gradientCoverBackgroundActive,
+                        hasArtwork = albumBitmap != null,
+                    ) && albumBitmap != null
+                ) {
+                    val backgroundAnchors =
+                        CoverGradientTextContrastOptimizer.sampleBackgroundAnchors(albumBitmap)
+                    CoverGradientTextContrastOptimizer.optimize(
+                        textColors = extractedTextColors,
+                        backgroundAnchors = backgroundAnchors,
+                    )
+                } else {
+                    null
+                }
+                val darkColors = contrastAdjustment?.colors ?: extractedTextColors
                 val translucentDarkColors = darkColors.map { Color.argb(191, Color.red(it), Color.green(it), Color.blue(it)) }.toIntArray()
                 primaryColors = darkColors   // 无逐字/标题 -> 封面颜色
                 bgColors = translucentDarkColors // 未唱到 -> 封面颜色(75%透明度)
                 hlColors = darkColors        // 已唱到 -> 封面颜色
                 fallbackReason = null
             } else {
+                contrastAdjustment = null
                 primaryColors = intArrayOf(Color.WHITE)
                 bgColors = intArrayOf(Color.argb(128, 255, 255, 255))
                 hlColors = intArrayOf(Color.WHITE)
@@ -143,6 +243,7 @@ object LyricStyleHelper {
             }
         } else {
             resolvedPalette = null
+            contrastAdjustment = null
             primaryColors = intArrayOf(Color.WHITE)
             bgColors = intArrayOf(Color.argb(128, 255, 255, 255))
             hlColors = intArrayOf(Color.WHITE)
@@ -153,14 +254,16 @@ object LyricStyleHelper {
             primary = TextLook(
                 color = primaryColors,
                 size = primarySizePx,
-                typeface = tf,
+                typeface = baseTf,
+                narrowTypeface = narrowTf,
                 relativeProgress = prefs.getBoolean(RootConstants.KEY_HOOK_SYLLABLE_RELATIVE, RootConstants.DEFAULT_HOOK_SYLLABLE_RELATIVE),
                 relativeHighlight = prefs.getBoolean(RootConstants.KEY_HOOK_SYLLABLE_HIGHLIGHT, RootConstants.DEFAULT_HOOK_SYLLABLE_HIGHLIGHT),
             ),
             secondary = TextLook(
                 color = if (showSecondary) primaryColors else intArrayOf(Color.TRANSPARENT),
                 size = if (showSecondary) primarySizePx * textSizeRatio else 0f,
-                typeface = tf,
+                typeface = baseTf,
+                narrowTypeface = narrowTf,
             ),
             highlight = Highlight(
                 background = bgColors,
@@ -183,17 +286,20 @@ object LyricStyleHelper {
                 latinWaveFactor = prefs.getFloat(RootConstants.KEY_HOOK_WORD_MOTION_LATIN_WAVE, RootConstants.DEFAULT_HOOK_WORD_MOTION_LATIN_WAVE),
             ),
             placeholder = TitleSlot.NONE,
-            centerIfPossible = prefs.getBoolean(RootConstants.KEY_HOOK_CENTER_LYRIC, RootConstants.DEFAULT_HOOK_CENTER_LYRIC),
+            centerIfPossible = false,
+            alignRight = false,
         )
         return StyleBuildResult(
             style = style,
             colorResolution = ColorResolution(
-                useCoverColor = useCoverColor,
-                useCoverGradient = useCoverGradient,
+                useMonetColor = !useCustomColor && useMonetColor,
+                useCoverColor = !useCustomColor && !useMonetColor && useCoverColor,
+                useCoverGradient = !useCustomColor && !useMonetColor && useCoverColor && useCoverGradient,
                 paletteSource = resolvedPalette?.source,
                 requestedKey = resolvedPalette?.requestedKey,
                 resolvedKey = resolvedPalette?.resolvedKey,
                 artworkSignature = resolvedPalette?.artworkSignature,
+                contrastAdjustment = contrastAdjustment,
                 fallbackReason = fallbackReason,
                 primaryColors = primaryColors,
                 backgroundColors = bgColors,
@@ -201,4 +307,9 @@ object LyricStyleHelper {
             )
         )
     }
+
+    private fun resolveMonetTextColor(res: Resources): Int = runCatching {
+        res.getColor(android.R.color.system_accent1_200, null)
+    }.getOrDefault(Color.WHITE)
+
 }

@@ -40,8 +40,8 @@ android {
         applicationId = "com.juren233.hyperlyricsenhanced"
         minSdk = 33
         targetSdk = 37
-        versionCode = 140050
-    versionName = ciVersionName ?: "7.4.0-canary"
+        versionCode = 150179
+        versionName = ciVersionName ?: "7.5.0-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -55,6 +55,16 @@ android {
             // libxposed target processes load DexKit from the module's absolute
             // nativeLibraryDir, so the module .so must be extracted on install.
             useLegacyPackaging = true
+        }
+        resources {
+            // bcprov's Picnic implementation ships three precomputed LowMC tables totaling
+            // about 1.2 MB. HLE only uses the Ed25519 lightweight signer, so these resources
+            // are unreachable and can be excluded without changing signature verification.
+            excludes += setOf(
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL1.bin.properties",
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL3.bin.properties",
+                "org/bouncycastle/pqc/crypto/picnic/lowmcL5.bin.properties",
+            )
         }
     }
 
@@ -132,6 +142,7 @@ dependencies {
     implementation(libs.lyricon.provider)
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20180813")
 
     // --- 布局兼容 ---
     implementation(libs.androidx.constraintlayout)

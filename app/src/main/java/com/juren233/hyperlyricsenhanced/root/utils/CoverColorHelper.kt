@@ -2,14 +2,18 @@ package com.juren233.hyperlyricsenhanced.root.utils
 
 import android.graphics.Bitmap
 import com.juren233.hyperlyricsenhanced.common.color.ColorExtractor
+import com.juren233.hyperlyricsenhanced.common.color.PerceptualGradient
 
 object CoverColorHelper {
+
+    private const val MIN_GRADIENT_ENDPOINT_DISTANCE = 0.08
 
     internal enum class PaletteSource {
         ARTWORK_ACTIVE_CACHE,
         ARTWORK_KEYED_CACHE,
         ARTWORK_SIGNATURE_CACHE,
         ARTWORK_EXTRACTED,
+        ARTWORK_SAMPLED_FALLBACK,
         KEYED_CACHE,
         ACTIVE_CACHE
     }
@@ -101,6 +105,17 @@ object CoverColorHelper {
 
     fun artworkContentKey(bitmap: Bitmap): Int = bitmap.artworkSignature().hashCode()
 
+    fun fallbackArtworkColor(bitmap: Bitmap): Int? = runCatching {
+        sampledArtworkColor(bitmap.width, bitmap.height, bitmap::getPixel)
+    }.getOrElse {
+        val softwareCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        try {
+            sampledArtworkColor(softwareCopy.width, softwareCopy.height, softwareCopy::getPixel)
+        } finally {
+            softwareCopy.recycle()
+        }
+    }
+
     fun extractColors(bitmap: Bitmap, useGradient: Boolean, songKey: String? = null): Pair<IntArray, IntArray> {
         return resolveArtworkColors(bitmap, useGradient, songKey).colors
     }
@@ -132,6 +147,31 @@ object CoverColorHelper {
             resolvedKey = cachedKey,
             artworkSignature = cachedArtworkSignature?.hashCode()
         )
+    }
+
+    internal fun resolveTextColors(
+        bitmap: Bitmap?,
+        useGradient: Boolean,
+        songKey: String? = null
+    ): ResolvedPalette? {
+        val resolved = resolveColors(bitmap, useGradient, songKey) ?: return null
+        if (!useGradient) return resolved
+        val indices = gradientEndpointIndices(resolved.colors.second)
+        if (indices.size < 2) return resolved.copy(
+            colors = Pair(
+                indices.map(resolved.colors.first::get).toIntArray(),
+                indices.map(resolved.colors.second::get).toIntArray(),
+            )
+        )
+        val lightColors = PerceptualGradient.threeColorAnchors(
+            resolved.colors.first[indices[0]],
+            resolved.colors.first[indices[1]],
+        )
+        val darkColors = PerceptualGradient.threeColorAnchors(
+            resolved.colors.second[indices[0]],
+            resolved.colors.second[indices[1]],
+        )
+        return resolved.copy(colors = Pair(lightColors, darkColors))
     }
 
     private fun resolveArtworkColors(
@@ -213,6 +253,25 @@ object CoverColorHelper {
         )
     }
 
+    /** Keeps the dominant endpoint and the first representative color with enough perceptual distance. */
+    internal fun gradientEndpointIndices(colors: IntArray): IntArray {
+        val candidates = ArrayList<Int>(colors.size)
+        for (index in colors.indices) {
+            if (candidates.none { colors[it] == colors[index] }) {
+                candidates += index
+            }
+        }
+        if (candidates.size <= 2) return candidates.toIntArray()
+        val first = candidates.first()
+        val second = candidates.drop(1).firstOrNull { candidate ->
+            PerceptualGradient.oklabDistance(colors[first], colors[candidate]) >=
+                MIN_GRADIENT_ENDPOINT_DISTANCE
+        } ?: candidates.drop(1).maxBy { candidate ->
+            PerceptualGradient.oklabDistance(colors[first], colors[candidate])
+        }
+        return intArrayOf(first, second)
+    }
+
     fun getCachedColors(): Pair<IntArray, IntArray>? {
         val light = cachedLightColors ?: return null
         val dark = cachedDarkColors ?: return null
@@ -278,5 +337,37 @@ object CoverColorHelper {
             }
         }
         return hash
+    }
+
+    internal fun sampledArtworkColor(
+        width: Int,
+        height: Int,
+        pixelAt: (x: Int, y: Int) -> Int
+    ): Int? {
+        if (width <= 0 || height <= 0) return null
+        val columns = minOf(width, 8)
+        val rows = minOf(height, 8)
+        var totalAlpha = 0L
+        var red = 0L
+        var green = 0L
+        var blue = 0L
+        for (row in 0 until rows) {
+            val y = if (rows == 1) 0 else row * (height - 1) / (rows - 1)
+            for (column in 0 until columns) {
+                val x = if (columns == 1) 0 else column * (width - 1) / (columns - 1)
+                val color = pixelAt(x, y)
+                val alpha = (color ushr 24) and 0xFF
+                if (alpha == 0) continue
+                totalAlpha += alpha
+                red += ((color ushr 16) and 0xFF) * alpha.toLong()
+                green += ((color ushr 8) and 0xFF) * alpha.toLong()
+                blue += (color and 0xFF) * alpha.toLong()
+            }
+        }
+        if (totalAlpha == 0L) return null
+        return (0xFF shl 24) or
+            ((red / totalAlpha).toInt() shl 16) or
+            ((green / totalAlpha).toInt() shl 8) or
+            (blue / totalAlpha).toInt()
     }
 }

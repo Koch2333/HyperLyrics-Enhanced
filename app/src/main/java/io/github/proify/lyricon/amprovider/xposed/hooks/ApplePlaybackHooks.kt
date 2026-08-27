@@ -6,6 +6,8 @@
 
 package io.github.proify.lyricon.amprovider.xposed.hooks
 
+import android.media.AudioRouting
+import android.media.AudioTrack
 import android.media.session.PlaybackState as AndroidPlaybackState
 import android.os.SystemClock
 import com.juren233.hyperlyricsenhanced.BuildConfig
@@ -20,6 +22,7 @@ import io.github.proify.lyricon.amprovider.xposed.PlaybackPositionSource
 import io.github.proify.lyricon.amprovider.xposed.PlaybackState
 import io.github.proify.lyricon.amprovider.xposed.ProviderLogger
 import io.github.proify.lyricon.amprovider.xposed.resolvePlaybackPositionSource
+import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 import io.github.proify.lyricon.provider.ProviderConstants
 import io.github.proify.lyricon.provider.RemotePlayer
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +32,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 internal class ApplePlaybackHooks(
@@ -38,6 +42,7 @@ internal class ApplePlaybackHooks(
     private val currentLyricsSongId: () -> String?,
     private val queueItemMediaId: (Any) -> String?,
     private val refreshCurrentQueueItem: (Any?, String) -> Unit,
+    private val isVolumeBalanceEnabled: () -> Boolean,
 ) {
     @Volatile
     private var playbackPositionSource: PlaybackPositionSource? = null
@@ -56,6 +61,13 @@ internal class ApplePlaybackHooks(
     private var lastExplicitSeekAtMs = 0L
     private var lastExplicitSeekPosition = -1L
     private var lastPlaybackAnchorAtMs = 0L
+    private val atmosphereSessionCallbackHit = AtomicBoolean(false)
+    private val atmosphereVariantCallbackHit = AtomicBoolean(false)
+    private val atmosphereVolumeProcessor = AppleAtmosVolumeProcessor(isVolumeBalanceEnabled)
+    private val atmosphereLoudnessMetadataHooks = AppleAtmosLoudnessMetadataHooks(runtime)
+    private val atmosphereRoutingListeners =
+        WeakIdentityMap<AudioTrack, AudioRouting.OnRoutingChangedListener>()
+    private val atmosphereReleaseSessionIds = WeakIdentityMap<AudioTrack, Int>()
     private lateinit var exoTarget: AppleMusicHookTarget
     private val playbackTarget by lazy {
         runtime.hookResolver.resolveClass(
@@ -95,6 +107,10 @@ internal class ApplePlaybackHooks(
         else pauseCoroutineTask()
     }
 
+    fun onVolumeBalancePreferenceChanged() {
+        atmosphereVolumeProcessor.onPreferenceChanged()
+    }
+
     fun installExoMediaPlayer() {
         val resolvedExo = runtime.hookResolver.resolveClass(AppleMusicHookPoint.EXO_MEDIA_PLAYER)
         exoTarget = resolvedExo.target
@@ -109,6 +125,7 @@ internal class ApplePlaybackHooks(
             })
         }
         hookExoPlaybackLifecycle(exoPlayerClass)
+        hookAtmosVolumeBalance()
 
         val seekMethod = AppleReflection.findMethod(
             exoPlayerClass,
@@ -225,6 +242,9 @@ internal class ApplePlaybackHooks(
                 parameterCount = 0,
             )
             runtime.hookRegistrar.installHook(method, after = { chain, _ ->
+                if (runtimeMember == AppleMusicRuntimeMember.EXO_RELEASE_METHOD) {
+                    chain.thisObject?.let(atmosphereVolumeProcessor::onPlayerReleased)
+                }
                 if (playbackPositionSource?.player === chain.thisObject) {
                     stopSyncAction()
                     if (runtimeMember == AppleMusicRuntimeMember.EXO_RELEASE_METHOD) {
@@ -239,6 +259,166 @@ internal class ApplePlaybackHooks(
         ProviderLogger.info("Apple Music 播放生命周期 Hook 已安装")
     }
 
+    private fun hookAtmosVolumeBalance() {
+        atmosphereLoudnessMetadataHooks.installHooks()
+        hookAtmosAudioTrackLifecycle()
+        val audioSessionMethod = runtime.hookResolver.resolveMethod(
+            AppleMusicHookPoint.EXO_AUDIO_SESSION_ID
+        ).method
+        runtime.hookRegistrar.installHook(audioSessionMethod, after = { chain, _ ->
+            val player = chain.thisObject ?: return@installHook
+            val audioSessionId = chain.args.firstOrNull() as? Int ?: return@installHook
+            if (BuildConfig.DEBUG && atmosphereSessionCallbackHit.compareAndSet(false, true)) {
+                ProviderLogger.diagnostic(
+                    "Dolby Atmos 音量平衡首次收到音频会话：session=$audioSessionId"
+                )
+            }
+            ProviderLogger.diagnostic(
+                "[AtmosVolumeDiag] event=player_session," +
+                    "elapsedMs=${SystemClock.elapsedRealtime()}," +
+                    "thread=${Thread.currentThread().name}," +
+                    "player=${player.javaClass.name}@${System.identityHashCode(player)}," +
+                    "sessionId=$audioSessionId," +
+                    "activePlayer=${activePlaybackPlayer?.let(System::identityHashCode)}"
+            )
+            atmosphereVolumeProcessor.onAudioSessionId(player, audioSessionId)
+        })
+
+        val audioVariantTarget = runtime.hookResolver.resolveMethod(
+            AppleMusicHookPoint.LOCAL_MEDIA_PLAYER_AUDIO_VARIANT_CHANGED
+        )
+        runtime.hookRegistrar.installHook(audioVariantTarget.method, after = { chain, _ ->
+            val player = chain.args.firstOrNull() ?: return@installHook
+            val audioVariant = chain.args.getOrNull(1) as? Int ?: return@installHook
+            if (BuildConfig.DEBUG && atmosphereVariantCallbackHit.compareAndSet(false, true)) {
+                ProviderLogger.diagnostic(
+                    "Dolby Atmos 音量平衡首次收到音源变体：variant=$audioVariant"
+                )
+            }
+            val periodId = chain.args.getOrNull(2) as? Long ?: 0L
+            val format = chain.args.getOrNull(4)
+            val loudness = format?.let {
+                runCatching {
+                    AppleReflection.field(
+                        it,
+                        audioVariantTarget.target.runtimeMemberName(
+                            AppleMusicRuntimeMember.DEBUG_FORMAT_LOUDNESS_FIELD
+                        ),
+                    ) as? Float
+                }.getOrNull()
+            } ?: Float.NaN
+            val channelCount = format?.let {
+                runCatching {
+                    AppleReflection.field(
+                        it,
+                        audioVariantTarget.target.runtimeMemberName(
+                            AppleMusicRuntimeMember.DEBUG_FORMAT_CHANNEL_COUNT_FIELD
+                        ),
+                    ) as? Int
+                }.getOrNull()
+            } ?: 2
+            val peakMetadata = atmosphereLoudnessMetadataHooks.metadataForFormat(format)
+            ProviderLogger.diagnostic(
+                "[AtmosVolumeDiag] event=player_variant," +
+                    "elapsedMs=${SystemClock.elapsedRealtime()}," +
+                    "thread=${Thread.currentThread().name}," +
+                    "player=${player.javaClass.name}@${System.identityHashCode(player)}," +
+                    "variant=$audioVariant,periodId=$periodId,loudness=$loudness," +
+                    "channelCount=$channelCount,truePeakDbfs=${peakMetadata?.truePeakDbfs}," +
+                    "samplePeakDbfs=${peakMetadata?.samplePeakDbfs}," +
+                    "peakAssociation=${peakMetadata?.associationSource}," +
+                    "activePlayer=${activePlaybackPlayer?.let(System::identityHashCode)}"
+            )
+            atmosphereVolumeProcessor.onAudioVariantChanged(
+                player = player,
+                audioVariant = audioVariant,
+                periodId = periodId,
+                loudness = loudness,
+                channelCount = channelCount,
+                peakMetadata = peakMetadata,
+            )
+        })
+        ProviderLogger.info("Apple Music Dolby Atmos 音量平衡 Hook 已安装")
+    }
+
+    private fun hookAtmosAudioTrackLifecycle() {
+        val playMethod = AudioTrack::class.java.getDeclaredMethod("play")
+        runtime.hookRegistrar.installHook(playMethod, after = { chain, _ ->
+            val audioTrack = chain.thisObject as? AudioTrack ?: return@installHook
+            ensureAtmosRoutingListener(audioTrack)
+            atmosphereVolumeProcessor.onAudioTrackPlayed(
+                audioSessionId = audioTrackSessionId(audioTrack),
+                trackIdentity = System.identityHashCode(audioTrack),
+                routedDeviceType = audioTrackRoutedDeviceType(audioTrack),
+            )
+        })
+
+        val stopMethod = AudioTrack::class.java.getDeclaredMethod("stop")
+        runtime.hookRegistrar.installHook(stopMethod, after = { chain, _ ->
+            val audioTrack = chain.thisObject as? AudioTrack ?: return@installHook
+            atmosphereVolumeProcessor.onAudioTrackStopped(
+                audioSessionId = audioTrackSessionId(audioTrack),
+                trackIdentity = System.identityHashCode(audioTrack),
+                source = "stop",
+            )
+        })
+
+        val releaseMethod = AudioTrack::class.java.getDeclaredMethod("release")
+        runtime.hookRegistrar.installHook(
+            releaseMethod,
+            before = { chain ->
+                val audioTrack = chain.thisObject as? AudioTrack ?: return@installHook
+                atmosphereReleaseSessionIds[audioTrack] = audioTrackSessionId(audioTrack)
+                removeAtmosRoutingListener(audioTrack)
+            },
+            after = { chain, _ ->
+                val audioTrack = chain.thisObject as? AudioTrack ?: return@installHook
+                val sessionId = atmosphereReleaseSessionIds[audioTrack]
+                    ?: audioTrackSessionId(audioTrack)
+                atmosphereReleaseSessionIds.remove(audioTrack)
+                atmosphereVolumeProcessor.onAudioTrackStopped(
+                    audioSessionId = sessionId,
+                    trackIdentity = System.identityHashCode(audioTrack),
+                    source = "release",
+                )
+            },
+        )
+        ProviderLogger.info("Apple Music AudioTrack 生命周期与路由 Hook 已安装")
+    }
+
+    private fun ensureAtmosRoutingListener(audioTrack: AudioTrack) {
+        if (atmosphereRoutingListeners[audioTrack] != null) return
+        val listener = object : AudioRouting.OnRoutingChangedListener {
+            override fun onRoutingChanged(router: AudioRouting) {
+                val routedTrack = router as? AudioTrack ?: return
+                atmosphereVolumeProcessor.onAudioTrackRouteChanged(
+                    audioSessionId = audioTrackSessionId(routedTrack),
+                    trackIdentity = System.identityHashCode(routedTrack),
+                    routedDeviceType = audioTrackRoutedDeviceType(routedTrack),
+                )
+            }
+        }
+        atmosphereRoutingListeners[audioTrack] = listener
+        runCatching {
+            audioTrack.addOnRoutingChangedListener(listener, runtime.mainHandler)
+        }.onFailure { error ->
+            atmosphereRoutingListeners.remove(audioTrack)
+            ProviderLogger.error("Apple Music AudioTrack 路由监听注册失败", error)
+        }
+    }
+
+    private fun removeAtmosRoutingListener(audioTrack: AudioTrack) {
+        val listener = atmosphereRoutingListeners[audioTrack] ?: return
+        runCatching { audioTrack.removeOnRoutingChangedListener(listener) }
+        atmosphereRoutingListeners.remove(audioTrack)
+    }
+
+    private fun audioTrackSessionId(audioTrack: AudioTrack): Int =
+        runCatching(audioTrack::getAudioSessionId).getOrDefault(0)
+
+    private fun audioTrackRoutedDeviceType(audioTrack: AudioTrack): Int? =
+        runCatching { audioTrack.routedDevice?.type }.getOrNull()
+
     private fun activatePlaybackPlayer(mediaPlayer: Any?, source: String) {
         if (mediaPlayer == null) return
         ProviderLogger.diagnostic(
@@ -248,6 +428,7 @@ internal class ApplePlaybackHooks(
                 "metadataId=${currentMetadataId()}, lyricsSongId=${currentLyricsSongId()}"
         )
         activePlaybackPlayer = mediaPlayer
+        atmosphereVolumeProcessor.onPlayerActivated(mediaPlayer)
         capturePlaybackPositionSource(
             mediaPlayer = mediaPlayer,
             source = source,

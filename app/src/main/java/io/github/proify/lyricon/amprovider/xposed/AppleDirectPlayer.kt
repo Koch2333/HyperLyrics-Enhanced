@@ -23,6 +23,7 @@ import com.juren233.hyperlyricsenhanced.IAppleMusicTranslationReceiver
 import io.github.proify.extensions.deflate
 import io.github.proify.extensions.json
 import io.github.proify.lyricon.lyric.model.Song
+import io.github.proify.lyricon.provider.PlaybackStateActivityPolicy
 import io.github.proify.lyricon.provider.RemotePlayer
 import kotlinx.serialization.encodeToString
 
@@ -45,6 +46,8 @@ internal class AppleDirectPlayer(
     private val onOriginalMetadataRequested: (String) -> Unit,
     private val onOnlineTranslationReceived: (ByteArray) -> Unit,
     private val onOnlineTranslationCleared: (String?) -> Unit,
+    private val onMissingLyricsSupplementReceived: (ByteArray) -> Unit,
+    private val onMissingLyricsSupplementCleared: (String?) -> Unit,
     private val onOnlineTranslationSourceSwitchResult:
         (Long, String?, String?, String?, String?, Boolean) -> Unit,
 ) : RemotePlayer {
@@ -65,15 +68,49 @@ internal class AppleDirectPlayer(
 
     private val translationReceiver = object : IAppleMusicTranslationReceiver.Stub() {
         override fun onOnlineTranslationResult(compressedSong: ByteArray) {
+            val callbackStartedAtNanos = SystemClock.elapsedRealtimeNanos()
             pronunciationDiagnostic(
                 "stage=bridge_payload_callback, bytes=${compressedSong.size}"
             )
+            ProviderLogger.diagnostic(
+                "[SourceSwitchPerf] stage=bridge_translation_callback_enter, " +
+                    "bytes=${compressedSong.size}, thread=${Thread.currentThread().name}"
+            )
             this@AppleDirectPlayer.onOnlineTranslationReceived(compressedSong)
+            ProviderLogger.diagnostic(
+                "[SourceSwitchPerf] stage=bridge_translation_callback_delegate_finished, " +
+                    "bytes=${compressedSong.size}, elapsedMs=" +
+                    ((SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos) / 1_000_000.0) +
+                    ", thread=${Thread.currentThread().name}"
+            )
         }
 
         override fun onOnlineTranslationCleared(songId: String?) {
             pronunciationDiagnostic("stage=bridge_payload_cleared, id=$songId")
             this@AppleDirectPlayer.onOnlineTranslationCleared(songId)
+        }
+
+        override fun onMissingLyricsSupplementCleared(songId: String?) {
+            pronunciationDiagnostic("stage=bridge_supplement_payload_cleared, id=$songId")
+            this@AppleDirectPlayer.onMissingLyricsSupplementCleared(songId)
+        }
+
+        override fun onMissingLyricsSupplementResult(compressedSong: ByteArray) {
+            val callbackStartedAtNanos = SystemClock.elapsedRealtimeNanos()
+            pronunciationDiagnostic(
+                "stage=bridge_supplement_payload_callback, bytes=${compressedSong.size}"
+            )
+            ProviderLogger.diagnostic(
+                "[SourceSwitchPerf] stage=bridge_supplement_callback_enter, " +
+                    "bytes=${compressedSong.size}, thread=${Thread.currentThread().name}"
+            )
+            this@AppleDirectPlayer.onMissingLyricsSupplementReceived(compressedSong)
+            ProviderLogger.diagnostic(
+                "[SourceSwitchPerf] stage=bridge_supplement_callback_delegate_finished, " +
+                    "bytes=${compressedSong.size}, elapsedMs=" +
+                    ((SystemClock.elapsedRealtimeNanos() - callbackStartedAtNanos) / 1_000_000.0) +
+                    ", thread=${Thread.currentThread().name}"
+            )
         }
 
         override fun onOnlineTranslationSourceSwitchResult(
@@ -110,7 +147,17 @@ internal class AppleDirectPlayer(
                 AppleDirectBridgeContract.ACTION_REGISTER -> {
                     val binder = intent.extras
                         ?.getBinder(AppleDirectBridgeContract.EXTRA_BINDER)
-                        ?: return
+                        ?: run {
+                            ProviderLogger.diagnostic(
+                                "直连诊断: stage=registration_missing_binder, " +
+                                    "uid=$sentFromUid, package=$sentFromPackage",
+                            )
+                            return
+                        }
+                    ProviderLogger.diagnostic(
+                        "直连诊断: stage=registration_received, alive=${binder.isBinderAlive}, " +
+                            "uid=$sentFromUid, package=$sentFromPackage",
+                    )
                     pronunciationDiagnostic(
                         "stage=bridge_registration_received, " +
                             "alive=${binder.isBinderAlive}, uid=$sentFromUid"
@@ -128,7 +175,15 @@ internal class AppleDirectPlayer(
     }
 
     fun start() {
-        if (registered) return
+        ProviderLogger.diagnostic(
+            "直连诊断: stage=player_start_requested, registered=$registered",
+        )
+        if (registered) {
+            ProviderLogger.diagnostic(
+                "直连诊断: stage=player_start_skipped, reason=already_registered",
+            )
+            return
+        }
         ContextCompat.registerReceiver(
             context,
             registrationReceiver,
@@ -139,16 +194,22 @@ internal class AppleDirectPlayer(
             ContextCompat.RECEIVER_EXPORTED
         )
         registered = true
+        ProviderLogger.diagnostic("直连诊断: stage=player_receiver_registered")
         pronunciationDiagnostic("stage=direct_player_started")
         requestBridge()
     }
 
     private fun requestBridge() {
+        ProviderLogger.diagnostic(
+            "直连诊断: stage=bridge_request_sending, " +
+                "target=${AppleDirectBridgeContract.SYSTEM_UI_PACKAGE}",
+        )
         pronunciationDiagnostic("stage=bridge_requested")
         context.sendBroadcast(
             Intent(AppleDirectBridgeContract.ACTION_REQUEST)
                 .setPackage(AppleDirectBridgeContract.SYSTEM_UI_PACKAGE)
         )
+        ProviderLogger.diagnostic("直连诊断: stage=bridge_request_sent")
     }
 
     private fun connect(binder: IBinder) {
@@ -156,6 +217,7 @@ internal class AppleDirectPlayer(
         runCatching {
             binder.linkToDeath({
                 bridge = null
+                ProviderLogger.diagnostic("直连诊断: stage=bridge_binder_died")
                 requestBridge()
             }, 0)
         }
@@ -164,7 +226,10 @@ internal class AppleDirectPlayer(
             "stage=bridge_connected, alive=${binder.isBinderAlive}, " +
                 "receiverRegistered=$receiverRegistered"
         )
-        ProviderLogger.diagnostic("HyperLyrics Enhanced Apple Music 直连已建立")
+        ProviderLogger.diagnostic(
+            "直连诊断: stage=bridge_connected, alive=${binder.isBinderAlive}, " +
+                "receiverRegistered=$receiverRegistered",
+        )
         latestSongPayload?.let { payload ->
             val replayed = send { target -> target.onSongChanged(payload) }
             ProviderLogger.debug(
@@ -236,7 +301,7 @@ internal class AppleDirectPlayer(
     }
 
     override fun setPlaybackState(state: PlaybackState?): Boolean =
-        setPlaybackState(state?.state == PlaybackState.STATE_PLAYING)
+        setPlaybackState(PlaybackStateActivityPolicy.keepsSessionActive(state?.state))
 
     private inline fun send(action: (IAppleMusicLyricBridge) -> Unit): Boolean {
         val target = bridge ?: return false

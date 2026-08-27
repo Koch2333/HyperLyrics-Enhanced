@@ -3,6 +3,8 @@ package io.github.proify.lyricon.amprovider.xposed
 import com.juren233.hyperlyricsenhanced.common.lyric.RomanizationPolicy
 import com.juren233.hyperlyricsenhanced.common.lyric.LyricMetadataKeys
 import com.juren233.hyperlyricsenhanced.common.lyric.OnlineTranslationContentPolicy
+import com.juren233.hyperlyricsenhanced.common.lyric.OnlineTranslationMatchStat
+import com.juren233.hyperlyricsenhanced.common.lyric.OnlineTranslationMatchStatsCodec
 import com.juren233.hyperlyricsenhanced.lyric.model.Song
 
 internal class AppleNativeOnlineTranslationStore {
@@ -34,6 +36,8 @@ internal class AppleNativeOnlineTranslationStore {
         val hasPronunciation: Boolean,
         val translationSource: String?,
         val pronunciationSource: String?,
+        val translationMatchStats: Map<String, OnlineTranslationMatchStat>,
+        val pronunciationMatchStats: Map<String, OnlineTranslationMatchStat>,
     )
 
     @Volatile
@@ -44,7 +48,30 @@ internal class AppleNativeOnlineTranslationStore {
 
     @Synchronized
     fun update(song: Song): Boolean {
-        val songId = song.id?.takeIf(String::isNotBlank) ?: return false
+        val updatedOverlay = buildOverlay(song) ?: return false
+        if (overlay == updatedOverlay) return false
+
+        overlay = updatedOverlay
+        contentRevision += 1
+        return true
+    }
+
+    /**
+     * 只比较会显示在歌词页上的逐行内容，忽略来源字段。
+     *
+     * 同曲 RACE_FIRST/RACE_FINAL 载荷经常只有 ONLINE_TRANSLATION_SOURCE 变化；
+     * 此时 [update] 仍会推进 revision 以刷新来源菜单，但页面逐行内容没有变化，
+     * 不应再触发整页重呈现。
+     */
+    @Synchronized
+    fun wouldChangeDisplayContent(song: Song): Boolean {
+        val updatedOverlay = buildOverlay(song) ?: return false
+        val currentOverlay = overlay ?: return true
+        return currentOverlay.exactContent != updatedOverlay.exactContent
+    }
+
+    private fun buildOverlay(song: Song): Overlay? {
+        val songId = song.id?.takeIf(String::isNotBlank) ?: return null
         val entries = song.lyrics.orEmpty().mapNotNull { line ->
             val content = Content(
                 translation = sanitizeContent(line.translation),
@@ -56,9 +83,8 @@ internal class AppleNativeOnlineTranslationStore {
             val timing = TimingKey(line.begin, line.end)
             LineKey(timing, normalizeText(line.text)) to content
         }
-        if (entries.isEmpty()) return false
-
-        val updatedOverlay = Overlay(
+        if (entries.isEmpty()) return null
+        return Overlay(
             songId = songId,
             exactContent = entries.toMap(),
             translationsByTiming = entries.groupBy(
@@ -71,12 +97,13 @@ internal class AppleNativeOnlineTranslationStore {
                 ?.getString(LyricMetadataKeys.ONLINE_TRANSLATION_SOURCE),
             pronunciationSource = song.metadata
                 ?.getString(LyricMetadataKeys.ONLINE_PRONUNCIATION_SOURCE),
+            translationMatchStats = OnlineTranslationMatchStatsCodec.decode(
+                song.metadata?.getString(LyricMetadataKeys.ONLINE_TRANSLATION_MATCH_STATS)
+            ),
+            pronunciationMatchStats = OnlineTranslationMatchStatsCodec.decode(
+                song.metadata?.getString(LyricMetadataKeys.ONLINE_PRONUNCIATION_MATCH_STATS)
+            ),
         )
-        if (overlay == updatedOverlay) return false
-
-        overlay = updatedOverlay
-        contentRevision += 1
-        return true
     }
 
     @Synchronized
@@ -106,6 +133,20 @@ internal class AppleNativeOnlineTranslationStore {
 
     fun translationSource(songId: String?): String? =
         overlay?.takeIf { it.songId == songId && it.hasTranslation }?.translationSource
+
+    fun translationMatchPercentage(songId: String?, source: String): Int? =
+        overlay
+            ?.takeIf { it.songId == songId }
+            ?.translationMatchStats
+            ?.get(source)
+            ?.percentage
+
+    fun pronunciationMatchPercentage(songId: String?, source: String): Int? =
+        overlay
+            ?.takeIf { it.songId == songId }
+            ?.pronunciationMatchStats
+            ?.get(source)
+            ?.percentage
 
     fun pronunciationSource(songId: String?): String? =
         overlay?.takeIf { it.songId == songId && it.hasPronunciation }?.pronunciationSource

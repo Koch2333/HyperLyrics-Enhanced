@@ -1,6 +1,24 @@
 package com.juren233.hyperlyricsenhanced.common
 
 object RootConstants {
+    const val ACTION_REMOTE_PREFERENCE_CHANGED =
+        "com.juren233.hyperlyricsenhanced.action.REMOTE_PREFERENCE_CHANGED_V2"
+    const val EXTRA_REMOTE_PREFERENCE_GROUP =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_GROUP"
+    const val EXTRA_REMOTE_PREFERENCE_KEY =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_KEY"
+    const val EXTRA_REMOTE_PREFERENCE_TYPE =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_TYPE"
+    const val EXTRA_REMOTE_PREFERENCE_INT =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_INT"
+    const val EXTRA_REMOTE_PREFERENCE_BOOLEAN =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_BOOLEAN"
+    const val EXTRA_REMOTE_PREFERENCE_LONG =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_LONG"
+    const val EXTRA_REMOTE_PREFERENCE_FLOAT =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_FLOAT"
+    const val EXTRA_REMOTE_PREFERENCE_STRING =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_STRING"
     const val CLASSIC_AOD_FOCUS_REFRESH_AUTHORITY =
         "com.juren233.hyperlyricsenhanced.classic_aod_focus_refresh"
     const val CLASSIC_AOD_FOCUS_REFRESH_METHOD = "refresh"
@@ -31,6 +49,8 @@ object RootConstants {
         "key_hook_lock_screen_aod_pause_style"
     const val KEY_HOOK_LOCK_SCREEN_AOD_TRANSLATION_DISPLAY =
         "key_hook_lock_screen_aod_translation_display"
+    const val KEY_HOOK_LOCK_SCREEN_AOD_TRANSLATION_FALLBACK =
+        "key_hook_lock_screen_aod_translation_fallback"
     const val KEY_HOOK_LOCK_SCREEN_AOD_SWAP_TRANSLATION =
         "key_hook_lock_screen_aod_swap_translation"
     const val KEY_HOOK_LOCK_SCREEN_AOD_NEXT_SONG_PREVIEW =
@@ -57,6 +77,8 @@ object RootConstants {
         "key_hook_classic_aod_pause_style"
     const val KEY_HOOK_CLASSIC_AOD_TRANSLATION_DISPLAY =
         "key_hook_classic_aod_translation_display"
+    const val KEY_HOOK_CLASSIC_AOD_TRANSLATION_FALLBACK =
+        "key_hook_classic_aod_translation_fallback"
     const val KEY_HOOK_CLASSIC_AOD_SWAP_TRANSLATION =
         "key_hook_classic_aod_swap_translation"
     const val KEY_HOOK_CLASSIC_AOD_SONG_INFO_FORMAT =
@@ -77,10 +99,6 @@ object RootConstants {
     const val KEY_HOOK_LYRIC_SOURCE = "key_hook_lyric_source"
     const val DEFAULT_HOOK_LYRIC_SOURCE = "lyricon"
     const val KEY_HOOK_LYRICON_PROVIDER_DELAY_PREFIX = "key_hook_lyricon_provider_delay_"
-    const val KEY_HOOK_APPLE_MUSIC_ONLINE_FALLBACK =
-        "key_hook_apple_music_online_fallback"
-    const val KEY_HOOK_APPLE_MUSIC_FALLBACK_QQ_FIRST =
-        "key_hook_apple_music_fallback_qq_first"
     const val KEY_HOOK_REMOVE_CJK_LYRIC_SPACES =
         "key_hook_remove_cjk_lyric_spaces"
 
@@ -156,7 +174,10 @@ object RootConstants {
     const val KEY_HOOK_FONT_ITALIC = "key_hook_font_italic"
     const val KEY_HOOK_FADING_EDGE_LENGTH = "key_hook_fading_edge_length"
     const val KEY_HOOK_GRADIENT_PROGRESS = "key_hook_gradient_progress"
+    const val KEY_HOOK_LYRIC_POSITION = "key_hook_lyric_position"
     const val KEY_HOOK_CENTER_LYRIC = "key_hook_center_lyric"
+    const val KEY_HOOK_ISLAND_LEFT_LYRIC_POSITION = "key_hook_island_left_lyric_position"
+    const val KEY_HOOK_ISLAND_RIGHT_LYRIC_POSITION = "key_hook_island_right_lyric_position"
     const val KEY_HOOK_CENTER_GROUP_VOCALS = "key_hook_center_group_vocals"
     const val KEY_HOOK_ISLAND_RIGHT_ICON = "key_hook_island_right_icon"
     const val KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR = "key_hook_island_music_wave_color"
@@ -183,7 +204,12 @@ object RootConstants {
     const val KEY_HOOK_SYLLABLE_HIGHLIGHT = "key_hook_syllable_highlight"
 
     // ================= TRANSLATION KEYS =================
+    const val TRANSLATION_PRONUNCIATION_DISPLAY_OFF = 0
+    const val TRANSLATION_PRONUNCIATION_DISPLAY_TRANSLATION = 1
+    const val TRANSLATION_PRONUNCIATION_DISPLAY_PRONUNCIATION = 2
+
     const val KEY_HOOK_TRANSLATION_DISPLAY = "key_hook_translation_display"
+    const val KEY_HOOK_TRANSLATION_FALLBACK = "key_hook_translation_fallback"
     const val KEY_HOOK_DISABLE_TRANSLATION = "key_hook_disable_translation"
     const val KEY_HOOK_TRANSLATION_ONLY = "key_hook_translation_only"
     const val KEY_HOOK_SWAP_TRANSLATION = "key_hook_swap_translation"
@@ -195,13 +221,19 @@ object RootConstants {
     // ================= COLOR KEYS =================
     const val KEY_HOOK_EXTRACT_COVER_TEXT_COLOR = "key_hook_extract_cover_text_color"
     const val KEY_HOOK_EXTRACT_COVER_TEXT_GRADIENT = "key_hook_extract_cover_text_gradient"
+    const val KEY_HOOK_CUSTOM_TEXT_COLOR_ENABLED = "key_hook_custom_text_color_enabled"
+    const val KEY_HOOK_CUSTOM_TEXT_COLOR = "key_hook_custom_text_color"
+    const val KEY_HOOK_MONET_TEXT_COLOR = "key_hook_monet_text_color"
     const val KEY_HOOK_ISLAND_GLOW_EXTRACT_COLOR = "key_hook_island_glow_extract_color"
     const val KEY_HOOK_ISLAND_PROGRESS_GLOW = "key_hook_island_progress_glow"
     const val KEY_HOOK_ISLAND_PROGRESS_STYLE = "key_hook_island_progress_style"
     const val KEY_HOOK_ISLAND_PROGRESS_GRADIENT = "key_hook_island_progress_gradient"
+    const val KEY_HOOK_ISLAND_PROGRESS_COLOR_MODE = "key_hook_island_progress_color_mode"
+    const val KEY_HOOK_ISLAND_PROGRESS_CUSTOM_COLOR = "key_hook_island_progress_custom_color"
 
     // ================= FONT KEYS =================
     const val KEY_HOOK_CUSTOM_FONT_PATH = "key_hook_custom_font_path"
+    const val KEY_HOOK_NARROW_LATIN_FONT = "key_hook_narrow_latin_font"
 
     // ================= WORD MOTION KEYS =================
     const val KEY_HOOK_WORD_MOTION_ENABLED = "key_hook_word_motion_enabled"
@@ -213,8 +245,26 @@ object RootConstants {
     // ================= AI TRANSLATION KEYS =================
     const val KEY_HOOK_APPLE_MUSIC_MATCH_ONLINE_TRANSLATION =
         "key_hook_apple_music_match_online_translation"
-    const val KEY_HOOK_APPLE_MUSIC_TRANSLATION_QQ_FIRST =
-        "key_hook_apple_music_translation_qq_first"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SOURCE_ORDER =
+        "key_hook_online_translation_source_order"
+    const val KEY_HOOK_ONLINE_TRANSLATION_AUTO_SELECT_BEST_SOURCE =
+        "key_hook_online_translation_auto_select_best_source"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SOURCE_NETEASE =
+        "key_hook_online_translation_source_netease"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SOURCE_QQ =
+        "key_hook_online_translation_source_qq"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SOURCE_KUWO =
+        "key_hook_online_translation_source_kuwo"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SOURCE_KUGOU =
+        "key_hook_online_translation_source_kugou"
+    const val KEY_HOOK_ONLINE_TRANSLATION_APP_QISHUI =
+        "key_hook_online_translation_app_qishui"
+    const val KEY_HOOK_ONLINE_TRANSLATION_APP_SPOTIFY =
+        "key_hook_online_translation_app_spotify"
+    const val KEY_HOOK_ONLINE_TRANSLATION_APP_SALT =
+        "key_hook_online_translation_app_salt"
+    const val KEY_HOOK_ONLINE_TRANSLATION_SALT_PREFER_ONLINE =
+        "key_hook_online_translation_salt_prefer_online"
     const val KEY_HOOK_APPLE_MUSIC_CONTENT_UI_LANGUAGE =
         "key_hook_apple_music_content_ui_language"
     const val KEY_HOOK_APPLE_MUSIC_OVERRIDE_ACCOUNT_LANGUAGE =
@@ -225,12 +275,18 @@ object RootConstants {
         "key_hook_apple_music_restore_cjk_original_metadata"
     const val KEY_HOOK_APPLE_MUSIC_NOTIFICATION_OPEN_FULL_PLAYER =
         "key_hook_apple_music_notification_open_full_player"
+    const val KEY_HOOK_APPLE_MUSIC_VOLUME_BALANCE =
+        "key_hook_apple_music_volume_balance"
     const val KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS =
         "key_hook_apple_music_simplify_traditional_lyrics"
     const val KEY_HOOK_APPLE_MUSIC_NATIVE_ONLINE_TRANSLATION =
         "key_hook_apple_music_native_online_translation"
+    const val KEY_HOOK_APPLE_MUSIC_FILL_MISSING_LYRICS =
+        "key_hook_apple_music_fill_missing_lyrics"
     const val KEY_HOOK_APPLE_MUSIC_HIDE_MANDARIN_PINYIN =
         "key_hook_apple_music_hide_mandarin_pinyin"
+    const val KEY_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS =
+        "key_hook_apple_music_lunabeat_word_lyrics"
     const val KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_EFFECT =
         "key_hook_apple_music_lyrics_blur_effect"
     const val KEY_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MIN_RADIUS_DP =
@@ -260,8 +316,6 @@ object RootConstants {
     // ================= DEFAULTS =================
     const val DEFAULT_HOOK_LYRIC_MODE = 0
     const val DEFAULT_HOOK_LYRICON_PROVIDER_DELAY = 0
-    const val DEFAULT_HOOK_APPLE_MUSIC_ONLINE_FALLBACK = true
-    const val DEFAULT_HOOK_APPLE_MUSIC_FALLBACK_QQ_FIRST = false
     const val DEFAULT_HOOK_REMOVE_CJK_LYRIC_SPACES = false
     const val APPLE_MUSIC_CONTENT_UI_LANGUAGE_NONE = 0
     const val APPLE_MUSIC_CONTENT_UI_LANGUAGE_ZH_HANS_CN = 1
@@ -276,9 +330,12 @@ object RootConstants {
     const val DEFAULT_HOOK_APPLE_MUSIC_LOCALIZED_METADATA_CACHE = true
     const val DEFAULT_HOOK_APPLE_MUSIC_RESTORE_CJK_ORIGINAL_METADATA = false
     const val DEFAULT_HOOK_APPLE_MUSIC_NOTIFICATION_OPEN_FULL_PLAYER = false
+    const val DEFAULT_HOOK_APPLE_MUSIC_VOLUME_BALANCE = false
     const val DEFAULT_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS = false
     const val DEFAULT_HOOK_APPLE_MUSIC_NATIVE_ONLINE_TRANSLATION = false
+    const val DEFAULT_HOOK_APPLE_MUSIC_FILL_MISSING_LYRICS = false
     const val DEFAULT_HOOK_APPLE_MUSIC_HIDE_MANDARIN_PINYIN = false
+    const val DEFAULT_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS = false
     const val APPLE_MUSIC_LYRICS_BLUR_EFFECT_OFF = 0
     const val APPLE_MUSIC_LYRICS_BLUR_EFFECT_NATIVE = 1
     const val APPLE_MUSIC_LYRICS_BLUR_EFFECT_ADVANCED_MATERIAL = 2
@@ -339,7 +396,10 @@ object RootConstants {
     const val AOD_PAUSE_STYLE_RESTORE = 0
     const val AOD_PAUSE_STYLE_KEEP_LYRICS = 1
     const val DEFAULT_HOOK_AOD_PAUSE_STYLE = AOD_PAUSE_STYLE_RESTORE
-    const val DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY = true
+    const val DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY = false
+    const val DEFAULT_HOOK_AOD_TRANSLATION_DISPLAY_MODE =
+        TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+    const val DEFAULT_HOOK_AOD_TRANSLATION_FALLBACK = false
     const val DEFAULT_HOOK_AOD_SWAP_TRANSLATION = false
     const val DEFAULT_HOOK_AOD_NEXT_SONG_PREVIEW = true
     const val AOD_NEXT_SONG_PREVIEW_POSITION_LEFT = 0
@@ -352,6 +412,7 @@ object RootConstants {
     const val ISLAND_ALBUM_COVER_STYLE_CIRCLE = 1
     const val ISLAND_ALBUM_COVER_STYLE_APP_ICON = 2
     const val ISLAND_ALBUM_COVER_STYLE_ROTATING_CIRCLE = 3
+    const val ISLAND_ALBUM_COVER_STYLE_GRADIENT = 4
     const val DEFAULT_HOOK_ISLAND_ALBUM_COVER_STYLE = ISLAND_ALBUM_COVER_STYLE_DEFAULT
     const val DEFAULT_HOOK_MAX_LEFT_WIDTH = 100
     const val DEFAULT_HOOK_REMOVE_FOCUS_WHITELIST = false
@@ -448,8 +509,13 @@ object RootConstants {
     const val DEFAULT_HOOK_TEXT_SIZE_RATIO = 0.7f
     const val DEFAULT_HOOK_FONT_WEIGHT = 600
     const val DEFAULT_HOOK_FONT_ITALIC = false
+    const val DEFAULT_HOOK_NARROW_LATIN_FONT = false
     const val DEFAULT_HOOK_FADING_EDGE_LENGTH = 15
     const val DEFAULT_HOOK_GRADIENT_PROGRESS = true
+    const val ISLAND_LYRIC_POSITION_DEFAULT = 0
+    const val ISLAND_LYRIC_POSITION_CENTER = 1
+    const val ISLAND_LYRIC_POSITION_RIGHT = 2
+    const val DEFAULT_HOOK_LYRIC_POSITION = ISLAND_LYRIC_POSITION_DEFAULT
     const val DEFAULT_HOOK_CENTER_LYRIC = false
     const val DEFAULT_HOOK_CENTER_GROUP_VOCALS = false
     const val DEFAULT_HOOK_ISLAND_RIGHT_ICON = false
@@ -473,7 +539,11 @@ object RootConstants {
     const val DEFAULT_HOOK_SYLLABLE_RELATIVE = true
     const val DEFAULT_HOOK_SYLLABLE_HIGHLIGHT = false
 
-    const val DEFAULT_HOOK_TRANSLATION_DISPLAY = true
+    const val DEFAULT_HOOK_TRANSLATION_PRONUNCIATION_DISPLAY =
+        TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+    const val DEFAULT_HOOK_TRANSLATION_PRONUNCIATION_FALLBACK = false
+
+    const val DEFAULT_HOOK_TRANSLATION_DISPLAY = false
     const val DEFAULT_HOOK_DISABLE_TRANSLATION = false
     const val DEFAULT_HOOK_TRANSLATION_ONLY = false
     const val DEFAULT_HOOK_SWAP_TRANSLATION = false
@@ -482,9 +552,20 @@ object RootConstants {
     const val DEFAULT_HOOK_ADJACENT_BACKGROUND_TRANSLATION = false
     const val DEFAULT_HOOK_EXTRACT_COVER_TEXT_COLOR = false
     const val DEFAULT_HOOK_EXTRACT_COVER_TEXT_GRADIENT = false
+    const val DEFAULT_HOOK_CUSTOM_TEXT_COLOR_ENABLED = false
+    const val DEFAULT_HOOK_CUSTOM_TEXT_COLOR = -1
+    const val DEFAULT_HOOK_MONET_TEXT_COLOR = false
     const val DEFAULT_HOOK_ISLAND_GLOW_EXTRACT_COLOR = false
     const val DEFAULT_HOOK_ISLAND_PROGRESS_GLOW = false
     const val DEFAULT_HOOK_ISLAND_PROGRESS_GRADIENT = false
+    const val ISLAND_PROGRESS_COLOR_MODE_DISABLED = 0
+    const val ISLAND_PROGRESS_COLOR_MODE_SYSTEM_BLUE = 1
+    const val ISLAND_PROGRESS_COLOR_MODE_MONET = 2
+    const val ISLAND_PROGRESS_COLOR_MODE_COVER = 3
+    const val ISLAND_PROGRESS_COLOR_MODE_COVER_GRADIENT = 4
+    const val ISLAND_PROGRESS_COLOR_MODE_CUSTOM = 5
+    const val DEFAULT_HOOK_ISLAND_PROGRESS_COLOR_MODE = ISLAND_PROGRESS_COLOR_MODE_DISABLED
+    const val DEFAULT_HOOK_ISLAND_PROGRESS_CUSTOM_COLOR = 0xFF5B8CFF.toInt()
     const val ISLAND_PROGRESS_STYLE_TOP_CLOCKWISE = 0
     const val ISLAND_PROGRESS_STYLE_RIGHT_CLOCKWISE = 1
     const val ISLAND_PROGRESS_STYLE_BOTTOM_CLOCKWISE = 2
@@ -500,7 +581,16 @@ object RootConstants {
     const val DEFAULT_HOOK_WORD_MOTION_LATIN_WAVE = 3.6f
     const val DEFAULT_HOOK_AI_TRANS_ENABLE = false
     const val DEFAULT_HOOK_APPLE_MUSIC_MATCH_ONLINE_TRANSLATION = false
-    const val DEFAULT_HOOK_APPLE_MUSIC_TRANSLATION_QQ_FIRST = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SOURCE_ORDER = "NE,QM,KUWO,KUGOU"
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_AUTO_SELECT_BEST_SOURCE = true
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SOURCE_NETEASE = true
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SOURCE_QQ = true
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SOURCE_KUWO = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SOURCE_KUGOU = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_APP_QISHUI = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_APP_SPOTIFY = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_APP_SALT = false
+    const val DEFAULT_HOOK_ONLINE_TRANSLATION_SALT_PREFER_ONLINE = false
     const val DEFAULT_HOOK_AI_TRANS_AUTO_IGNORE_CHINESE = false
     const val DEFAULT_HOOK_AI_TRANS_SKIP_EXISTING_TRANSLATION = false
     const val DEFAULT_HOOK_AI_TRANS_FORCE_OVERRIDE = false

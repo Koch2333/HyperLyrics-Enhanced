@@ -10,6 +10,7 @@ object OfficialProviderCatalog {
     const val PLUGIN_API_VERSION = 3
     const val CORE_PACKAGE_NAME = "com.juren233.hyperlyricsenhanced"
     const val APPLE_MUSIC_PACKAGE_NAME = "com.apple.android.music"
+    const val SALT_PLAYER_PACKAGE_NAME = "com.salt.music"
     const val OFFICIAL_PROVIDER_PACKAGE_PREFIX =
         "com.juren233.hyperlyricsenhanced.provider."
 
@@ -20,6 +21,9 @@ object OfficialProviderCatalog {
         val secondaryProcesses: Set<String> = emptySet(),
         val description: String? = null,
         val targetDisplayNames: Map<String, String> = emptyMap(),
+        val systemMediaRuntime: Boolean = false,
+        val supportsNextTrackPreview: Boolean = true,
+        val showInDownloadList: Boolean = true,
     ) {
         fun displayNameForPackage(packageName: String): String =
             targetDisplayNames[packageName] ?: displayName
@@ -30,10 +34,12 @@ object OfficialProviderCatalog {
         Definition(
             id = "qqmusic",
             displayName = "QQ音乐",
-            targetPackages = setOf("com.tencent.qqmusic"),
+            targetPackages = setOf("com.tencent.qqmusic", "com.tencent.qqmusicpad"),
             secondaryProcesses = setOf("com.tencent.qqmusic:QQPlayerService"),
+            targetDisplayNames = mapOf(
+                "com.tencent.qqmusicpad" to "QQ音乐HD",
+            ),
         ),
-        Definition("qqmusic-hd", "QQ音乐HD", setOf("com.tencent.qqmusicpad")),
         Definition(
             id = "kugou",
             displayName = "酷狗音乐",
@@ -56,17 +62,44 @@ object OfficialProviderCatalog {
                 "com.ikunshare.music.mobile",
                 "com.lxnetease.music.mobile",
             ),
+            showInDownloadList = false,
         ),
-        Definition("poweramp", "Poweramp", setOf("com.maxmpz.audioplayer")),
+        Definition(
+            "poweramp",
+            "Poweramp",
+            setOf("com.maxmpz.audioplayer"),
+            showInDownloadList = false,
+        ),
         Definition(
             id = "salt-player",
             displayName = "椒盐音乐",
             targetPackages = setOf("com.salt.music"),
         ),
-        Definition("qishui", "汽水音乐", setOf("com.luna.music")),
-        Definition("musicfree", "MusicFree", setOf("fun.upup.musicfree")),
-        Definition("gramophone", "Gramophone", setOf("org.akanework.gramophone")),
-        Definition("symfonium", "Symfonium", setOf("app.symfonik.music.player")),
+        Definition(
+            id = "qishui",
+            displayName = "汽水音乐",
+            targetPackages = setOf("com.luna.music"),
+            systemMediaRuntime = true,
+            supportsNextTrackPreview = false,
+        ),
+        Definition(
+            "musicfree",
+            "MusicFree",
+            setOf("fun.upup.musicfree"),
+            showInDownloadList = false,
+        ),
+        Definition(
+            "gramophone",
+            "Gramophone",
+            setOf("org.akanework.gramophone"),
+            showInDownloadList = false,
+        ),
+        Definition(
+            "symfonium",
+            "Symfonium",
+            setOf("app.symfonik.music.player"),
+            showInDownloadList = false,
+        ),
     )
 
     private val definitionsByPackage = buildMap {
@@ -81,6 +114,9 @@ object OfficialProviderCatalog {
     fun definitionForId(id: String): Definition? =
         definitions.firstOrNull { it.id == id }
 
+    fun shouldShowInDownloadList(pluginId: String): Boolean =
+        definitionForId(pluginId)?.showInDownloadList == true
+
     fun isOfficialProviderPair(
         providerPackageName: String,
         playerPackageName: String,
@@ -91,9 +127,13 @@ object OfficialProviderCatalog {
     }
 
     fun shouldLoadIntoProcess(packageName: String, processName: String): Boolean {
+        if (definitionForPackage(packageName)?.systemMediaRuntime == true) return false
         if (processName == packageName) return true
         return processName in definitionForPackage(packageName)?.secondaryProcesses.orEmpty()
     }
+
+    fun supportsNextTrackPreview(packageName: String): Boolean =
+        definitionForPackage(packageName)?.supportsNextTrackPreview ?: true
 
     fun enabledKey(pluginId: String) =
         "key_official_provider_enabled_$pluginId"
