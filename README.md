@@ -25,10 +25,10 @@ HyperLyrics Enhanced 是一个为小米 HyperOS 设备打造的 Android 模块�
 - 将 Apple Music 体验进一步优化，且面向所有安卓品牌手机。
 - 内置 Lyricon Central 调度中枢与官方 Provider 插件中心，无缝兼容支持网易云音乐、QQ 音乐、Spotify 等其他主流播放器。
 
-本项目基于 [limczhh/HyperLyric](https://github.com/limczhh/HyperLyric) 二次开发，现已形成独立的功能方向和维护边界。
+本项目基于 [limczhh/HyperLyric](https://github.com/limczhh/HyperLyric) 二次开发，且本仓库为个人自用版本，该原分支及上游现已形成独立的功能方向和维护边界。
 
 > [!WARNING]
-> HyperLyrics Enhanced 不是 HyperLyric 的官方后续版本。仅在本项目中出现的问题，请在本项目的 Issue 中反馈，不要打扰原项目维护者。
+> HyperLyrics Enhanced 不是 HyperLyric 的官方后续版本。仅在本项目中出现的问题，请在本项目的 Issue 中反馈，不要打扰原项目维护者。且本自用版本出现的问题也请不要打扰上游作者。
 
 ## 相较原项目的主要优化
 
