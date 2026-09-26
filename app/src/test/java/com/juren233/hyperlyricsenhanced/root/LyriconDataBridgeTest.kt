@@ -22,7 +22,132 @@ class LyriconDataBridgeTest {
 
     @After
     fun tearDown() {
+        LyriconDataBridge.configureEarlyNextLinePreview(0, 100)
         LyriconDataBridge.clearState()
+    }
+
+    @Test
+    fun `preview presets switch relative to current line end and retain next timing`() {
+        listOf(1 to 0L, 2 to 100L, 3 to 200L, 4 to 300L, 5 to 400L, 6 to 650L)
+            .forEach { (mode, leadMs) ->
+                LyriconDataBridge.configureEarlyNextLinePreview(mode, 650)
+                preparePreviewSong()
+                LyriconDataBridge.updatePosition(2000 - leadMs - 1)
+                assertEquals("Current", LyriconDataBridge.currentLyric)
+                assertTrue(LyriconDataBridge.updatePosition(2000 - leadMs))
+                assertEquals("Next", LyriconDataBridge.currentLyric)
+                assertEquals(4000L, LyriconDataBridge.currentLyricLine?.begin)
+                assertEquals("Next translation", LyriconDataBridge.currentLyricLine?.translation)
+                assertEquals("Last", LyriconDataBridge.currentNextLyricLine?.text)
+                assertFalse(LyriconDataBridge.updatePosition(3000))
+                assertFalse(LyriconDataBridge.updatePosition(4000))
+            }
+    }
+
+    @Test
+    fun `preview disabled preserves the current line across the gap`() {
+        preparePreviewSong()
+        LyriconDataBridge.updatePosition(3000)
+        assertEquals("Current", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.configureEarlyNextLinePreview(2, 100)
+        assertTrue(LyriconDataBridge.updateEstimatedPosition(3000))
+        assertEquals("Next", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.configureEarlyNextLinePreview(0, 100)
+        assertTrue(LyriconDataBridge.updateEstimatedPosition(3000))
+        assertEquals("Current", LyriconDataBridge.currentLyric)
+    }
+
+    @Test
+    fun `preview handles backward seek repeated callback and last line`() {
+        LyriconDataBridge.configureEarlyNextLinePreview(2, 100)
+        preparePreviewSong()
+        LyriconDataBridge.updatePosition(1900)
+        LyriconDataBridge.updateLyricLine(RichLyricLine(begin = 1000, end = 2000, text = "Current"))
+        assertEquals("Next", LyriconDataBridge.currentLyric)
+        assertTrue(LyriconDataBridge.updatePosition(1500))
+        assertEquals("Current", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.updatePosition(9000)
+        assertEquals("Last", LyriconDataBridge.currentLyric)
+        assertEquals(null, LyriconDataBridge.currentNextLyricLine)
+    }
+
+    @Test
+    fun `interlude dots take over the long gap and hand over early when preview is enabled`() {
+        LyriconDataBridge.configureEarlyNextLinePreview(2, 100)
+        LyriconDataBridge.updateSong(Song(lyrics = listOf(
+            RichLyricLine(begin = 0, end = 1000, text = "Current"),
+            RichLyricLine(begin = 10000, end = 11000, text = "Next"),
+        )))
+        LyriconDataBridge.updatePosition(899)
+        assertEquals("Current", LyriconDataBridge.currentLyric)
+
+        assertTrue(LyriconDataBridge.updatePosition(900))
+        assertEquals(InterludeTracker.Type.INTERLUDE, LyriconDataBridge.currentInterludeType)
+        assertEquals("•••", LyriconDataBridge.currentLyric)
+        assertEquals(900L, LyriconDataBridge.currentLyricLine?.begin)
+        assertTrue(
+            LyriconDataBridge.currentLyricLine?.metadata
+                ?.getBoolean(LyricMetadataKeys.INSTRUMENTAL) == true
+        )
+        assertEquals("Next", LyriconDataBridge.currentNextLyricLine?.text)
+
+        assertFalse(LyriconDataBridge.updatePosition(5000))
+
+        assertTrue(LyriconDataBridge.updatePosition(9900))
+        assertEquals(null, LyriconDataBridge.currentInterludeType)
+        assertEquals("Next", LyriconDataBridge.currentLyric)
+        assertFalse(LyriconDataBridge.updatePosition(10000))
+    }
+
+    @Test
+    fun `early preview does not shift intro dots without a current line`() {
+        LyriconDataBridge.configureEarlyNextLinePreview(2, 100)
+        LyriconDataBridge.updateSong(
+            Song(lyrics = listOf(RichLyricLine(begin = 8000, end = 10_000, text = "First line")))
+        )
+
+        LyriconDataBridge.updatePosition(7900)
+        assertEquals(InterludeTracker.Type.INTRO, LyriconDataBridge.currentInterludeType)
+        assertEquals("•••", LyriconDataBridge.currentLyric)
+
+        assertTrue(LyriconDataBridge.updatePosition(8000))
+        assertEquals(null, LyriconDataBridge.currentInterludeType)
+        assertEquals("First line", LyriconDataBridge.currentLyric)
+    }
+
+    @Test
+    fun `large custom preview cannot cascade past the immediate successor or preview a title`() {
+        LyriconDataBridge.configureEarlyNextLinePreview(6, Int.MAX_VALUE)
+        preparePreviewSong()
+        LyriconDataBridge.updatePosition(500)
+        assertEquals("Song", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.updatePosition(1000)
+        assertEquals("Next", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.updatePosition(1001)
+        assertEquals("Next", LyriconDataBridge.currentLyric)
+    }
+
+    @Test
+    fun `preview state is replaced on song switch and ignored for plain text`() {
+        LyriconDataBridge.configureEarlyNextLinePreview(2, 100)
+        preparePreviewSong()
+        LyriconDataBridge.updatePosition(1900)
+        LyriconDataBridge.updateSong(Song(lyrics = listOf(
+            RichLyricLine(begin = 0, end = 1000, text = "Other song"),
+        )))
+        LyriconDataBridge.updatePosition(900)
+        assertEquals("Other song", LyriconDataBridge.currentLyric)
+        LyriconDataBridge.updateLyric("Plain text")
+        assertFalse(LyriconDataBridge.updatePosition(950))
+        assertEquals("Plain text", LyriconDataBridge.currentLyric)
+    }
+
+    private fun preparePreviewSong() {
+        LyriconDataBridge.updateSong(Song(name = "Song", lyrics = listOf(
+            RichLyricLine(begin = 1000, end = 2000, text = "Current"),
+            RichLyricLine(begin = 4000, end = 5000, text = "Next", translation = "Next translation"),
+            RichLyricLine(begin = 6000, end = 7000, text = "Last"),
+        )))
     }
 
     @Test
@@ -165,7 +290,7 @@ class LyriconDataBridgeTest {
     }
 
     @Test
-    fun `uses the unmerged current lyric for island when next line display is disabled`() {
+    fun `keeps the merged current vocal group when next line display is disabled`() {
         useAppleMusic()
         val main = RichLyricLine(begin = 1_000, end = 2_000, text = "Main")
         val overlapping = RichLyricLine(begin = 1_000, end = 2_200, text = "Overlapping")
@@ -177,11 +302,11 @@ class LyriconDataBridgeTest {
 
         assertEquals("Main", LyriconDataBridge.currentLyricLineForIsland(true)?.text)
         assertEquals(
-            "Overlapping",
+            "Main",
             LyriconDataBridge.currentLyricLineForIsland(false)?.text
         )
         assertEquals(
-            null,
+            "Overlapping",
             LyriconDataBridge.currentLyricLineForIsland(false)?.secondary
         )
     }

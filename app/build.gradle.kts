@@ -40,8 +40,8 @@ android {
         applicationId = "com.juren233.hyperlyricsenhanced"
         minSdk = 33
         targetSdk = 37
-        versionCode = 150179
-        versionName = ciVersionName ?: "7.5.0-beta"
+        versionCode = 202005
+        versionName = ciVersionName ?: "8.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -51,6 +51,12 @@ android {
     }
 
     packaging {
+        dex {
+            // Compress classes.dex in the APK. Uncompressed (stored) dex is the AGP
+            // default for install-time read speed, but this module ships as a direct
+            // APK download, where deflating dex roughly halves the artifact size.
+            useLegacyPackaging = true
+        }
         jniLibs {
             // libxposed target processes load DexKit from the module's absolute
             // nativeLibraryDir, so the module .so must be extracted on install.
@@ -112,6 +118,7 @@ android {
         buildConfig = true
         aidl = true
     }
+
 }
 
 dependencies {

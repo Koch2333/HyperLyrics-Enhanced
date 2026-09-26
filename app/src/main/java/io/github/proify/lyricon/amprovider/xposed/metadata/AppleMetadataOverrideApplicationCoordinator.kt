@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.amprovider.xposed
 
 import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.root.utils.AppleMetadataFlowDiagnostics
 import io.github.proify.lyricon.amprovider.xposed.hooks.AppleFrameworkMetadataHooks
 import java.util.concurrent.atomic.AtomicLong
 
@@ -32,7 +33,7 @@ internal class AppleMetadataOverrideApplicationCoordinator(
 ) {
     fun rememberOriginalMetadataOverride(
         mediaId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         confirmed: Boolean,
     ) {
         metadataStore.rememberOriginalMetadata(
@@ -42,9 +43,24 @@ internal class AppleMetadataOverrideApplicationCoordinator(
         )
     }
 
+    fun publishCurrentPlaybackAlias(mediaId: String, alias: Alias) {
+        if (playbackMetadataCoordinator.currentMetadataId() != mediaId) return
+        metadataStore.updateCurrentPlaybackOverride(alias)
+        val updated = MediaMetadataCache.updateDisplayMetadata(
+            mediaId = mediaId,
+            title = alias.title,
+            artist = alias.artist,
+        ) ?: return
+        if (BuildConfig.DEBUG) AppleMetadataFlowDiagnostics.record("associated_artist_playback_publish") {
+            "id=$mediaId title=${AppleMetadataFlowDiagnostics.text(updated.title)} " +
+                "artist=${AppleMetadataFlowDiagnostics.text(updated.artist)}"
+        }
+        PlaybackManager.onCatalogMetadataResolved(mediaId)
+    }
+
     fun apply(
         mediaId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         forceInAppRebind: Boolean = true,
         rememberLocalizedArtist: Boolean = true,
         originalMetadata: Boolean = false,
@@ -129,6 +145,12 @@ internal class AppleMetadataOverrideApplicationCoordinator(
         if (playbackMetadataCoordinator.currentMetadataId() == mediaId) {
             metadataStore.updateCurrentPlaybackOverride(effectiveAlias)
         }
+        if (BuildConfig.DEBUG && appliesToActivePlayback) AppleMetadataFlowDiagnostics.record("catalog_display_override") {
+            "id=$mediaId active=${playbackMetadataCoordinator.currentMetadataId()} " +
+                "title=${AppleMetadataFlowDiagnostics.text(effectiveAlias.title)} " +
+                "artist=${AppleMetadataFlowDiagnostics.text(effectiveAlias.artist)} " +
+                "original=$originalMetadata"
+        }
         MediaMetadataCache.updateDisplayMetadata(
             mediaId = mediaId,
             title = effectiveAlias.title,
@@ -193,7 +215,7 @@ internal class AppleMetadataOverrideApplicationCoordinator(
     private fun propagateSharedArtistOverride(
         sourceMediaId: String,
         artistId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         forceInAppRebind: Boolean,
         rememberLocalizedArtist: Boolean,
         originalMetadata: Boolean,

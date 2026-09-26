@@ -138,6 +138,10 @@ object CoverColorHelper {
             )
         }
 
+        // Text and edge progress share this cache but choose modes independently.
+        // Without artwork there is no signature proof for a different song key, and
+        // a palette from the opposite mode must not become this request's fallback.
+        if (cachedKey != key) return null
         val light = cachedLightColors ?: return null
         val dark = cachedDarkColors ?: return null
         return ResolvedPalette(
@@ -270,6 +274,21 @@ object CoverColorHelper {
             PerceptualGradient.oklabDistance(colors[first], colors[candidate])
         }
         return intArrayOf(first, second)
+    }
+
+    /**
+     * Resolves the two native gradient slot colors with the same endpoint policy as
+     * resolveTextColors: perceptual endpoint selection plus the three-anchor path.
+     * Renderers exposing only two gradient slots take the start and end anchors.
+     */
+    internal fun resolveNativeGradientColors(palette: IntArray): Pair<Int, Int>? {
+        val indices = gradientEndpointIndices(palette)
+        if (indices.size < 2) return null
+        val anchors = PerceptualGradient.threeColorAnchors(
+            palette[indices[0]],
+            palette[indices[1]],
+        )
+        return anchors.first() to anchors.last()
     }
 
     fun getCachedColors(): Pair<IntArray, IntArray>? {

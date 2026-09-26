@@ -1,9 +1,14 @@
 package com.juren233.hyperlyricsenhanced.ui.page.hooksettings
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -11,19 +16,25 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.juren233.hyperlyricsenhanced.R
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.ui.component.AppSettingsIconButton
 import com.juren233.hyperlyricsenhanced.ui.component.FloatRangeInputDialog
 import com.juren233.hyperlyricsenhanced.ui.component.NumberRangeInputDialog
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.XposedLyricSettingPage
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookConfigSaver
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookPrefs
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
@@ -33,9 +44,22 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 fun AppleMusicOptimizationPage(
     outerPadding: PaddingValues = PaddingValues(),
     showNavigationIcon: Boolean = true,
+    embeddedInMainPage: Boolean = false,
+    collapseTitleToAppName: Boolean = false,
+    showRefreshAction: Boolean = false,
+    onRefreshClick: () -> Unit = {},
+    onAppSettingsClick: () -> Unit = {},
 ) {
     val prefs = rememberHookPrefs()
     val saveConfig = rememberHookConfigSaver(prefs)
+    var forceCellularDataEntry by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_FORCE_CELLULAR_DATA_ENTRY,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_FORCE_CELLULAR_DATA_ENTRY,
+            )
+        )
+    }
     var contentUiLanguage by remember {
         mutableIntStateOf(
             prefs.getInt(
@@ -138,6 +162,14 @@ fun AppleMusicOptimizationPage(
             )
         )
     }
+    var lyricsBlurAnimation by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION,
+            )
+        )
+    }
     val initialNativeLyricsBlurRadiusRange = remember(prefs) {
         val configuredMin = prefs.getFloat(
             RootConstants.KEY_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MIN_RADIUS_DP,
@@ -185,6 +217,14 @@ fun AppleMusicOptimizationPage(
         mutableIntStateOf(initialAdvancedLyricsBlurRadiusRange.second)
     }
     var showLyricsBlurValuesDialog by remember { mutableStateOf(false) }
+    var followSystemFont by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT,
+            )
+        )
+    }
     var followSystemFontWeight by remember {
         mutableStateOf(
             prefs.getBoolean(
@@ -291,6 +331,30 @@ fun AppleMusicOptimizationPage(
         subtitle = stringResource(R.string.summary_apple_music_optimization_page),
         outerPadding = outerPadding,
         showNavigationIcon = showNavigationIcon,
+        // 仅当本页作为主页面首页（主页被隐藏）时，标题收回顶栏后只显示应用名；
+        // 主页仍在时保持原有的标题 + 副标题。
+        collapsedTitle = if (collapseTitleToAppName) stringResource(R.string.app_name) else null,
+        // 内嵌在主页面且本页即首页（主页被隐藏）时，左上角提供应用设置入口；
+        // 主页仍在时设置入口由主页提供，这里不重复显示。
+        leadingContent = if (embeddedInMainPage) {
+            { AppSettingsIconButton(onClick = onAppSettingsClick) }
+        } else {
+            null
+        },
+        // 主页隐藏时本页即首页，顶栏右侧同样提供一键刷新入口。
+        trailingContent = if (showRefreshAction) {
+            {
+                IconButton(onClick = onRefreshClick) {
+                    Icon(
+                        imageVector = MiuixIcons.Refresh,
+                        contentDescription = stringResource(R.string.title_one_tap_refresh),
+                        modifier = Modifier.size(26.dp),
+                    )
+                }
+            }
+        } else {
+            null
+        },
     ) {
         item(key = "app_content_title") {
             SmallTitle(text = stringResource(R.string.title_apple_music_app_content))
@@ -458,6 +522,17 @@ fun AppleMusicOptimizationPage(
                         )
                     },
                 )
+                SwitchPreference(
+                    title = stringResource(R.string.title_apple_music_force_cellular_data_entry),
+                    checked = forceCellularDataEntry,
+                    onCheckedChange = { enabled ->
+                        forceCellularDataEntry = enabled
+                        saveConfig(
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_FORCE_CELLULAR_DATA_ENTRY,
+                            enabled,
+                        )
+                    },
+                )
             }
         }
         item(key = "app_display_title") {
@@ -527,19 +602,65 @@ fun AppleMusicOptimizationPage(
                         onClick = { showLyricsBlurValuesDialog = true },
                     )
                 }
+                AnimatedVisibility(
+                    visible = lyricsBlurEffect !=
+                        RootConstants.APPLE_MUSIC_LYRICS_BLUR_EFFECT_OFF
+                ) {
+                    SwitchPreference(
+                        title = stringResource(
+                            R.string.title_apple_music_lyrics_blur_animation
+                        ),
+                        summary = stringResource(
+                            R.string.summary_apple_music_lyrics_blur_animation
+                        ),
+                        checked = lyricsBlurAnimation,
+                        onCheckedChange = { enabled ->
+                            lyricsBlurAnimation = enabled
+                            saveConfig(
+                                RootConstants.KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION,
+                                enabled,
+                            )
+                        },
+                    )
+                }
                 SwitchPreference(
                     title = stringResource(
-                        R.string.title_apple_music_follow_system_font_weight
+                        R.string.title_apple_music_follow_system_font
                     ),
-                    checked = followSystemFontWeight,
+                    summary = stringResource(
+                        R.string.summary_apple_music_follow_system_font
+                    ),
+                    checked = followSystemFont,
                     onCheckedChange = { enabled ->
-                        followSystemFontWeight = enabled
+                        followSystemFont = enabled
                         saveConfig(
-                            RootConstants.KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT_WEIGHT,
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT,
                             enabled,
                         )
                     },
                 )
+                AnimatedVisibility(
+                    visible = !followSystemFont,
+                    enter = fadeIn() + expandVertically(expandFrom = Alignment.Top),
+                    exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top),
+                ) {
+                    SwitchPreference(
+                        title = stringResource(
+                            R.string.title_apple_music_follow_system_font_weight
+                        ),
+                        summary = stringResource(
+                            R.string.summary_apple_music_follow_system_font_weight
+                        ),
+                        checked = followSystemFontWeight,
+                        onCheckedChange = { enabled ->
+                            followSystemFontWeight = enabled
+                            saveConfig(
+                                RootConstants.KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT_WEIGHT,
+                                enabled,
+                            )
+                        },
+                    )
+                }
             }
         }
     }

@@ -3,8 +3,12 @@ package com.juren233.hyperlyricsenhanced.root.island
 import android.annotation.SuppressLint
 import android.view.View
 import android.view.ViewGroup
+import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.root.HookEntry
 import com.juren233.hyperlyricsenhanced.root.island.view.MaxWidthFrameLayout
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
+import java.util.Collections
 import java.util.WeakHashMap
 
 /**
@@ -16,6 +20,12 @@ object IslandViewHelper {
     private val SYSTEMUI_PKG_NAMES = arrayOf("miui.systemui.plugin", "com.android.systemui")
     private val originalMargins = WeakHashMap<View, MarginSnapshot>()
     private val isRelayouting = ThreadLocal.withInitial { false }
+    private val loggedRelayoutClasses = Collections.synchronizedSet(
+        Collections.newSetFromMap(WeakHashMap<Class<*>, Boolean>()),
+    )
+    private val loggedMissingRelayoutClasses = Collections.synchronizedSet(
+        Collections.newSetFromMap(WeakHashMap<Class<*>, Boolean>()),
+    )
 
     /**
      * 切换超级岛内部容器（如图标、文本容器）的可见性
@@ -76,6 +86,7 @@ object IslandViewHelper {
      * 清理所有注入的视图并恢复系统原生组件
      */
     fun clearInjectedViews(rootView: ViewGroup) {
+        IslandNativeSlotPlacement.restore(rootView)
         hideInjectedView(rootView, IslandProbeUtils.LEFT_TEST_VIEW_TAG)
         hideInjectedView(rootView, IslandProbeUtils.LEFT_TEST_WRAPPER_TAG)
         hideInjectedView(rootView, IslandProbeUtils.RIGHT_TEST_VIEW_TAG)
@@ -131,25 +142,183 @@ object IslandViewHelper {
     }
 
     /**
+     * 递归标记子树在下次 measure 时强制重新执行 onMeasure。
+     *
+     * 系统的 calculateBigIslandWidth 仅当左右区域包含原生 TextView 时才会
+     * forceLayoutRecursively（见 applyPreMeasureMode），注入的歌词子树全部是
+     * 自定义 View，不会触发该分支；而区域测量规格每次相同，View.measure 会因
+     * 规格未变且无 FORCE_LAYOUT 标志直接短路，导致岛宽锁死在注入时刻。
+     * 动态长度开启时必须在宽度重算前手动标记。
+     */
+    fun forceLayoutIslandAreas(rootView: ViewGroup) {
+        val areaLeft = findViewByName(rootView, "area_left")
+        val areaRight = findViewByName(rootView, "area_right")
+        if (areaLeft == null && areaRight == null) {
+            // 兜底：不同版本区域容器缺失时，直接标记注入模块所在的父容器
+            forceLayoutRecursively(findViewByName(rootView, IslandProbeUtils.LEFT_PARENT_NAME))
+            forceLayoutRecursively(findViewByName(rootView, IslandProbeUtils.RIGHT_PARENT_NAME))
+            return
+        }
+        forceLayoutRecursively(areaLeft)
+        forceLayoutRecursively(areaRight)
+    }
+
+    private fun forceLayoutRecursively(view: View?) {
+        if (view == null) return
+        view.forceLayout()
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                forceLayoutRecursively(view.getChildAt(i))
+            }
+        }
+    }
+
+    /**
+     * 岛宽计算（calculateBigIslandWidth）以左右区在计算那一刻的 getMeasuredWidth()
+     * 为内容输入（手机插件 DEX：DynamicIslandContentView.calculateBigIslandWidth 直接
+     * 读取 area.measuredWidth），而该值是上一次布局的产物：回桌面恢复时岛从胶囊宽度
+     * 起步，区域被窄规格测量，计算读到窄值 → 岛按窄值定宽 → 窄状态自我维持，直到
+     * 一次强制刷新才跳回真实内容宽（真机：恢复后胶囊 546 停 3.5s 再跳 652，
+     * LyricHug 可见规格在 573/246 间交替）。
+     *
+     * 因此每次岛宽计算前把左右区以 AT_MOST(可用屏宽) 重新测量到内容自然宽度，
+     * 让计算输入不再依赖上一次布局宽度。高度沿用当前实测值，不扰动纵向布局。
+     */
+    fun measureIslandAreasToNaturalWidth(rootView: ViewGroup) {
+        runCatching {
+            val available = rootView.width.takeIf { it > 0 }
+                ?: rootView.resources.displayMetrics.widthPixels
+            val widthSpec = View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST)
+            listOfNotNull(
+                findViewByName(rootView, "area_left"),
+                findViewByName(rootView, "area_right"),
+            ).forEach { area ->
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(
+                    area.measuredHeight.coerceAtLeast(1),
+                    View.MeasureSpec.EXACTLY,
+                )
+                area.measure(widthSpec, heightSpec)
+            }
+        }.onFailure { e ->
+            HookLogger.e("IslandViewHelper", "区域自然宽度预测量失败", e)
+        }
+    }
+
+    internal fun isDynamicWidthEnabled(): Boolean {
+        return HookEntry.instance?.prefs?.getBoolean(
+            RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH,
+            RootConstants.DEFAULT_HOOK_ISLAND_DYNAMIC_WIDTH
+        ) == true
+    }
+
+    internal fun isUnlockIslandLengthEnabled(): Boolean {
+        return HookEntry.instance?.prefs?.getBoolean(
+            RootConstants.KEY_HOOK_UNLOCK_ISLAND_LENGTH,
+            RootConstants.DEFAULT_HOOK_UNLOCK_ISLAND_LENGTH
+        ) == true
+    }
+
+    /**
+     * 动态长度开启时，在宽度重算前标记左右区域子树强制重新测量，
+     * 覆盖 triggerSystemRelayout 与系统自发 calculateBigIslandWidth 两条路径；
+     * 并把区域预测量到内容自然宽度，保证宽度计算的输入不受上一次布局宽度污染。
+     */
+    fun forceLayoutIslandAreasIfDynamicWidth(rootView: ViewGroup) {
+        if (isDynamicWidthEnabled()) {
+            forceLayoutIslandAreas(rootView)
+            measureIslandAreasToNaturalWidth(rootView)
+        }
+    }
+
+    /**
+     * 从注入的槽位视图向上查找超级岛内容视图并触发布局刷新。
+     * 用于换句/预览提升动画把内容更新延迟落地后的第二次岛宽重算——
+     * 否则内容应用返回时的立即测量只能量到上一行宽度。
+     * 开关状态在触发时实时读取，找不到宿主视图时静默返回。
+     */
+    fun triggerSystemRelayoutForDescendant(view: View) {
+        if (!isDynamicWidthEnabled()) return
+        var parent = view.parent
+        while (parent is View) {
+            if (parent is ViewGroup &&
+                IslandRelayoutMethodResolver.resolve(parent.javaClass) != null
+            ) {
+                triggerLyricContentRelayout(parent)
+                return
+            }
+            parent = parent.parent
+        }
+    }
+
+    /**
+     * 重算同一原生状态内的歌词内容宽度。
+     *
+     * 完整走 `updateBigIslandViewWidth()` 原生入口和 `UpdateDynamicIslandWidth`
+     * 事件。Hook 只把该请求产生的精确 `BigIslandChanged` 转场与歌词宽度关联，
+     * 让它不触发通用 Lottie 暂停/归零/恢复；宽度状态、布局与转场本身不变。
+     * 预测量不在关联作用域内，Hook 不可用时安全退化为完整原生行为。
+     */
+    fun triggerLyricContentRelayout(islandView: ViewGroup) {
+        triggerRelayout(islandView, protectLyricLottie = true)
+    }
+
+    /**
      * 触发超级岛系统的布局刷新
      *
      * 使用 ThreadLocal 防止重入：triggerSystemRelayout 调用的系统方法可能被
      * Hook 拦截后再次触发 triggerSystemRelayout，导致无限递归。
+     *
+     * `updateBigIslandViewWidth` 会先计算宽度，再用 `UpdateDynamicIslandWidth`
+     * 驱动 `BigIslandChanged` 提交布局/状态。真机已确认两段都承重：不得绕过、
+     * 吞掉或手工替代事件路径，否则会破坏可见伸缩或状态时序。
      */
     fun triggerSystemRelayout(islandView: ViewGroup) {
+        triggerRelayout(islandView, protectLyricLottie = false)
+    }
+
+    private fun triggerRelayout(
+        islandView: ViewGroup,
+        protectLyricLottie: Boolean,
+    ) {
         if (isRelayouting.get() == true) return
+        if (BuildConfig.DEBUG) {
+            IslandBackgroundTraceDiagnostics.event(
+                if (protectLyricLottie) "模块歌词宽度刷新" else "模块主动布局刷新",
+                islandView,
+            )
+        }
         HookLogger.d("IslandViewHelper","正在触发布局刷新")
         isRelayouting.set(true)
         try {
             runCatching {
+                forceLayoutIslandAreasIfDynamicWidth(islandView)
                 val viewClass = islandView.javaClass
-                // 优先尝试 updateBigIslandViewWidth
-                val updateWidthMethod = viewClass.methods.find { it.name == "updateBigIslandViewWidth" }
-                if (updateWidthMethod != null) {
-                    updateWidthMethod.invoke(islandView)
+                val resolved = IslandRelayoutMethodResolver.resolve(viewClass) ?: run {
+                    if (loggedMissingRelayoutClasses.add(viewClass)) {
+                        HookLogger.w(
+                            "IslandViewHelper",
+                            "跳过超级岛布局刷新: " +
+                                "reason=no_compatible_zero_arg_entry, class=${viewClass.name}",
+                        )
+                    }
+                    return@runCatching
+                }
+                if (BuildConfig.DEBUG && loggedRelayoutClasses.add(viewClass)) {
+                    HookLogger.i(
+                        "IslandViewHelper",
+                        "超级岛布局刷新入口: ${resolved.diagnosticSummary}",
+                    )
+                }
+                if (resolved.entry == IslandRelayoutEntry.UPDATE_BIG_ISLAND_VIEW_WIDTH) {
+                    if (protectLyricLottie) {
+                        IslandWidthEventRebindGuard.aroundLyricWidthRelayout(islandView) {
+                            resolved.method.invoke(islandView)
+                        }
+                    } else {
+                        resolved.method.invoke(islandView)
+                    }
                 } else {
-                    // 兜底尝试 calculateBigIslandWidth
-                    viewClass.methods.find { it.name == "calculateBigIslandWidth" }?.invoke(islandView)
+                    resolved.method.invoke(islandView)
                 }
             }.onFailure { e ->
                 HookLogger.e("IslandViewHelper", "超级岛布局刷新失败", e)

@@ -4,12 +4,16 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.common.FeatureEntryConfig
+import com.juren233.hyperlyricsenhanced.common.FeatureEntryInitializer
 import com.juren233.hyperlyricsenhanced.common.LogLevelPolicy
 import com.juren233.hyperlyricsenhanced.common.PreferenceDiagnostics
 import com.juren233.hyperlyricsenhanced.common.PrefsBridge
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.common.StorageKeyMigrator
 import com.juren233.hyperlyricsenhanced.common.UIConstants
 import com.juren233.hyperlyricsenhanced.provider.OfficialProviderScopeManager
+import com.juren233.hyperlyricsenhanced.root.utils.RuntimePerfDiagnostics
 import com.juren233.hyperlyricsenhanced.ui.utils.AppUtils
 import com.juren233.hyperlyricsenhanced.ui.utils.LocaleUtils
 import com.juren233.hyperlyricsenhanced.utils.LogManager
@@ -24,8 +28,16 @@ class RootApplication : Application() {
         AppUtils.initPredictiveBackGesture(this)
         applyBuildDefaultLogLevel()
         LogManager.init(this)
+        // debug 包专用：性能/功耗采样（含设置页窗口帧耗时），release 为空操作。
+        RuntimePerfDiagnostics.start(
+            app = this,
+            scope = "module",
+            attachActivityFrameMetrics = true,
+        )
         PrefsBridge.init(this)
+        StorageKeyMigrator.migrateLegacySuperIslandKeys(this)
         appContext = this
+        initializeFeatureEntries()
 
         XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
             override fun onServiceBind(service: XposedService) {
@@ -55,6 +67,30 @@ class RootApplication : Application() {
             )
             .putString(UIConstants.KEY_LOG_LEVEL_BUILD_KIND, currentBuildKind)
             .commit()
+    }
+
+    /**
+     * 功能开关的一次性初始化。
+     *
+     * 仅在首次安装、或首次升级到带功能入口的版本时生效；已经存在的入口值（含用户手动开启的）
+     * 不会被改写，因此后续版本更新不会再自动关闭这些入口。
+     *
+     * Apple Music 入口是例外：安装或卸载 Apple Music 时重新触发一次自动开关
+     * （见 [FeatureEntryInitializer.syncAppleMusicEntryWithInstallState]），状态没变化时保持用户设置。
+     * 写入后同步到宿主进程，使系统界面等进程立即读到新的入口与功能开关状态。
+     */
+    private fun initializeFeatureEntries() {
+        val prefs = getSharedPreferences(UIConstants.PREF_NAME, Context.MODE_PRIVATE)
+        val appleMusicInstalled = FeatureEntryConfig.isAppleMusicInstalled(this)
+        val writes = FeatureEntryInitializer.applyOnce(
+            prefs = prefs,
+            xiaomiDevice = FeatureEntryConfig.isXiaomiOrRedmiDevice(),
+            appleMusicInstalled = appleMusicInstalled,
+        ) + FeatureEntryInitializer.syncAppleMusicEntryWithInstallState(
+            prefs = prefs,
+            appleMusicInstalled = appleMusicInstalled,
+        )
+        writes.forEach { (key, value) -> PrefsBridge.putBoolean(key, value) }
     }
 
     companion object {
@@ -132,6 +168,12 @@ class RootApplication : Application() {
                 is String -> intent
                     .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "string")
                     .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_STRING, value)
+                is Set<*> -> intent
+                    .putExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_TYPE, "string_set")
+                    .putStringArrayListExtra(
+                        RootConstants.EXTRA_REMOTE_PREFERENCE_STRING_SET,
+                        ArrayList(value.filterIsInstance<String>()),
+                    )
                 else -> return
             }
             runCatching { appContext?.sendBroadcast(intent) }

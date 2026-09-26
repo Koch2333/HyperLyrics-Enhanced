@@ -12,6 +12,7 @@ import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 internal interface AppleArtistSurfaceHost {
     fun mediaApiEntityAttributes(entity: Any): Any?
@@ -41,11 +42,11 @@ internal interface AppleArtistSurfaceHost {
 
     fun enrichLibraryEntitiesForResolution(mediaIds: Collection<String>)
 
-    fun effectiveAlias(mediaId: String): AppleInternalCatalogResolver.Alias?
+    fun effectiveAlias(mediaId: String): Alias?
 
     fun applyAliasToMetadataRefs(
         mediaId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         notifyModelChange: Boolean,
     )
 
@@ -53,7 +54,7 @@ internal interface AppleArtistSurfaceHost {
 
     fun scheduleMetadataResolution(
         mediaIds: Collection<String>,
-        priority: AppleInternalCatalogResolver.RequestPriority,
+        priority: RequestPriority,
         originalResolutionMode: InAppOriginalResolutionMode,
     )
 
@@ -305,7 +306,7 @@ internal class AppleArtistSurfaceHooks(
                         if (host.shouldRequestOverride(mediaId)) {
                             host.scheduleMetadataResolution(
                                 mediaIds = listOf(mediaId),
-                                priority = AppleInternalCatalogResolver.RequestPriority.VISIBLE,
+                                priority = RequestPriority.VISIBLE,
                                 originalResolutionMode = InAppOriginalResolutionMode.ORIGINAL_FIRST,
                             )
                         }
@@ -475,7 +476,7 @@ internal class AppleArtistSurfaceHooks(
         mediaId: String,
         appliedAlias: AppliedMetadataAlias,
         pendingAlias: AppliedMetadataAlias?,
-        effectiveAlias: AppleInternalCatalogResolver.Alias,
+        effectiveAlias: Alias,
         expectedTitle: String?,
         renderedTexts: Collection<String>,
     ): Boolean {
@@ -594,8 +595,8 @@ internal class AppleArtistSurfaceHooks(
         val latestMediaId = latestProfileMediaId ?: return null
         val modelTitle = reflectiveField(model, headerTitleField)?.toString().orEmpty()
         val accountTitle = metadataStore.accountMetadata(latestMediaId)?.title.orEmpty()
-        val modelKey = AppleInternalCatalogResolver.normalizedArtistNameKey(modelTitle)
-        val accountKey = AppleInternalCatalogResolver.normalizedArtistNameKey(accountTitle)
+        val modelKey = normalizedArtistNameKey(modelTitle)
+        val accountKey = normalizedArtistNameKey(accountTitle)
         return latestMediaId.takeIf { modelKey.isNotEmpty() && modelKey == accountKey }
     }
 
@@ -636,7 +637,7 @@ internal class AppleArtistSurfaceHooks(
             if (shouldRequest) {
                 host.scheduleMetadataResolution(
                     mediaIds = listOf(mediaId),
-                    priority = AppleInternalCatalogResolver.RequestPriority.VISIBLE,
+                    priority = RequestPriority.VISIBLE,
                     originalResolutionMode = InAppOriginalResolutionMode.ORIGINAL_FIRST,
                 )
             }
@@ -713,12 +714,12 @@ internal fun artistProfileFallbackArtistId(
         ?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
         ?: return null
     val credit = songArtistCredit?.trim()?.takeIf(String::isNotEmpty) ?: return null
-    if (AppleInternalCatalogResolver.isCollaborationArtistName(credit)) return null
-    val creditKey = AppleInternalCatalogResolver.normalizedArtistNameKey(credit)
+    if (isCollaborationArtistName(credit)) return null
+    val creditKey = normalizedArtistNameKey(credit)
         .takeIf(String::isNotEmpty)
         ?: return null
     val knownCreditKeys = profileArtistCredits.asSequence()
-        .map(AppleInternalCatalogResolver::normalizedArtistNameKey)
+        .map(::normalizedArtistNameKey)
         .filter(String::isNotEmpty)
         .toSet()
     return artistId.takeIf { creditKey in knownCreditKeys }
@@ -753,11 +754,117 @@ internal fun artistProfileSubtitleWithArtist(
         if (separatorIndex <= 0) return@forEach
         val credit = subtitle.substring(0, separatorIndex)
         if (
-            AppleInternalCatalogResolver.normalizedArtistNameKey(credit) ==
-            AppleInternalCatalogResolver.normalizedArtistNameKey(original)
+            normalizedArtistNameKey(credit) ==
+            normalizedArtistNameKey(original)
         ) {
             return replacement + subtitle.substring(separatorIndex)
         }
     }
     return subtitle
+}
+
+/**
+ * Artist Surface Hook 的默认宿主实现：orchestrator 依赖以 supplier 显式注入，保持原匿名
+ * 实现"调用期解析"的语义；traceSequence 为根单例构造期值可直捕。
+ */
+internal class DefaultAppleArtistSurfaceHost(
+    private val mediaApiEntityAttributesFn: (Any) -> Any?,
+    private val mediaApiEntityCatalogIdFn: (Any, Any?) -> String?,
+    private val mediaApiAttributeFn: (Any, AppleMediaApiTextAttribute) -> String?,
+    private val registerLibraryEntityFn: (String, Any, InAppLibraryEntityKind, Any?) -> Unit,
+    private val enrichLibraryEntityFn: (String, Any, InAppLibraryEntityKind, Any) -> Unit,
+    private val markMetadataVisibleFn: (Collection<String>) -> Unit,
+    private val enrichLibraryEntitiesForResolutionFn: (Collection<String>) -> Unit,
+    private val effectiveAliasFn: (String) -> Alias?,
+    private val applyAliasToMetadataRefsFn: (String, Alias, Boolean) -> Unit,
+    private val shouldRequestOverrideFn: (String) -> Boolean,
+    private val scheduleMetadataResolutionFn: (
+        Collection<String>, RequestPriority, InAppOriginalResolutionMode,
+    ) -> Unit,
+    private val activeMetadataPageOwnerFn: () -> Any?,
+    private val knownArtistProfileCreditsFn: (String) -> Set<String>,
+    private val onMetadataPageAttachedFn: (Any, RecyclerView) -> Unit,
+    private val onMetadataPageDetachedFn: (Any) -> Unit,
+    private val logMetadataIdentityFn: (String, String) -> Unit,
+    private val traceSequence: AtomicLong,
+) : AppleArtistSurfaceHost {
+    override fun mediaApiEntityAttributes(entity: Any): Any? =
+        mediaApiEntityAttributesFn(entity)
+
+    override fun mediaApiEntityCatalogId(entity: Any, knownAttributes: Any?): String? =
+        mediaApiEntityCatalogIdFn(entity, knownAttributes)
+
+    override fun mediaApiAttribute(
+        attributes: Any,
+        attribute: AppleMediaApiTextAttribute,
+    ): String? = mediaApiAttributeFn(attributes, attribute)
+
+    override fun registerLibraryEntity(
+        mediaId: String,
+        entity: Any,
+        kind: InAppLibraryEntityKind,
+        knownAttributes: Any?,
+    ) {
+        registerLibraryEntityFn(mediaId, entity, kind, knownAttributes)
+    }
+
+    override fun enrichLibraryEntity(
+        mediaId: String,
+        entity: Any,
+        kind: InAppLibraryEntityKind,
+        attributes: Any,
+    ) {
+        enrichLibraryEntityFn(mediaId, entity, kind, attributes)
+    }
+
+    override fun markMetadataVisible(mediaIds: Collection<String>) {
+        markMetadataVisibleFn(mediaIds)
+    }
+
+    override fun enrichLibraryEntitiesForResolution(mediaIds: Collection<String>) {
+        enrichLibraryEntitiesForResolutionFn(mediaIds)
+    }
+
+    override fun effectiveAlias(mediaId: String): Alias? =
+        effectiveAliasFn(mediaId)
+
+    override fun applyAliasToMetadataRefs(
+        mediaId: String,
+        alias: Alias,
+        notifyModelChange: Boolean,
+    ) {
+        applyAliasToMetadataRefsFn(mediaId, alias, notifyModelChange)
+    }
+
+    override fun shouldRequestOverride(mediaId: String): Boolean =
+        shouldRequestOverrideFn(mediaId)
+
+    override fun scheduleMetadataResolution(
+        mediaIds: Collection<String>,
+        priority: RequestPriority,
+        originalResolutionMode: InAppOriginalResolutionMode,
+    ) {
+        scheduleMetadataResolutionFn(mediaIds, priority, originalResolutionMode)
+    }
+
+    override fun activeMetadataPageOwner(): Any? =
+        activeMetadataPageOwnerFn()
+
+    override fun knownArtistProfileCredits(artistId: String): Set<String> =
+        knownArtistProfileCreditsFn(artistId)
+
+    override fun onMetadataPageAttached(owner: Any, recycler: RecyclerView) {
+        onMetadataPageAttachedFn(owner, recycler)
+    }
+
+    override fun onMetadataPageDetached(owner: Any) {
+        onMetadataPageDetachedFn(owner)
+    }
+
+    override fun nextMetadataTraceSequence(): Long =
+        traceSequence.incrementAndGet()
+
+    override fun logMetadataIdentity(event: String, details: String) {
+        logMetadataIdentityFn(event, details)
+    }
 }

@@ -57,7 +57,9 @@ internal class PlayerBinder(
     @Volatile
     private var lastPlaybackState: PlaybackState? = null
     private val providerInfo = info
-    private var lastPositionDiagnosticAtMs = 0L
+    private val positionDiagnosticSampler = if (BuildConfig.DEBUG) {
+        PlaybackPositionDiagnosticSampler()
+    } else null
     private var lastPositionPublishDiagnosticAtMs = 0L
     private val playbackStateSequence = AtomicLong(0L)
 
@@ -125,6 +127,9 @@ internal class PlayerBinder(
             if (closed.get() || generation != songUpdateGeneration.get()) return@launch
             recorder.song = normalized
             playerEvents.safeNotify { onSongChanged(recorder, normalized) }
+            // Song decoding is asynchronous: lyrics may arrive after the playback anchor.
+            // Refresh the subscriber's position after the song event resets its lyric cursor.
+            publishPlaybackAnchor("song_changed")
         }
     }
 
@@ -199,6 +204,9 @@ internal class PlayerBinder(
             playerEvents.safeNotify { onPlaybackStateChanged(recorder, isPlaying) }
         }
 
+        // Accepting state must also deliver its anchor. The screen-off ticker is deliberately
+        // stopped, and PLAYING -> PLAYING does not emit a boolean playback event.
+        publishPlaybackAnchor("playback_state")
         if (isPlaying) startPositionUpdate() else stopPositionUpdate()
     }
 
@@ -292,34 +300,72 @@ internal class PlayerBinder(
     private fun logPositionDiagnostic(position: Long, state2Enabled: Boolean) {
         if (!BuildConfig.DEBUG) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastPositionDiagnosticAtMs < POSITION_DIAGNOSTIC_INTERVAL_MS) return
-        lastPositionDiagnosticAtMs = now
+        val sequence = playbackStateSequence.get()
+        val sampleReason = positionDiagnosticSampler?.sample(now, sequence, state2Enabled) ?: return
         val state = lastPlaybackState
         HookLogger.i(
             TAG,
             "[LyricPositionDiag] stage=central_position_read, " +
                 "provider=${providerInfo.providerPackageName}, " +
                 "player=${providerInfo.playerPackageName}, process=${providerInfo.processName}, " +
+                "stateSequence=$sequence, sampleReason=$sampleReason, screen=${ScreenStateMonitor.state}, " +
                 "source=${if (state2Enabled) "playback_state" else "shared_memory"}, " +
                 "position=$position, playing=${recorder.isPlaying}, " +
                 "state=${state?.state}, statePosition=${state?.position}, " +
                 "stateUpdatedAt=${state?.lastPositionUpdateTime}, stateSpeed=${state?.playbackSpeed}, " +
+                "anchorAgeMs=${state?.let { now - it.lastPositionUpdateTime }}, " +
                 positionMemory.diagnosticSummary(),
         )
     }
 
     private fun startPositionUpdate() {
-        if (closed.get()) return
-        if (ScreenStateMonitor.state == ScreenStateMonitor.ScreenState.OFF) return
+        if (closed.get()) {
+            logPositionTickerDiagnostic("start_skipped", "closed")
+            return
+        }
+        if (ScreenStateMonitor.state == ScreenStateMonitor.ScreenState.OFF) {
+            logPositionTickerDiagnostic("start_skipped", "screen_off")
+            return
+        }
         positionTicker.start(positionUpdateInterval)
+        logPositionTickerDiagnostic("start_requested", "playing")
     }
 
     private fun stopPositionUpdate() {
         positionTicker.stop()
+        logPositionTickerDiagnostic("stop_requested", "lifecycle_or_playback")
+    }
+
+    private fun logPositionTickerDiagnostic(event: String, reason: String) {
+        if (!BuildConfig.DEBUG) return
+        runCatching {
+            HookLogger.i(
+                TAG,
+                "[LyricPositionDiag] stage=central_position_ticker, event=$event, reason=$reason, " +
+                    "stateSequence=${playbackStateSequence.get()}, player=${providerInfo.playerPackageName}, " +
+                    "process=${providerInfo.processName}, screen=${ScreenStateMonitor.state}, " +
+                    "playing=${recorder.isPlaying}, automatic=${isState2Enabled.get()}, interval=$positionUpdateInterval",
+            )
+        }
     }
 
     private fun isBuffering(): Boolean =
         isState2Enabled.get() && lastPlaybackState?.state == PlaybackState.STATE_BUFFERING
+
+    private fun publishPlaybackAnchor(reason: String) {
+        if (closed.get() || !isState2Enabled.get()) return
+        val position = computeCurrentPosition()
+        publishPosition(position)
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                TAG,
+                "[LyricPositionDiag] stage=central_anchor_publish, reason=$reason, " +
+                    "stateSequence=${playbackStateSequence.get()}, player=${providerInfo.playerPackageName}, " +
+                    "screen=${ScreenStateMonitor.state}, position=$position, " +
+                    "state=${lastPlaybackState?.state}, songId=${recorder.song?.id}",
+            )
+        }
+    }
 
     private fun publishPosition(position: Long) {
         recorder.position = position

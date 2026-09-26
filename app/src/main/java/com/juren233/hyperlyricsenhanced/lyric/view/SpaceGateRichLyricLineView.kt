@@ -12,12 +12,16 @@ import android.animation.AnimatorListenerAdapter
 import android.content.Context
 import android.graphics.Canvas
 import android.view.Gravity
+import android.view.View
 import android.widget.LinearLayout
 import androidx.core.graphics.withScale
 import androidx.core.view.forEach
+import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.lyric.model.RichLyricLine
 import com.juren233.hyperlyricsenhanced.lyric.model.interfaces.IRichLyricLine
 import com.juren233.hyperlyricsenhanced.lyric.view.line.SpaceGateLyricLineView
+import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 
 @SuppressLint("ViewConstructor")
 class SpaceGateRichLyricLineView(
@@ -32,6 +36,130 @@ class SpaceGateRichLyricLineView(
     val secondary = SpaceGateLyricLineView(context).apply { visibleIfChanged = false }
 
     var alwaysShowSecondary = false
+
+    /**
+     * 动态长度模式：主/次行测量宽度收缩为文字实际宽度，见 [SpaceGateLyricLineView.hugContentWidth]。
+     */
+    var hugContentWidth: Boolean
+        get() = main.hugContentWidth
+        set(value) {
+            main.hugContentWidth = value
+            secondary.hugContentWidth = value
+        }
+
+    /**
+     * 换行内容因换句/预览提升动画被延迟落地后的回调（主线程）。
+     * 动态长度模式下岛宽在内容应用返回时立即测量，延迟落地时需借此触发第二次
+     * 岛宽重算，否则岛宽恒定落后一行；回调为 null 时无任何额外行为。
+     */
+    var onDeferredContentApplied: (() -> Unit)? = null
+
+    /**
+     * 动态长度：预览提升动画期间（内容延迟落地前）让视图按目标行落定后的
+     * 内容宽度参与岛宽测量，使岛宽与提升动画同步过渡。
+     * 预判与落地实测走同一条绘制管线；内容落地时清除，实测值兜底。
+     */
+    private var pendingHugWidth: Int? = null
+
+    internal fun beginDeferredContentWidth(targetLine: IRichLyricLine?) {
+        pendingHugWidth = targetLine?.let(::predictAppliedContentWidth)
+    }
+
+    /**
+     * 换句切换过渡（淡出开始 → 新内容落地前）的组宽冻结。
+     * 动态长度下，淡出期间任何宽度变化都会把“视图宽度 − 文字宽度”的
+     * 对唱位置提前应用到仍在上屏的旧句（旧句先移到另一侧再换字）。
+     * 冻结让旧句位置保持到内容落地；line 写入即清除，下一行的位置
+     * 随其内容一起生效。
+     */
+    private var contentSwitchFreezeWidth: Int? = null
+
+    internal fun beginContentSwitchFreeze() {
+        if (!main.hugContentWidth) return
+        val current = width.takeIf { it > 0 } ?: measuredWidth
+        if (current <= 0) return
+        contentSwitchFreezeWidth = current
+        // 布局冻结之外同步暂停行的滚动/逐字步进，旧句在淡出期间像素级静止。
+        main.pauseForContentSwitch()
+        secondary.pauseForContentSwitch()
+        if (BuildConfig.DEBUG) {
+            HookLogger.d(
+                "SwitchTrace",
+                "freeze begin view=${System.identityHashCode(this).toString(16)} width=$current"
+            )
+        }
+    }
+
+    private fun predictAppliedContentWidth(targetLine: IRichLyricLine): Int {
+        val mainResult = assembler.buildMain(targetLine)
+        val secResult = assembler.buildSecondary(targetLine)
+        val mainWidth = main.measureIncomingHugWidth(mainResult.line)
+        val secondaryWidth = if (secResult.alwaysShow) {
+            secondary.measureIncomingHugWidth(secResult.line)
+        } else {
+            0
+        }
+        return resolveMeasureFloor(maxOf(mainWidth, secondaryWidth))
+    }
+
+    /**
+     * 对唱固定长度：当前歌曲（含对唱行）的全曲最长行 hug 宽度，由主行绘制
+     * 管线实测。二段测量把主/次行都抬到该下限，恢复“视图宽度 − 文字宽度”
+     * 的原有对唱位置；null 表示未启用或当前歌曲无对唱行，不抬宽。
+     */
+    private var duetFixedLengthWidth: Int? = null
+    private var duetWidthCap: Int? = null
+    private var duetWidthCacheKey: DuetWidthCacheKey? = null
+    private var duetWidthCacheValue: Int = 0
+
+    /**
+     * 动态长度 + 对唱固定长度开关都开启时，由内容装配层传入当前歌曲歌词与
+     * 所在 wrapper 的内容宽度上限；未启用开关、关闭动态长度或歌曲不含对唱行
+     * 时传 null 歌词。上限截断防止瞬态探测测量把超上限宽度抬进岛宽计算。
+     */
+    fun applyDuetFixedLength(lyrics: List<RichLyricLine>?, maxWidthPx: Int?) {
+        duetWidthCap = maxWidthPx
+        val next = when {
+            lyrics == null || lyrics.none { it.isAlignedRight } -> null
+            else -> measureSongMaxHugWidth(lyrics)
+        }
+        if (next != duetFixedLengthWidth) {
+            duetFixedLengthWidth = next
+            requestLayout()
+        }
+    }
+
+    /**
+     * 二段测量下限：组内最宽行 / 对唱全曲最长行，再按内容宽度上限截断。
+     * 下限让短行保留“视图宽度 − 文字宽度”的方向偏移空间；上限保证瞬态
+     * 展开几何测量不会报告超过真实内容上限的宽度。
+     */
+    private fun resolveMeasureFloor(groupWidth: Int): Int {
+        val floor = maxOf(groupWidth, duetFixedLengthWidth ?: 0)
+        // 注意：不能写成 duetWidthCap?.let(::minOf)——可变参数重载 minOf(Int, vararg Int)
+        // 会让单参引用适配成"只取 cap"，floor 完全不参与，floor 恒等于 cap。
+        val cap = duetWidthCap ?: return floor
+        return minOf(floor, cap)
+    }
+
+    private fun measureSongMaxHugWidth(lyrics: List<RichLyricLine>): Int {
+        val key = DuetWidthCacheKey(
+            lyricsIdentity = System.identityHashCode(lyrics),
+            lineCount = lyrics.size,
+            firstText = lyrics.firstOrNull()?.text,
+            textSize = main.textSize,
+            fontSignature = main.currentFontSignature()
+        )
+        if (key == duetWidthCacheKey) return duetWidthCacheValue
+        var max = 0
+        for (line in lyrics) {
+            val width = main.measureIncomingHugWidth(assembler.buildMain(line).line)
+            if (width > max) max = width
+        }
+        duetWidthCacheKey = key
+        duetWidthCacheValue = max
+        return max
+    }
 
     var renderScale = 1.0f
         private set
@@ -52,12 +180,25 @@ class SpaceGateRichLyricLineView(
     private var lastPosition: Long = Long.MIN_VALUE
 
     var rawLine: IRichLyricLine? = null
+
+    /**
+     * 当前已绑定行的对唱方向（null=无内容）。注入层在内容落地时读取它决定
+     * wrapper/原生模块的 END 锚点；读已绑定行而非目标行，保证淡出窗口内
+     * 旧句方向不被提前改写（160164 契约）。
+     */
+    val currentLineDuetAlignedRight: Boolean?
+        get() = rawLine?.isAlignedRight
     private var currentMainText: String? = null
     private var secondaryIsNextLinePreview = false
     private var nextLineTransitionRunning = false
     private var nextLineTransitionGeneration = 0
     private var centerMainLine: Boolean? = null
     private var centerSecondaryLine: Boolean? = null
+    // 预览提升窗口的对齐暂存：提升动画期间旧句仍在上屏，视图级居中/靠右
+    // 标志必须等提升落地（finishNextLinePromotion）再套用，否则旧句会先按
+    // 下一句的方向重渲染（合唱居中句先变靠左再换字）。
+    private var stagedPromotionCentering: Pair<Boolean, Boolean>? = null
+    private var stagedPromotionRightAlign: Pair<Boolean, Boolean>? = null
 
     internal fun willAnimateNextLinePromotion(
         targetLine: IRichLyricLine?,
@@ -80,6 +221,21 @@ class SpaceGateRichLyricLineView(
         get() = rawLine
         set(value) {
             rawLine = value
+            val clearedFreeze = contentSwitchFreezeWidth
+            contentSwitchFreezeWidth = null
+            if (clearedFreeze != null) {
+                main.resumeFromContentSwitch()
+                secondary.resumeFromContentSwitch()
+            }
+            if (BuildConfig.DEBUG && value != null && main.hugContentWidth) {
+                val mainLine = assembler.buildMain(value).line
+                HookLogger.d(
+                    "SwitchTrace",
+                    "apply view=${System.identityHashCode(this).toString(16)} " +
+                        "next=\"${mainLine.text?.take(12)}\" nextRight=${mainLine.isAlignedRight} " +
+                        "freezeCleared=$clearedFreeze"
+                )
+            }
             lastPosition = Long.MIN_VALUE
             requestMarquee = false
             if (animationTransition) {
@@ -111,10 +267,15 @@ class SpaceGateRichLyricLineView(
         animationTransition = false
         pendingLine = null
         pendingPosition = null
+        pendingHugWidth = null
+        contentSwitchFreezeWidth = null
+        main.resumeFromContentSwitch()
+        secondary.resumeFromContentSwitch()
         lastPosition = Long.MIN_VALUE
         currentMainText = null
         secondaryIsNextLinePreview = false
         alwaysShowSecondary = false
+        duetFixedLengthWidth = null
         refreshLines()
     }
 
@@ -126,8 +287,10 @@ class SpaceGateRichLyricLineView(
     fun endAnimationTransition() {
         animationTransition = false
         if (pendingLine != null) {
+            pendingHugWidth = null
             refreshLines()
             pendingPosition?.let { setPosition(it) }
+            onDeferredContentApplied?.invoke()
         }
         pendingLine = null
         pendingPosition = null
@@ -177,7 +340,9 @@ class SpaceGateRichLyricLineView(
         }
         if (nextLineTransitionRunning) {
             cancelNextLinePromotion()
+            pendingHugWidth = null
             refreshLines(allowNextLinePromotion = false, bypassIdentityCheck = true)
+            onDeferredContentApplied?.invoke()
         }
         lastPosition = position
         main.seekTo(position)
@@ -271,6 +436,43 @@ class SpaceGateRichLyricLineView(
         centerSecondaryLine?.let { secondary.centerIfPossible = it }
     }
 
+    internal fun stagePromotionLandingAlignment(
+        centerMain: Boolean,
+        centerSecondary: Boolean,
+        alignMainRight: Boolean,
+        alignSecondaryRight: Boolean
+    ) {
+        stagedPromotionCentering = centerMain to centerSecondary
+        stagedPromotionRightAlign = alignMainRight to alignSecondaryRight
+        if (BuildConfig.DEBUG) {
+            HookLogger.d(
+                "SwitchTrace",
+                "stage promotion alignment view=${System.identityHashCode(this).toString(16)} " +
+                    "centerMain=$centerMain alignMainRight=$alignMainRight"
+            )
+        }
+    }
+
+    internal val isNextLinePromotionRunning: Boolean
+        get() = nextLineTransitionRunning
+
+    /** 提升未实际起跑时立即消费暂存对齐；运行中则交给落地回调。 */
+    internal fun settlePromotionLandingAlignment() {
+        if (nextLineTransitionRunning) return
+        applyStagedPromotionAlignment()
+    }
+
+    private fun applyStagedPromotionAlignment() {
+        stagedPromotionCentering?.let { (mainCenter, secondaryCenter) ->
+            setLineCentering(mainCenter, secondaryCenter)
+        }
+        stagedPromotionRightAlign?.let { (mainRight, secondaryRight) ->
+            setLineAlignmentRight(mainRight, secondaryRight)
+        }
+        stagedPromotionCentering = null
+        stagedPromotionRightAlign = null
+    }
+
     override fun updateColor(primary: IntArray, background: IntArray, highlight: IntArray) {
         forEach { if (it is UpdatableColor) it.updateColor(primary, background, highlight) }
     }
@@ -284,15 +486,78 @@ class SpaceGateRichLyricLineView(
     }
 
     override fun onMeasure(wSpec: Int, hSpec: Int) {
+        val pending = pendingHugWidth
+        if (pending != null) {
+            // 预览提升动画期间：按预判的落定内容宽度参与岛宽测量，
+            // 受当前可用宽度约束，与 hug 实测的 spec 收敛行为一致
+            val target = pending.coerceAtMost(MeasureSpec.getSize(wSpec))
+            super.onMeasure(MeasureSpec.makeMeasureSpec(target, MeasureSpec.EXACTLY), hSpec)
+            return
+        }
+        contentSwitchFreezeWidth?.let { frozen ->
+            // 切换过渡窗口：锁定当前组宽，旧句的对唱位置不随测量变化；
+            // 新内容落地时（line 写入）清除冻结，宽度恢复随内容实测。
+            if (BuildConfig.DEBUG) {
+                HookLogger.d(
+                    "SwitchTrace",
+                    "frozen measure view=${System.identityHashCode(this).toString(16)} " +
+                        "frozen=$frozen spec=${MeasureSpec.getSize(wSpec)}"
+                )
+            }
+            super.onMeasure(MeasureSpec.makeMeasureSpec(frozen, MeasureSpec.EXACTLY), hSpec)
+            return
+        }
         if (renderScale != 1.0f && renderScale > 0) {
             val origW = MeasureSpec.getSize(wSpec)
             val mode = MeasureSpec.getMode(wSpec)
             val compW = (origW / renderScale).toInt()
             super.onMeasure(MeasureSpec.makeMeasureSpec(compW, mode), hSpec)
             setMeasuredDimension(origW, measuredHeight)
+        } else if (main.hugContentWidth) {
+            // 一段前先清掉上一轮下限：组宽必须由当前内容固有宽度决定，
+            // 否则宽行留下的下限会棘轮式抬高后续窄行。
+            prepareHugMeasurePass(null)
+            // 一段：各行按自身文字 hug，得到组内最宽行。
+            super.onMeasure(wSpec, hSpec)
+            // 二段：以"组内最宽行 / 对唱全曲最长行"为下限重测主/次行，
+            // 短于下限的行保留“视图宽度 − 文字宽度”的方向偏移空间
+            //（对唱换边、第二行翻译/伴唱/下一句预览定位）。
+            val floor = resolveMeasureFloor(measuredWidth)
+            if (floor > 0) {
+                prepareHugMeasurePass(floor)
+                super.onMeasure(wSpec, hSpec)
+            }
         } else {
             super.onMeasure(wSpec, hSpec)
         }
+    }
+
+    /** Keep the second hug pass from reusing the first pass's cached child measurements. */
+    private fun prepareHugMeasurePass(floor: Int?) {
+        main.hugWidthFloor = floor
+        secondary.hugWidthFloor = floor
+        main.forceLayout()
+        secondary.forceLayout()
+    }
+
+    private var lastLayoutWidth = -1
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        // 切换时序诊断：任何真实几何变化（自身宽/在父层中的位置/父层与祖父层
+        // 的位置宽度）都记录，用于区分"自身测量宽变化"与"父层/胶囊搬动"。
+        if (!BuildConfig.DEBUG || !changed || !main.hugContentWidth) return
+        val width = right - left
+        val parentView = parent as? View
+        val grandView = parentView?.parent as? View
+        HookLogger.d(
+            "SwitchTrace",
+            "layout view=${System.identityHashCode(this).toString(16)} x=$left w=$width" +
+                "(old=$lastLayoutWidth) " +
+                "parent=${parentView?.javaClass?.simpleName}(x=${parentView?.left},w=${parentView?.width}) " +
+                "grand=${grandView?.javaClass?.simpleName}(x=${grandView?.left},w=${grandView?.width})"
+        )
+        lastLayoutWidth = width
     }
 
     override fun dispatchDraw(canvas: Canvas) {
@@ -411,7 +676,11 @@ class SpaceGateRichLyricLineView(
     private fun finishNextLinePromotion() {
         clearNextLineTransitionState()
         nextLineTransitionRunning = false
+        pendingHugWidth = null
         refreshLines(allowNextLinePromotion = false, bypassIdentityCheck = true)
+        // 新内容已渲染，此刻套用暂存对齐——与内容同帧生效，旧句淡出期间不受影响。
+        applyStagedPromotionAlignment()
+        onDeferredContentApplied?.invoke()
         if (alwaysShowSecondary) {
             secondary.alpha = 0f
             secondary.animate()
@@ -430,6 +699,8 @@ class SpaceGateRichLyricLineView(
         main.animate().cancel()
         secondary.animate().cancel()
         nextLineTransitionRunning = false
+        stagedPromotionCentering = null
+        stagedPromotionRightAlign = null
         clearNextLineTransitionState()
     }
 

@@ -46,28 +46,35 @@ internal class AppleNativeOnlineTranslationStore {
     @Volatile
     private var contentRevision = 0L
 
-    @Synchronized
-    fun update(song: Song): Boolean {
-        val updatedOverlay = buildOverlay(song) ?: return false
-        if (overlay == updatedOverlay) return false
+    /** Cache acceptance is not source selection or successful View binding. */
+    data class Receipt(
+        val updated: Boolean,
+        val displayContentChanged: Boolean,
+        val update: AppleLyricsPresentationUpdate,
+    )
 
-        overlay = updatedOverlay
-        contentRevision += 1
-        return true
-    }
+    fun update(song: Song): Boolean = receive(song).updated
 
     /**
-     * 只比较会显示在歌词页上的逐行内容，忽略来源字段。
-     *
-     * 同曲 RACE_FIRST/RACE_FINAL 载荷经常只有 ONLINE_TRANSLATION_SOURCE 变化；
-     * 此时 [update] 仍会推进 revision 以刷新来源菜单，但页面逐行内容没有变化，
-     * 不应再触发整页重呈现。
+     * Comparison, mutation and revision capture share the store monitor.
+     * Source-only changes advance revision for source menus, while unchanged line content
+     * does not request a full-page presentation (including RACE_FIRST/RACE_FINAL receipts).
      */
     @Synchronized
-    fun wouldChangeDisplayContent(song: Song): Boolean {
-        val updatedOverlay = buildOverlay(song) ?: return false
-        val currentOverlay = overlay ?: return true
-        return currentOverlay.exactContent != updatedOverlay.exactContent
+    fun receive(song: Song): Receipt {
+        val next = buildOverlay(song)
+        val displayChanged = next != null &&
+            (overlay == null || overlay?.exactContent != next.exactContent)
+        val updated = next != null && overlay != next
+        if (updated) {
+            overlay = next
+            contentRevision += 1
+        }
+        return Receipt(
+            updated = updated,
+            displayContentChanged = displayChanged,
+            update = AppleLyricsPresentationUpdate(song.id, contentRevision),
+        )
     }
 
     private fun buildOverlay(song: Song): Overlay? {

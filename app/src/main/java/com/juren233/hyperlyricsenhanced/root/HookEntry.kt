@@ -5,12 +5,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import com.juren233.hyperlyricsenhanced.lyric.source.SourceManager
 import com.juren233.hyperlyricsenhanced.root.island.FakeIslandTransitionHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandAlbumCoverStyleHooker
+import com.juren233.hyperlyricsenhanced.root.island.IslandViewRegistry
 import com.juren233.hyperlyricsenhanced.root.island.IslandMusicWaveColorHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandProgressGlowController
 import com.juren233.hyperlyricsenhanced.root.island.IslandRuntimePreferenceOverrides
@@ -23,17 +25,24 @@ import com.juren233.hyperlyricsenhanced.root.mediacard.notification.AodEnvironme
 import com.juren233.hyperlyricsenhanced.root.mediacard.notification.NotificationMediaAodLyricHooker
 import com.juren233.hyperlyricsenhanced.root.mediacard.notification.NotificationMediaCoverStyleHooker
 import com.juren233.hyperlyricsenhanced.root.mediacard.island.IslandExpandedMediaAmbientFlowHooker
+import com.juren233.hyperlyricsenhanced.root.mediacard.island.refreshBackgroundStyle
+import com.juren233.hyperlyricsenhanced.root.mediacard.island.refreshCardTheme
+import com.juren233.hyperlyricsenhanced.root.mediacard.island.refreshMediaElements
 import com.juren233.hyperlyricsenhanced.root.mediacard.notification.background.MediaBackgroundRendererPool
 import com.juren233.hyperlyricsenhanced.root.island.renderer.BaseIslandRenderer
 import com.juren233.hyperlyricsenhanced.root.lyricon.central.EmbeddedLyriconCentralController
 import com.juren233.hyperlyricsenhanced.root.lyricon.provider.LyriconProviderControlFrameBridge
 import com.juren233.hyperlyricsenhanced.root.salt.SaltPlayerNextTrackHooker
+import com.juren233.hyperlyricsenhanced.root.settings.SettingsEntryHooker
 import com.juren233.hyperlyricsenhanced.root.source.LyriconSource
+import com.juren233.hyperlyricsenhanced.root.source.onActiveMediaSessionSnapshotChanged
+import com.juren233.hyperlyricsenhanced.root.source.onPreferenceChanged
 import com.juren233.hyperlyricsenhanced.root.source.LyricInfoSource
 import com.juren233.hyperlyricsenhanced.root.source.RootLyricSink
 import com.juren233.hyperlyricsenhanced.root.source.SuperLyricSource
 import com.juren233.hyperlyricsenhanced.root.aitrans.AITranslator
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
+import com.juren233.hyperlyricsenhanced.root.utils.RuntimePerfDiagnostics
 import com.juren233.hyperlyricsenhanced.common.PreferenceDiagnostics
 import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.UIConstants
@@ -74,7 +83,7 @@ class HookEntry : XposedModule() {
         var instance: HookEntry? = null
             private set
 
-        private val SUPER_ISLAND_RUNTIME_REFRESH_KEYS = setOf(
+        private val HYPER_ISLAND_RUNTIME_REFRESH_KEYS = setOf(
             RootConstants.KEY_HOOK_ISLAND_CONTENT_LEFT,
             RootConstants.KEY_HOOK_ISLAND_CONTENT_RIGHT,
             RootConstants.KEY_HOOK_ISLAND_LEFT_PADDING_LEFT,
@@ -140,7 +149,7 @@ class HookEntry : XposedModule() {
             RootConstants.KEY_HOOK_WORD_MOTION_CJK_WAVE,
             RootConstants.KEY_HOOK_WORD_MOTION_LATIN_LIFT,
             RootConstants.KEY_HOOK_WORD_MOTION_LATIN_WAVE,
-            RootConstants.KEY_HOOK_ENABLE_SUPER_ISLAND
+            RootConstants.KEY_HOOK_ENABLE_HYPER_ISLAND
         )
     }
 
@@ -167,6 +176,12 @@ class HookEntry : XposedModule() {
             app.createPackageContext(info.packageName, 0)
         }.getOrNull()
     }
+
+    internal fun moduleApkSourceDir(): String? =
+        runCatching { moduleApplicationInfo.sourceDir }.getOrNull()
+
+    /** 宿主（如 SystemUI）进程的 Application 上下文，供需要宿主身份的媒体/视图查询使用。 */
+    internal fun runtimeAppContext(): Context? = runtimeApp
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         super.onModuleLoaded(param)
@@ -245,7 +260,10 @@ class HookEntry : XposedModule() {
         // 普通目标仍只在主进程注入；官方 Provider 可精确声明必要的播放子进程。
         if (!OfficialProviderCatalog.shouldLoadIntoProcess(packageName, processName)) return
 
-        if (packageName != "com.android.systemui" && packageName != "miui.systemui.plugin") {
+        // 设置进程只需要首页入口注入，不装 Lyricon 控制帧重连通道。
+        if (packageName != "com.android.systemui" && packageName != "miui.systemui.plugin" &&
+            packageName != "com.android.settings"
+        ) {
             runCatching {
                 LyriconProviderControlFrameBridge.install(
                     module = this,
@@ -282,6 +300,8 @@ class HookEntry : XposedModule() {
                      HookLogger.e("HookEntry", "焦点通知白名单注入失败", e)
                  }
             }
+
+            com.juren233.hyperlyricsenhanced.root.island.IslandStatusBarSpaceMonitor.install(this, param.defaultClassLoader)
 
             val isSuperIslandEnabled = SystemUiEnhancementGate.isEnabled()
             
@@ -329,6 +349,10 @@ class HookEntry : XposedModule() {
                 param.defaultClassLoader,
                 lyricsOnly = lyricsOnlyAfterHotReload
             )
+            // NotificationSettingsManager 在插件 dex 中，主类加载器加载不到，
+            // 白名单 Hook 必须借插件类加载器安装。
+            UnlockIslandWhitelist.doHookInClassLoader(param.defaultClassLoader)
+            UnlockFocusWhitelist.doHookInClassLoader(param.defaultClassLoader)
         } else if (packageName == "com.apple.android.music") {
             runCatching {
                 AppleMusicProvider.install(this, param.defaultClassLoader)
@@ -348,6 +372,8 @@ class HookEntry : XposedModule() {
                 packageName = packageName,
                 processName = processName,
             )
+        } else if (packageName == "com.android.settings") {
+            SettingsEntryHooker.install(this, param.defaultClassLoader)
         } else {
             OfficialProviderRuntime.installIfAvailable(
                 module = this,
@@ -356,6 +382,19 @@ class HookEntry : XposedModule() {
                 processName = processName,
             )
         }
+    }
+
+    private fun configureEarlyNextLinePreview() {
+        LyriconDataBridge.configureEarlyNextLinePreview(
+            prefs.getInt(
+                RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW,
+                RootConstants.DEFAULT_HOOK_EARLY_NEXT_LINE_PREVIEW,
+            ),
+            prefs.getInt(
+                RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS,
+                RootConstants.DEFAULT_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS,
+            ),
+        )
     }
 
     private fun initializeSystemEnvironment(app: Application) {
@@ -369,6 +408,7 @@ class HookEntry : XposedModule() {
                 HookLogger.i("PrefsDiagnostics", message)
             }
 
+            configureEarlyNextLinePreview()
             val renderer = BaseIslandRenderer
             val sink = RootLyricSink(renderer, prefs)
 
@@ -411,6 +451,18 @@ class HookEntry : XposedModule() {
                 sourceManager?.start()
             }
             SystemUiScreenStateMonitor.initialize(app)
+            // debug 包专用：性能/功耗采样（CPU、线程、电池、岛帧耗时），release 为空操作。
+            RuntimePerfDiagnostics.start(
+                app = app,
+                scope = "systemui",
+                stateProvider = {
+                    "mode=$activeMode," +
+                        "playing=${LyriconDataBridge.currentPlaybackState}," +
+                        "pkg=${LyriconDataBridge.currentLyricPackageName ?: LyriconDataBridge.activePackageName}," +
+                        "islandViews=${IslandViewRegistry.snapshotAttached().size}"
+                },
+                frameViewProvider = { IslandViewRegistry.snapshotAttached().map { it.first } },
+            )
             AodEnvironmentDiagnostics.log(
                 context = app,
                 stage = "systemui_init",
@@ -464,6 +516,12 @@ class HookEntry : XposedModule() {
                     lyriconSource.onPreferenceChanged(key)
                 }
                 when (key) {
+                    RootConstants.KEY_ACTIVE_MEDIA_SESSION_PACKAGES -> {
+                        lyriconSource.onActiveMediaSessionSnapshotChanged(
+                            prefs.getString(key, null),
+                            reason = "remote_prefs_changed",
+                        )
+                    }
                     RootConstants.KEY_HOOK_LYRIC_SOURCE -> {
                         val newSourceId = prefs.getString(key, RootConstants.DEFAULT_HOOK_LYRIC_SOURCE)
                             ?: RootConstants.DEFAULT_HOOK_LYRIC_SOURCE
@@ -484,7 +542,7 @@ class HookEntry : XposedModule() {
                             BaseIslandRenderer.refreshActiveIsland()
                         }
                     }
-                    RootConstants.KEY_HOOK_ENABLE_SUPER_ISLAND,
+                    RootConstants.KEY_HOOK_ENABLE_HYPER_ISLAND,
                     RootConstants.KEY_HOOK_ENABLE_AOD_LYRICS,
                     RootConstants.KEY_HOOK_APPLE_MUSIC_NATIVE_ONLINE_TRANSLATION -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -525,14 +583,25 @@ class HookEntry : XposedModule() {
                     RootConstants.KEY_HOOK_CLASSIC_AOD_SONG_INFO_SHOW_ICON,
                     RootConstants.KEY_HOOK_CLASSIC_AOD_NEXT_SONG_PREVIEW,
                     RootConstants.KEY_HOOK_CLASSIC_AOD_NEXT_SONG_PREVIEW_POSITION,
+                    RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW,
+                    RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS,
                     RootConstants.KEY_HOOK_REMOVE_CJK_LYRIC_SPACES -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            if (key == RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW ||
+                                key == RootConstants.KEY_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS
+                            ) {
+                                configureEarlyNextLinePreview()
+                                LyriconDataBridge.updateEstimatedPosition(
+                                    LyriconDataBridge.estimatedPosition() ?: LyriconDataBridge.currentPosition
+                                )
+                            }
                             ClassicAodFocusNotificationRecovery.ensureListenerCanRecover(app, prefs)
                             NotificationMediaAodLyricHooker.refresh()
                             BaseIslandRenderer.refreshActiveIsland()
                         }
                     }
                     RootConstants.KEY_HOOK_ISLAND_ALBUM_COVER_STYLE,
+                    RootConstants.KEY_HOOK_ISLAND_ALBUM_COVER_STYLE_APP_WHITELIST,
                     RootConstants.KEY_HOOK_ISLAND_LEFT_ALBUM -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             IslandAlbumCoverStyleHooker.refresh()
@@ -540,9 +609,10 @@ class HookEntry : XposedModule() {
                         }
                     }
                     RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR,
-                    RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_GRADIENT -> {
+                    RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_GRADIENT,
+                    RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR_MODE -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            IslandAlbumCoverStyleHooker.refresh()
+                            // 律动颜色与封面样式无关；连带刷新会重走 setFixIcon 重绘封面，造成封面闪烁
                             IslandMusicWaveColorHooker.refresh()
                         }
                     }
@@ -561,6 +631,11 @@ class HookEntry : XposedModule() {
                     RootConstants.KEY_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_MODE -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             NotificationMediaAmbientFlowHooker.refreshBackgroundStyle()
+                        }
+                    }
+                    RootConstants.KEY_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_PAUSE_RESTORE_DEFAULT -> {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            NotificationMediaAmbientFlowHooker.refreshAmbientFlow()
                         }
                     }
                     RootConstants.KEY_HOOK_NOTIFICATION_MEDIA_BACKGROUND_STYLE,
@@ -601,7 +676,14 @@ class HookEntry : XposedModule() {
                             IslandExpandedMediaAmbientFlowHooker.refreshMediaElements()
                         }
                     }
-                    in SUPER_ISLAND_RUNTIME_REFRESH_KEYS -> {
+                    RootConstants.KEY_HOOK_ISLAND_DYNAMIC_LIMIT,
+                    RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH,
+                    RootConstants.KEY_HOOK_ISLAND_DUET_FIXED_LENGTH -> {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            BaseIslandRenderer.refreshDynamicWidth()
+                        }
+                    }
+                    in HYPER_ISLAND_RUNTIME_REFRESH_KEYS -> {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             BaseIslandRenderer.refreshActiveIsland()
                         }
@@ -697,7 +779,7 @@ class HookEntry : XposedModule() {
                         .getApplicationInfo("com.juren233.hyperlyricsenhanced", 0)
                         .uid
                 }.getOrDefault(-1)
-                val senderUid = runCatching { sentFromUid }.getOrDefault(-1)
+                val senderUid = if (Build.VERSION.SDK_INT >= 34) sentFromUid else -1
                 if (expectedUid >= 0 && senderUid >= 0 && senderUid != expectedUid) {
                     HookLogger.w(
                         "HookEntry",
@@ -720,13 +802,38 @@ class HookEntry : XposedModule() {
                     "long" -> intent.getLongExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_LONG, 0L)
                     "float" -> intent.getFloatExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_FLOAT, 0f)
                     "string" -> intent.getStringExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_STRING)
+                    "string_set" -> intent
+                        .getStringArrayListExtra(RootConstants.EXTRA_REMOTE_PREFERENCE_STRING_SET)
+                        ?.toSet()
+                        ?: emptySet<String>()
                     else -> return
                 }
                 IslandRuntimePreferenceOverrides.put(key, value)
+                if (key == RootConstants.KEY_ACTIVE_MEDIA_SESSION_PACKAGES && value is String) {
+                    lyriconSource.onActiveMediaSessionSnapshotChanged(
+                        value,
+                        reason = "preference_broadcast",
+                    )
+                }
                 if (key == RootConstants.KEY_HOOK_LYRIC_MODE && value is Int) {
                     activeMode = value
                 }
-                BaseIslandRenderer.refreshActiveIsland()
+                if (key == RootConstants.KEY_HOOK_ISLAND_ALBUM_COVER_STYLE_APP_WHITELIST) {
+                    IslandAlbumCoverStyleHooker.refresh()
+                }
+                if (key == RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR ||
+                    key == RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_GRADIENT ||
+                    key == RootConstants.KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR_MODE
+                ) {
+                    IslandMusicWaveColorHooker.refresh()
+                }
+                if (key == RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH ||
+                    key == RootConstants.KEY_HOOK_ISLAND_DYNAMIC_LIMIT ||
+                    key == RootConstants.KEY_HOOK_ISLAND_DUET_FIXED_LENGTH) {
+                    BaseIslandRenderer.refreshDynamicWidth()
+                } else {
+                    BaseIslandRenderer.refreshActiveIsland()
+                }
                 HookLogger.i(
                     "HookEntry",
                     "收到配置广播并更新运行时覆盖: key=$key, " +
@@ -810,6 +917,10 @@ class HookEntry : XposedModule() {
                     cl,
                     lyricsOnly = lyricsOnlyAfterHotReload
                 )
+                // 同步把白名单 Hook 挂到插件类加载器：PluginInstance.loadPlugin
+                // 反射转发在新系统上不可靠，两条路径内部各自按 cl 去重，可叠加。
+                UnlockIslandWhitelist.doHookInClassLoader(cl)
+                UnlockFocusWhitelist.doHookInClassLoader(cl)
             } catch (e: Exception) {
                 if (e is ClassNotFoundException || e is NoSuchMethodException) {
                     // HookLogger.w("HookEntry","插件中未找到超级岛相关类")

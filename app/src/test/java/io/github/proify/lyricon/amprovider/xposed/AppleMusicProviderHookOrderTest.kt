@@ -27,28 +27,33 @@ class AppleMusicProviderHookOrderTest {
 
     @Test
     fun `Apple Music remote preference listener keeps a strong owner reference`() {
-        val relativeSourcePath =
-            "src/main/java/io/github/proify/lyricon/amprovider/xposed/" +
-                "AppleMusicProviderOrchestrator.kt"
-        val sourceFile = listOf(File("app/$relativeSourcePath"), File(relativeSourcePath))
-            .first(File::isFile)
-        val source = sourceFile.readText()
-        val listenerField = "private var contentUiLanguagePreferenceListener:"
-        val listenerAssignment = "contentUiLanguagePreferenceListener = listener"
+        // R6 拆分后：强引用字段声明在目录/语言组装群，监听器接线代码位于内容语言偏好扩展文件。
+        fun readSource(fileName: String): String {
+            val relativeSourcePath =
+                "src/main/java/io/github/proify/lyricon/amprovider/xposed/$fileName"
+            return listOf("app/$relativeSourcePath", relativeSourcePath)
+                .map(::File)
+                .first(File::isFile)
+                .readText()
+        }
+        val catalogLanguageSource = readSource("AppleOrchestratorCatalogLanguageAssembly.kt")
+        val wiringSource = readSource("AppleOrchestratorContentUiLanguage.kt")
+        val listenerField = "var contentUiLanguagePreferenceListener:"
+        val listenerAssignment = "catalogLanguage.attachPreferenceListener(listener)"
         val listenerRegistration = "prefs.registerOnSharedPreferenceChangeListener(listener)"
 
         assertTrue(
             "Remote SharedPreferences listeners are weakly held and need a strong field owner",
-            source.contains(listenerField) && source.contains(listenerAssignment),
+            catalogLanguageSource.contains(listenerField),
         )
         assertTrue(
             "The strong listener reference must be assigned before registration",
-            source.indexOf(listenerAssignment) in 0 until source.indexOf(listenerRegistration),
+            wiringSource.indexOf(listenerAssignment) in 0 until wiringSource.indexOf(listenerRegistration),
         )
         assertTrue(
             "Volume balance changes must emit a runtime diagnostic before reconciliation",
-            source.contains("event=preference_changed") &&
-                source.contains("playbackHooks.onVolumeBalancePreferenceChanged()"),
+            wiringSource.contains("event=preference_changed") &&
+                wiringSource.contains("playbackHooks.onVolumeBalancePreferenceChanged()"),
         )
     }
 
@@ -74,6 +79,8 @@ class AppleMusicProviderHookOrderTest {
             "hookTranslationPreference",
             "hookMediaApiLocalization",
             "hookContentHttpLocalization",
+            "hookAmpApiHttpLocalization",
+            "hookCatalogRequestLocalization",
             "hookExoMediaPlayer",
             "hookAtmosVolumeDiagnostics",
             "hookMediaMetadataChange",
@@ -95,6 +102,8 @@ class AppleMusicProviderHookOrderTest {
             "hookInAppMetadata",
             "hookInAppPlaybackItemConversion",
             "hookInAppActionSheetMetadata",
+            "hookSettingsCellularDataEntry",
+            "hookCellularAvailability",
             "hookMediaSessionMetadata",
             "hookMediaSessionQueue",
             "hookPlaybackNotificationMetadata",

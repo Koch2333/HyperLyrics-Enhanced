@@ -83,7 +83,7 @@ class OneTapRefreshSelectionPolicyTest {
     @Test
     fun `installed catalog puts scoped apps in order and excludes apps outside module scope`() {
         assertEquals(
-            listOf("Apple Music", "网易云音乐", "QQ音乐"),
+            listOf("Apple Music", "网易云音乐", "QQ音乐", "小米音乐"),
             OneTapRefreshCatalog.installedMusicApps(
                 musicAppIds + setOf(
                     "com.miui.player",
@@ -104,5 +104,34 @@ class OneTapRefreshSelectionPolicyTest {
                 setOf("com.kugou.android", "com.kugou.android.lite"),
             ),
         )
+    }
+
+    @Test
+    fun `home hidden keeps only system ui and apple music refresh targets`() {
+        val installed = OneTapRefreshCatalog.installedMusicApps(musicAppIds)
+
+        val targets = OneTapRefreshCatalog.refreshTargets(
+            installedMusicApps = installed,
+            appleMusicOnly = true,
+        )
+
+        assertEquals(
+            listOf(OneTapRefreshMusicApp("com.apple.android.music", "Apple Music")),
+            targets.musicApps,
+        )
+        assertFalse(targets.showAllMusicAppsOption)
+    }
+
+    @Test
+    fun `home visible keeps every installed music app with the all music apps option`() {
+        val installed = OneTapRefreshCatalog.installedMusicApps(musicAppIds)
+
+        val targets = OneTapRefreshCatalog.refreshTargets(
+            installedMusicApps = installed,
+            appleMusicOnly = false,
+        )
+
+        assertEquals(installed, targets.musicApps)
+        assertTrue(targets.showAllMusicAppsOption)
     }
 }

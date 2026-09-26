@@ -19,6 +19,8 @@ object RootConstants {
         "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_FLOAT"
     const val EXTRA_REMOTE_PREFERENCE_STRING =
         "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_STRING"
+    const val EXTRA_REMOTE_PREFERENCE_STRING_SET =
+        "com.juren233.hyperlyricsenhanced.extra.REMOTE_PREFERENCE_STRING_SET"
     const val CLASSIC_AOD_FOCUS_REFRESH_AUTHORITY =
         "com.juren233.hyperlyricsenhanced.classic_aod_focus_refresh"
     const val CLASSIC_AOD_FOCUS_REFRESH_METHOD = "refresh"
@@ -26,7 +28,7 @@ object RootConstants {
         "debug_apple_pronunciation_diagnostic"
 
     // ================= HOOK & SUPER ISLAND KEYS =================
-    const val KEY_HOOK_ENABLE_SUPER_ISLAND = "key_hook_enable_super_island"
+    const val KEY_HOOK_ENABLE_HYPER_ISLAND = "key_hook_enable_hyper_island"
     const val KEY_HOOK_ENABLE_DYNAMIC_ISLAND = "key_hook_enable_dynamic_island"
     const val KEY_HOOK_ENABLE_AOD_LYRICS = "key_hook_enable_aod_lyrics"
     const val KEY_HOOK_LOCK_SCREEN_AOD_MAIN_TEXT_SIZE =
@@ -98,13 +100,29 @@ object RootConstants {
     const val KEY_HOOK_LYRIC_MODE = "key_hook_lyric_mode"
     const val KEY_HOOK_LYRIC_SOURCE = "key_hook_lyric_source"
     const val DEFAULT_HOOK_LYRIC_SOURCE = "lyricon"
+
+    /**
+     * 模块 app 侧发布的“存在 MediaSession 的包集合”快照
+     * （格式见 [com.juren233.hyperlyricsenhanced.root.source.ActiveMediaSessionSnapshot]），
+     * SystemUI 侧据此阻断 Provider 的僵尸发布（AOD-LYRICS-004）。
+     */
+    const val KEY_ACTIVE_MEDIA_SESSION_PACKAGES = "key_active_media_session_packages"
     const val KEY_HOOK_LYRICON_PROVIDER_DELAY_PREFIX = "key_hook_lyricon_provider_delay_"
     const val KEY_HOOK_REMOVE_CJK_LYRIC_SPACES =
         "key_hook_remove_cjk_lyric_spaces"
 
 
+    const val KEY_HOOK_EARLY_NEXT_LINE_PREVIEW = "key_hook_early_next_line_preview"
+    const val KEY_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS =
+        "key_hook_early_next_line_preview_custom_ms"
+    const val DEFAULT_HOOK_EARLY_NEXT_LINE_PREVIEW = 0
+    const val EARLY_NEXT_LINE_PREVIEW_CUSTOM = 6
+    const val DEFAULT_HOOK_EARLY_NEXT_LINE_PREVIEW_CUSTOM_MS = 100
+
     const val KEY_HOOK_ISLAND_LEFT_ALBUM = "key_hook_island_left_album"
     const val KEY_HOOK_ISLAND_ALBUM_COVER_STYLE = "key_hook_island_album_cover_style"
+    const val KEY_HOOK_ISLAND_ALBUM_COVER_STYLE_APP_WHITELIST =
+        "key_hook_island_album_cover_style_app_whitelist"
     const val KEY_HOOK_ISLAND_CONTENT_LEFT = "key_hook_island_content_left"
     const val KEY_HOOK_ISLAND_CONTENT_RIGHT = "key_hook_island_content_right"
     const val KEY_HOOK_ISLAND_LEFT_PADDING_LEFT = "key_hook_island_left_padding_left"
@@ -113,6 +131,9 @@ object RootConstants {
     const val KEY_HOOK_ISLAND_RIGHT_PADDING_RIGHT = "key_hook_island_right_padding_right"
     const val KEY_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH = "key_hook_island_left_content_max_width"
     const val KEY_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH = "key_hook_island_right_content_max_width"
+    const val KEY_HOOK_ISLAND_DYNAMIC_LIMIT = "key_hook_island_dynamic_limit"
+    const val KEY_HOOK_ISLAND_DYNAMIC_WIDTH = "key_hook_island_dynamic_width"
+    const val KEY_HOOK_ISLAND_DUET_FIXED_LENGTH = "key_hook_island_duet_fixed_length"
     const val KEY_HOOK_ISLAND_BEHAVIOR_AFTER_PAUSE = "key_hook_island_behavior_after_pause"
     const val KEY_HOOK_ISLAND_FORCE_NEXT_SONG_AT_END = "key_hook_island_force_next_song_at_end"
     const val KEY_HOOK_ISLAND_NEXT_SONG_DURATION = "key_hook_island_next_song_duration"
@@ -124,6 +145,8 @@ object RootConstants {
         "key_hook_island_next_song_preview_weight"
     const val KEY_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_MODE =
         "key_hook_notification_media_ambient_flow_mode"
+    const val KEY_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_PAUSE_RESTORE_DEFAULT =
+        "key_hook_notification_media_ambient_flow_pause_restore_default"
     const val KEY_HOOK_ISLAND_EXPANDED_MEDIA_AMBIENT_FLOW_MODE =
         "key_hook_island_expanded_media_ambient_flow_mode"
     const val KEY_HOOK_NOTIFICATION_MEDIA_CARD_THEME =
@@ -166,6 +189,7 @@ object RootConstants {
     const val KEY_HOOK_MAX_LEFT_WIDTH = "key_hook_max_left_width"
     const val KEY_HOOK_REMOVE_FOCUS_WHITELIST = "key_hook_remove_focus_whitelist"
     const val KEY_HOOK_REMOVE_ISLAND_WHITELIST = "key_hook_remove_island_whitelist"
+    const val KEY_HOOK_UNLOCK_ISLAND_LENGTH = "key_hook_unlock_island_length"
 
     // ================= STYLE & TYPOGRAPHY KEYS =================
     const val KEY_HOOK_TEXT_SIZE = "key_hook_text_size"
@@ -182,6 +206,7 @@ object RootConstants {
     const val KEY_HOOK_ISLAND_RIGHT_ICON = "key_hook_island_right_icon"
     const val KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR = "key_hook_island_music_wave_color"
     const val KEY_HOOK_ISLAND_MUSIC_WAVE_GRADIENT = "key_hook_island_music_wave_gradient"
+    const val KEY_HOOK_ISLAND_MUSIC_WAVE_COLOR_MODE = "key_hook_island_music_wave_color_mode"
 
     // ================= ANIMATION & MARQUEE KEYS =================
     const val KEY_HOOK_ANIM_MODE = "key_hook_anim_mode"
@@ -275,6 +300,8 @@ object RootConstants {
         "key_hook_apple_music_restore_cjk_original_metadata"
     const val KEY_HOOK_APPLE_MUSIC_NOTIFICATION_OPEN_FULL_PLAYER =
         "key_hook_apple_music_notification_open_full_player"
+    const val KEY_HOOK_APPLE_MUSIC_FORCE_CELLULAR_DATA_ENTRY =
+        "key_hook_apple_music_force_cellular_data_entry"
     const val KEY_HOOK_APPLE_MUSIC_VOLUME_BALANCE =
         "key_hook_apple_music_volume_balance"
     const val KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS =
@@ -289,6 +316,8 @@ object RootConstants {
         "key_hook_apple_music_lunabeat_word_lyrics"
     const val KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_EFFECT =
         "key_hook_apple_music_lyrics_blur_effect"
+    const val KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION =
+        "key_hook_apple_music_lyrics_blur_animation"
     const val KEY_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MIN_RADIUS_DP =
         "key_hook_apple_music_native_lyrics_blur_min_radius_dp"
     const val KEY_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MAX_RADIUS_DP =
@@ -297,6 +326,8 @@ object RootConstants {
         "key_hook_apple_music_advanced_lyrics_blur_min_radius_px"
     const val KEY_HOOK_APPLE_MUSIC_ADVANCED_LYRICS_BLUR_MAX_RADIUS_PX =
         "key_hook_apple_music_advanced_lyrics_blur_max_radius_px"
+    const val KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT =
+        "key_hook_apple_music_follow_system_font"
     const val KEY_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT_WEIGHT =
         "key_hook_apple_music_follow_system_font_weight"
     const val KEY_HOOK_AI_TRANS_ENABLE = "key_hook_ai_trans_enable"
@@ -315,6 +346,7 @@ object RootConstants {
 
     // ================= DEFAULTS =================
     const val DEFAULT_HOOK_LYRIC_MODE = 0
+    const val HOOK_LYRIC_MODE_SPLIT = 1
     const val DEFAULT_HOOK_LYRICON_PROVIDER_DELAY = 0
     const val DEFAULT_HOOK_REMOVE_CJK_LYRIC_SPACES = false
     const val APPLE_MUSIC_CONTENT_UI_LANGUAGE_NONE = 0
@@ -330,6 +362,7 @@ object RootConstants {
     const val DEFAULT_HOOK_APPLE_MUSIC_LOCALIZED_METADATA_CACHE = true
     const val DEFAULT_HOOK_APPLE_MUSIC_RESTORE_CJK_ORIGINAL_METADATA = false
     const val DEFAULT_HOOK_APPLE_MUSIC_NOTIFICATION_OPEN_FULL_PLAYER = false
+    const val DEFAULT_HOOK_APPLE_MUSIC_FORCE_CELLULAR_DATA_ENTRY = false
     const val DEFAULT_HOOK_APPLE_MUSIC_VOLUME_BALANCE = false
     const val DEFAULT_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS = false
     const val DEFAULT_HOOK_APPLE_MUSIC_NATIVE_ONLINE_TRANSLATION = false
@@ -341,6 +374,7 @@ object RootConstants {
     const val APPLE_MUSIC_LYRICS_BLUR_EFFECT_ADVANCED_MATERIAL = 2
     const val DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_EFFECT =
         APPLE_MUSIC_LYRICS_BLUR_EFFECT_OFF
+    const val DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION = false
     const val DEFAULT_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MIN_RADIUS_DP = 3f
     const val DEFAULT_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_MAX_RADIUS_DP = 6.5f
     const val MIN_HOOK_APPLE_MUSIC_NATIVE_LYRICS_BLUR_RADIUS_DP = 0f
@@ -349,11 +383,12 @@ object RootConstants {
     const val DEFAULT_HOOK_APPLE_MUSIC_ADVANCED_LYRICS_BLUR_MAX_RADIUS_PX = 26
     const val MIN_HOOK_APPLE_MUSIC_ADVANCED_LYRICS_BLUR_RADIUS_PX = 0
     const val MAX_HOOK_APPLE_MUSIC_ADVANCED_LYRICS_BLUR_RADIUS_PX = 100
+    const val DEFAULT_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT = false
     const val DEFAULT_HOOK_APPLE_MUSIC_FOLLOW_SYSTEM_FONT_WEIGHT = false
     const val MIN_HOOK_LYRICON_PROVIDER_DELAY = -5000
     const val MAX_HOOK_LYRICON_PROVIDER_DELAY = 5000
 
-    const val DEFAULT_HOOK_ENABLE_SUPER_ISLAND = false
+    const val DEFAULT_HOOK_ENABLE_HYPER_ISLAND = false
     const val DEFAULT_HOOK_ENABLE_DYNAMIC_ISLAND = false
     const val DEFAULT_HOOK_ENABLE_AOD_LYRICS = false
     const val AOD_SONG_INFO_FORMAT_NONE = 0
@@ -417,6 +452,7 @@ object RootConstants {
     const val DEFAULT_HOOK_MAX_LEFT_WIDTH = 100
     const val DEFAULT_HOOK_REMOVE_FOCUS_WHITELIST = false
     const val DEFAULT_HOOK_REMOVE_ISLAND_WHITELIST = false
+    const val DEFAULT_HOOK_UNLOCK_ISLAND_LENGTH = false
     const val DEFAULT_HOOK_ISLAND_CONTENT_LEFT = 5
     const val DEFAULT_HOOK_ISLAND_CONTENT_RIGHT = 7
     const val DEFAULT_HOOK_ISLAND_LEFT_PADDING_LEFT = 5
@@ -425,6 +461,9 @@ object RootConstants {
     const val DEFAULT_HOOK_ISLAND_RIGHT_PADDING_RIGHT = 0
     const val DEFAULT_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH = 80
     const val DEFAULT_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH = 100
+    const val DEFAULT_HOOK_ISLAND_DYNAMIC_LIMIT = false
+    const val DEFAULT_HOOK_ISLAND_DYNAMIC_WIDTH = false
+    const val DEFAULT_HOOK_ISLAND_DUET_FIXED_LENGTH = false
     const val DEFAULT_HOOK_ISLAND_BEHAVIOR_AFTER_PAUSE = 0
     const val DEFAULT_HOOK_ISLAND_FORCE_NEXT_SONG_AT_END = false
     const val DEFAULT_HOOK_ISLAND_NEXT_SONG_DURATION = 4
@@ -449,6 +488,7 @@ object RootConstants {
     const val NOTIFICATION_MEDIA_AMBIENT_FLOW_MODE_CUSTOM_FULL = 3
     const val DEFAULT_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_MODE =
         NOTIFICATION_MEDIA_AMBIENT_FLOW_MODE_DISABLED
+    const val DEFAULT_HOOK_NOTIFICATION_MEDIA_AMBIENT_FLOW_PAUSE_RESTORE_DEFAULT = true
     const val ISLAND_EXPANDED_MEDIA_AMBIENT_FLOW_MODE_DEFAULT = 0
     const val ISLAND_EXPANDED_MEDIA_AMBIENT_FLOW_MODE_DISABLED = 1
     const val ISLAND_EXPANDED_MEDIA_AMBIENT_FLOW_MODE_COVER_COLOR = 2
@@ -521,6 +561,10 @@ object RootConstants {
     const val DEFAULT_HOOK_ISLAND_RIGHT_ICON = false
     const val DEFAULT_HOOK_ISLAND_MUSIC_WAVE_COLOR = false
     const val DEFAULT_HOOK_ISLAND_MUSIC_WAVE_GRADIENT = false
+    const val ISLAND_MUSIC_WAVE_COLOR_MODE_DISABLED = 0
+    const val ISLAND_MUSIC_WAVE_COLOR_MODE_COVER = 1
+    const val ISLAND_MUSIC_WAVE_COLOR_MODE_COVER_GRADIENT = 2
+    const val DEFAULT_HOOK_ISLAND_MUSIC_WAVE_COLOR_MODE = ISLAND_MUSIC_WAVE_COLOR_MODE_COVER
 
     const val DEFAULT_HOOK_ANIM_ENABLE = false
     const val DEFAULT_HOOK_ANIM_ID = "yoyo_default"

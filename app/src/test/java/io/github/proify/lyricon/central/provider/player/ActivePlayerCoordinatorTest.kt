@@ -272,6 +272,127 @@ class ActivePlayerCoordinatorTest {
         assertEquals(listOf("first-song"), listener.songIds)
     }
 
+    @Test
+    fun `new zero anchor reaches active subscriber without another playing event`() {
+        val coordinator = coordinator(officialProviderPreference = { true })
+        val listener = RecordingListener()
+        coordinator.addListener(listener)
+        val recorder = playingRecorder(officialInfo)
+        recorder.position = 35_163L
+        coordinator.onPlaybackStateChanged(recorder, true)
+        listener.positions.clear()
+
+        // No ticker and no PLAYING -> PLAYING boolean event: only the new anchor is delivered.
+        recorder.position = 0L
+        coordinator.onPositionChanged(recorder, 0L)
+
+        assertEquals(listOf(0L), listener.positions)
+        assertEquals(true, listener.isPlaying)
+        assertEquals(officialInfo, listener.activeProvider)
+    }
+
+    @Test
+    fun `late song and same song lyrics keep the new authoritative position`() {
+        val coordinator = coordinator(officialProviderPreference = { true })
+        val listener = RecordingListener()
+        coordinator.addListener(listener)
+        val recorder = playingRecorder(officialInfo)
+        recorder.position = 35_163L
+        coordinator.onPlaybackStateChanged(recorder, true)
+        listener.positions.clear()
+
+        recorder.position = 0L
+        coordinator.onPositionChanged(recorder, 0L)
+        val song = Song().apply { id = "new-song"; name = "New Song" }
+        recorder.song = song
+        coordinator.onSongChanged(recorder, song)
+        recorder.position = 356L
+        coordinator.onPositionChanged(recorder, 356L)
+        // A later same-song supplement must not restore the previous track's 35 second cursor.
+        coordinator.onSongChanged(recorder, song)
+        recorder.position = 1_200L
+        coordinator.onPositionChanged(recorder, 1_200L)
+
+        assertEquals(listOf(0L, 356L, 1_200L), listener.positions)
+        val reconnect = RecordingListener()
+        coordinator.syncNewProviderState(recorder, reconnect)
+        assertEquals(listOf("new-song"), reconnect.songIds)
+        assertEquals(listOf(1_200L), reconnect.positions)
+    }
+
+    @Test
+    fun `syncAllListeners replays current snapshot without new provider events`() {
+        val coordinator = coordinator(officialProviderPreference = { true })
+        val listener = RecordingListener()
+        coordinator.addListener(listener)
+        val recorder = playingRecorder(officialInfo)
+        recorder.position = 35_163L
+        coordinator.onPlaybackStateChanged(recorder, true)
+        val song = Song().apply { id = "kept-song"; name = "Kept Song" }
+        recorder.song = song
+        coordinator.onSongChanged(recorder, song)
+        listener.positions.clear()
+        listener.songIds.clear()
+
+        // Gate recovery path: the subscriber lost one-shot events while blocked and asks
+        // Central for a fresh full snapshot; no provider traffic is involved.
+        coordinator.syncAllListeners()
+
+        assertEquals(listOf("kept-song"), listener.songIds)
+        assertEquals(true, listener.isPlaying)
+        assertEquals(listOf(35_163L), listener.positions)
+        assertEquals(officialInfo, listener.activeProvider)
+    }
+
+    @Test
+    fun `syncAllListeners without active provider leaves listeners untouched`() {
+        val coordinator = coordinator(officialProviderPreference = { true })
+        val listener = RecordingListener()
+        coordinator.addListener(listener)
+
+        coordinator.syncAllListeners()
+
+        assertNull(listener.activeProvider)
+        assertEquals(emptyList<String>(), listener.songIds)
+    }
+
+
+    @Test
+    fun `playback state query is scoped to exact provider and player`() {
+        val coordinator = coordinator(officialProviderPreference = { null })
+        assertNull(coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+        val recorder = playingRecorder(officialInfo)
+        coordinator.onPlaybackStateChanged(recorder, true)
+        assertEquals(true, coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+        assertNull(coordinator.playbackStateFor(legacyInfo.providerPackageName, playerPackageName))
+        assertNull(coordinator.playbackStateFor(officialInfo.providerPackageName, otherPlayerPackageName))
+        assertNull(coordinator.playbackStateFor(null, playerPackageName))
+        assertNull(coordinator.playbackStateFor(officialInfo.providerPackageName, null))
+        recorder.isPlaying = false
+        coordinator.onPlaybackStateChanged(recorder, false)
+        assertEquals(false, coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+        coordinator.notifyProviderInvalid(officialInfo)
+        assertNull(coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+    }
+
+    @Test
+    fun `playback state query reports effective suppression instead of stale recorder true`() {
+        var conflict: Boolean? = false
+        val coordinator = coordinator(officialProviderPreference = { null }, audioConflict = { conflict })
+        val recorder = playingRecorder(officialInfo)
+        coordinator.onPlaybackStateChanged(recorder, true)
+        conflict = true
+        coordinator.onPositionChanged(recorder, 1_000L)
+        assertEquals(true, recorder.isPlaying)
+        assertEquals(false, coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+        conflict = null
+        coordinator.onPositionChanged(recorder, 1_050L)
+        assertEquals(false, coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+        conflict = false
+        coordinator.onPositionChanged(recorder, 1_100L)
+        assertEquals(true, coordinator.playbackStateFor(officialInfo.providerPackageName, playerPackageName))
+    }
+
     private fun playingRecorder(providerInfo: ProviderInfo) = PlayerRecorder(providerInfo).apply {
         isPlaying = true
     }

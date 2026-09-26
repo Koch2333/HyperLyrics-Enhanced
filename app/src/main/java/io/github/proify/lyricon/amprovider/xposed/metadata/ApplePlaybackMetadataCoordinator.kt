@@ -21,11 +21,11 @@ internal interface ApplePlaybackMetadataCoordinatorHost {
 
     fun onCurrentPlaybackItem(mediaId: String, playbackItem: Any, queueId: Long)
 
-    fun effectiveMetadataAlias(mediaId: String): AppleInternalCatalogResolver.Alias?
+    fun effectiveMetadataAlias(mediaId: String): Alias?
 
     fun applyPlaybackMetadataOverride(
         mediaId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         rememberLocalizedArtist: Boolean = true,
         originalMetadata: Boolean = false,
         originalMetadataConfirmed: Boolean = false,
@@ -34,15 +34,15 @@ internal interface ApplePlaybackMetadataCoordinatorHost {
     fun logMetadataIdentity(event: String, details: String)
 
     fun validatedOriginalSongAlias(
-        alias: AppleInternalCatalogResolver.Alias?,
+        alias: Alias?,
         localizedTitle: String?,
         localizedArtist: String?,
-    ): AppleInternalCatalogResolver.Alias?
+    ): Alias?
 
     fun shouldShareOriginalSongLanguage(
         localizedTitle: String?,
         localizedArtist: String?,
-        alias: AppleInternalCatalogResolver.Alias?,
+        alias: Alias?,
     ): Boolean
 
     fun rememberOriginalLanguageForArtist(mediaId: String, language: String)
@@ -59,6 +59,15 @@ internal fun selectCurrentPlaybackMediaId(
     observedQueueMediaId: String?,
 ): String? = publishedMediaId?.takeIf(String::isNotBlank)
     ?: observedQueueMediaId?.takeIf(String::isNotBlank)
+
+internal fun metadataWithEffectiveDisplayAlias(
+    metadata: MediaMetadataCache.Metadata,
+    alias: Alias?,
+): MediaMetadataCache.Metadata = metadata.copy(
+    title = alias?.title?.takeIf(String::isNotBlank) ?: metadata.title,
+    artist = alias?.artist?.takeIf(String::isNotBlank) ?: metadata.artist,
+    album = alias?.album?.takeIf(String::isNotBlank) ?: metadata.album,
+)
 
 /**
  * Owns the current Apple Music queue identity and the configured/original catalog resolution
@@ -167,13 +176,6 @@ internal class ApplePlaybackMetadataCoordinator(
                 host.ensureContentItemMetadataHooks(mediaItem.javaClass)
             }
             val previousMetadata = MediaMetadataCache.getMetadataById(mediaId)
-            MediaMetadataCache.put(metadata)
-            ProviderLogger.debug(
-                "歌曲元数据已更新：source=$source, id=${metadata.id}, " +
-                    "queueId=${metadata.queueId}, 标题=${metadata.title}, " +
-                    "专辑=${metadata.album}, 专辑来源=" +
-                    if (queueAlbum != null) "queue" else if (aliasAlbum != null) "alias" else "none"
-            )
             if (publishAsCurrent) {
                 val previousCurrentId = currentMediaId
                 currentMediaId = mediaId
@@ -183,29 +185,48 @@ internal class ApplePlaybackMetadataCoordinator(
                     playbackItem = mediaItem,
                     queueId = metadata.queueId,
                 )
-                metadataStore.updateCurrentPlaybackOverride(host.effectiveMetadataAlias(mediaId))
+                val effectiveAlias = host.effectiveMetadataAlias(mediaId)
+                metadataStore.updateCurrentPlaybackOverride(effectiveAlias)
+                val publishedMetadata = metadataWithEffectiveDisplayAlias(metadata, effectiveAlias)
+                MediaMetadataCache.put(publishedMetadata)
+                ProviderLogger.debug(
+                    "歌曲元数据已更新：source=$source, id=${publishedMetadata.id}, " +
+                        "queueId=${publishedMetadata.queueId}, 标题=${publishedMetadata.title}, " +
+                        "专辑=${publishedMetadata.album}"
+                )
                 refreshPlaybackMetadata?.let { callback ->
                     currentRefresh = PlaybackMetadataRefresh(mediaId, callback)
                 }
-                PlaybackManager.onSongChanged(metadata.id)
+                PlaybackManager.onSongChanged(publishedMetadata.id)
                 host.logMetadataIdentity(
                     event = "queue_current_published",
                     details = "trigger=$source, previousId=$previousCurrentId, " +
-                        "publishedId=$mediaId, title=${metadata.title}, artist=${metadata.artist}, " +
-                        "queueId=${metadata.queueId}, overrideEnabled=$overrideAccountLanguage",
+                        "publishedId=$mediaId, title=${publishedMetadata.title}, " +
+                        "artist=${publishedMetadata.artist}, baseTitle=${metadata.title}, " +
+                        "baseArtist=${metadata.artist}, queueId=${metadata.queueId}, " +
+                        "overrideEnabled=$overrideAccountLanguage",
                 )
                 if (
                     previousMetadata != null &&
-                    (previousMetadata.title != metadata.title ||
-                        previousMetadata.artist != metadata.artist)
+                    (previousMetadata.title != publishedMetadata.title ||
+                        previousMetadata.artist != publishedMetadata.artist ||
+                        previousMetadata.album != publishedMetadata.album)
                 ) {
-                    PlaybackManager.onCatalogMetadataResolved(metadata.id)
+                    PlaybackManager.onCatalogMetadataResolved(publishedMetadata.id)
                 }
                 resolveCatalogMetadata(
                     metadata = metadata,
                     languageSelection = languageSelection,
                     overrideAccountLanguage = overrideAccountLanguage,
                     restoreCjkOriginalMetadata = restoreCjkOriginalMetadata,
+                )
+            } else {
+                MediaMetadataCache.put(metadata)
+                ProviderLogger.debug(
+                    "歌曲元数据已更新：source=$source, id=${metadata.id}, " +
+                        "queueId=${metadata.queueId}, 标题=${metadata.title}, " +
+                        "专辑=${metadata.album}, 专辑来源=" +
+                        if (queueAlbum != null) "queue" else if (aliasAlbum != null) "alias" else "none"
                 )
             }
         }.onFailure {
@@ -438,11 +459,11 @@ internal class ApplePlaybackMetadataCoordinator(
 
     private fun cachedOriginalMetadataAlias(
         metadata: MediaMetadataCache.Metadata,
-    ): AppleInternalCatalogResolver.Alias? {
+    ): Alias? {
         val title = metadata.originalTitle?.takeIf(String::isNotBlank)
         val artist = metadata.originalArtist?.takeIf(String::isNotBlank)
         if (title == null && artist == null) return null
-        return AppleInternalCatalogResolver.Alias(
+        return Alias(
             title = title ?: metadata.title.orEmpty(),
             artist = artist ?: metadata.artist.orEmpty(),
             language = "original",
@@ -472,4 +493,93 @@ internal class ApplePlaybackMetadataCoordinator(
 
     private fun playbackMember(member: AppleMusicRuntimeMember): String =
         playbackTarget.runtimeMemberName(member)
+}
+
+/**
+ * 根编排的默认宿主实现：依赖以 supplier 显式注入，保持原匿名实现"调用期解析"
+ * 单例字段的语义（部分 Hook 在宿主构造之后才初始化）。
+ */
+internal class DefaultApplePlaybackMetadataCoordinatorHost(
+    private val activePlayerFn: () -> Any?,
+    private val configuredContentUiLanguageFn: () -> Int,
+    private val shouldOverrideAccountLanguageFn: (Int) -> Boolean,
+    private val shouldRestoreCjkOriginalMetadataFn: (MediaMetadataCache.Metadata) -> Boolean,
+    private val ensureContentItemMetadataHooksFn: (Class<*>) -> Unit,
+    private val setMetadataPlaybackMediaIdFn: (String) -> Unit,
+    private val onCurrentPlaybackItemFn: (String, Any, Long) -> Unit,
+    private val effectiveMetadataAliasFn: (String) -> Alias?,
+    private val applyPlaybackMetadataOverrideFn: (
+        String, Alias, Boolean, Boolean, Boolean,
+    ) -> Unit,
+    private val logMetadataIdentityFn: (String, String) -> Unit,
+    private val shouldShareOriginalSongLanguageFn: (String?, String?, Alias?) -> Boolean,
+    private val rememberOriginalLanguageForArtistFn: (String, String) -> Unit,
+    private val isRestoreOriginalMetadataEnabledFn: () -> Boolean,
+) : ApplePlaybackMetadataCoordinatorHost {
+    override fun activePlayer(): Any? = activePlayerFn()
+
+    override fun configuredContentUiLanguage(): Int = configuredContentUiLanguageFn()
+
+    override fun shouldOverrideAccountLanguage(selection: Int): Boolean =
+        shouldOverrideAccountLanguageFn(selection)
+
+    override fun shouldRestoreCjkOriginalMetadata(
+        metadata: MediaMetadataCache.Metadata,
+    ): Boolean = shouldRestoreCjkOriginalMetadataFn(metadata)
+
+    override fun ensureContentItemMetadataHooks(contentItemClass: Class<*>) {
+        ensureContentItemMetadataHooksFn(contentItemClass)
+    }
+
+    override fun setMetadataPlaybackMediaId(mediaId: String) {
+        setMetadataPlaybackMediaIdFn(mediaId)
+    }
+
+    override fun onCurrentPlaybackItem(mediaId: String, playbackItem: Any, queueId: Long) {
+        onCurrentPlaybackItemFn(mediaId, playbackItem, queueId)
+    }
+
+    override fun effectiveMetadataAlias(mediaId: String): Alias? =
+        effectiveMetadataAliasFn(mediaId)
+
+    override fun applyPlaybackMetadataOverride(
+        mediaId: String,
+        alias: Alias,
+        rememberLocalizedArtist: Boolean,
+        originalMetadata: Boolean,
+        originalMetadataConfirmed: Boolean,
+    ) {
+        applyPlaybackMetadataOverrideFn(
+            mediaId, alias, rememberLocalizedArtist, originalMetadata, originalMetadataConfirmed,
+        )
+    }
+
+    override fun logMetadataIdentity(event: String, details: String) {
+        logMetadataIdentityFn(event, details)
+    }
+
+    override fun validatedOriginalSongAlias(
+        alias: Alias?,
+        localizedTitle: String?,
+        localizedArtist: String?,
+    ): Alias? =
+        // 成员与同名顶层策略函数重名，Kotlin 成员优先；无限定调用会解析到自身形成无限递归。
+        io.github.proify.lyricon.amprovider.xposed.validatedOriginalSongAlias(
+            alias = alias,
+            localizedTitle = localizedTitle,
+            localizedArtist = localizedArtist,
+        )
+
+    override fun shouldShareOriginalSongLanguage(
+        localizedTitle: String?,
+        localizedArtist: String?,
+        alias: Alias?,
+    ): Boolean = shouldShareOriginalSongLanguageFn(localizedTitle, localizedArtist, alias)
+
+    override fun rememberOriginalLanguageForArtist(mediaId: String, language: String) {
+        rememberOriginalLanguageForArtistFn(mediaId, language)
+    }
+
+    override fun isRestoreOriginalMetadataEnabled(): Boolean =
+        isRestoreOriginalMetadataEnabledFn()
 }

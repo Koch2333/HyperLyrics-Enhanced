@@ -23,15 +23,20 @@ class OfficialProviderCatalogTest {
     }
 
     @Test
-    fun `merges QQ Music mobile and HD into one provider`() {
+    fun `merges QQ Music mobile and HD and Xiaomi Music into one provider`() {
         val definition = requireNotNull(OfficialProviderCatalog.definitionForId("qqmusic"))
 
         assertEquals(
-            setOf("com.tencent.qqmusic", "com.tencent.qqmusicpad"),
+            setOf(
+                "com.tencent.qqmusic",
+                "com.tencent.qqmusicpad",
+                "com.miui.player",
+            ),
             definition.targetPackages,
         )
         assertEquals("QQ音乐", definition.displayNameForPackage("com.tencent.qqmusic"))
         assertEquals("QQ音乐HD", definition.displayNameForPackage("com.tencent.qqmusicpad"))
+        assertEquals("小米音乐", definition.displayNameForPackage("com.miui.player"))
     }
 
     @Test
@@ -59,6 +64,28 @@ class OfficialProviderCatalogTest {
             OfficialProviderCatalog.shouldLoadIntoProcess(
                 packageName = "com.tencent.qqmusic",
                 processName = "com.tencent.qqmusic:QQPlayerService",
+            )
+        )
+    }
+
+    @Test
+    fun `allows Xiaomi Music main and remote processes`() {
+        assertTrue(
+            OfficialProviderCatalog.shouldLoadIntoProcess(
+                packageName = "com.miui.player",
+                processName = "com.miui.player",
+            )
+        )
+        assertTrue(
+            OfficialProviderCatalog.shouldLoadIntoProcess(
+                packageName = "com.miui.player",
+                processName = "com.miui.player:remote",
+            )
+        )
+        assertFalse(
+            OfficialProviderCatalog.shouldLoadIntoProcess(
+                packageName = "com.miui.player",
+                processName = "com.miui.player:pushservice",
             )
         )
     }
@@ -242,5 +269,26 @@ class OfficialProviderCatalogTest {
         assertTrue(damagedItem.installed)
         assertFalse(damagedItem.updateAvailable)
         assertTrue(damagedItem.needsRepair)
+    }
+
+    @Test
+    fun `treats target packages unknown to this app as compatible for newer releases`() {
+        assertTrue(
+            OfficialProviderCatalog.isTargetPackageCompatible("kuwo", "cn.kuwo.player")
+        )
+        // 旧版 App 不认识的新包：放行（只在更新 App 后生效），不拒绝目录或插件
+        assertTrue(
+            OfficialProviderCatalog.isTargetPackageCompatible("kuwo", "cn.example.futuremusic")
+        )
+    }
+
+    @Test
+    fun `rejects target packages owned by another or unknown provider`() {
+        assertFalse(
+            OfficialProviderCatalog.isTargetPackageCompatible("kuwo", "com.tencent.qqmusic")
+        )
+        assertFalse(
+            OfficialProviderCatalog.isTargetPackageCompatible("unknown-plugin", "cn.kuwo.player")
+        )
     }
 }

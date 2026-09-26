@@ -1,6 +1,7 @@
 package com.juren233.hyperlyricsenhanced.root.source
 
 import com.juren233.hyperlyricsenhanced.lyric.LrcLine
+import com.juren233.hyperlyricsenhanced.common.lyric.ChineseLyricsPolicy
 import com.juren233.hyperlyricsenhanced.common.lyric.LyricMetadataKeys
 import com.juren233.hyperlyricsenhanced.common.lyric.OnlineTranslationContentPolicy
 import com.juren233.hyperlyricsenhanced.lyric.model.Song
@@ -132,6 +133,10 @@ internal object OnlineTranslationMatcher {
     }
 
     fun apply(song: Song, onlineLines: List<LrcLine>): Result {
+        // 全中文歌词不接受在线翻译：在线源即使命中（翻译列常为伴唱标注等伪翻译），
+        // 也只允许补充发音。fillMissing/composeContent 只会从候选结果拷贝翻译，
+        // 因此在这里拦住即可覆盖计分、来源选择与重匹配全部路径。
+        val allowTranslation = !ChineseLyricsPolicy.isFullyChinese(song)
         val candidates = onlineLines
             .asSequence()
             .sortedBy(LrcLine::startTimeMs)
@@ -178,12 +183,16 @@ internal object OnlineTranslationMatcher {
                 plan.candidateIndex,
                 plan.candidateIndex + plan.candidateSpan
             )
-            val translations = distributeTranslations(nativeGroup, candidateGroup)
+            val translations = if (allowTranslation) {
+                distributeTranslations(nativeGroup, candidateGroup)
+            } else {
+                null
+            }
             val romanizations = distributeRomanizations(nativeGroup, candidateGroup)
             nativeGroup.indices.forEach { offset ->
                 val targetIndex = nativeIndex + offset
                 val targetLine = matchedLyrics[targetIndex]
-                val translation = translations.getOrNull(offset)
+                val translation = translations?.getOrNull(offset)
                     ?.takeIf {
                         !OnlineTranslationContentPolicy.isMeaningful(targetLine.translation) &&
                             OnlineTranslationContentPolicy.isMeaningful(it.main)
@@ -929,100 +938,4 @@ internal object OnlineTranslationMatcher {
         }
     }
 
-    private fun removeBracketedSegments(text: String): String = buildString(text.length) {
-        var bracketDepth = 0
-        text.forEach { char ->
-            when (char) {
-                '(', '[', '{', '（', '【', '｛' -> bracketDepth++
-                ')', ']', '}', '）', '】', '｝' -> {
-                    if (bracketDepth > 0) bracketDepth-- else append(char)
-                }
-                else -> if (bracketDepth == 0) append(char)
-            }
-        }
-    }
-
-    private fun mainTextWithoutBracketedSegments(text: String): String =
-        extractBracketedSegments(text).first.ifBlank {
-            removeBracketedSegments(text).replace(Regex("\\s+"), " ").trim()
-        }
-
-    private fun extractBracketedSegments(text: String): Pair<String, List<String>> {
-        val main = StringBuilder(text.length)
-        val segment = StringBuilder()
-        val segments = mutableListOf<String>()
-        var bracketDepth = 0
-        text.forEach { char ->
-            when (char) {
-                '(', '[', '{', '（', '【', '｛' -> {
-                    if (bracketDepth > 0) segment.append(char)
-                    bracketDepth++
-                }
-                ')', ']', '}', '）', '】', '｝' -> {
-                    if (bracketDepth == 0) {
-                        main.append(char)
-                    } else {
-                        bracketDepth--
-                        if (bracketDepth == 0) {
-                            segment.toString().trim().takeIf(String::isNotEmpty)?.let(segments::add)
-                            segment.clear()
-                        } else {
-                            segment.append(char)
-                        }
-                    }
-                }
-                else -> if (bracketDepth == 0) main.append(char) else segment.append(char)
-            }
-        }
-        if (bracketDepth > 0 && segment.isNotEmpty()) {
-            main.append(segment)
-        }
-        val normalizedMain = main.toString().replace(Regex("\\s+"), " ").trim()
-        return normalizedMain to segments
-    }
-
-    private fun similarity(first: String, second: String): Double {
-        if (first == second) return 1.0
-        if (first.isEmpty() || second.isEmpty()) return 0.0
-        val longerLength = max(first.length, second.length)
-        if ((first.contains(second) || second.contains(first)) && min(first.length, second.length) >= 4) {
-            return min(first.length, second.length).toDouble() / longerLength
-        }
-        return 1.0 - levenshteinDistance(first, second).toDouble() / longerLength
-    }
-
-    private fun levenshteinDistance(first: String, second: String): Int {
-        var previous = IntArray(second.length + 1) { it }
-        var current = IntArray(second.length + 1)
-        for (firstIndex in first.indices) {
-            current[0] = firstIndex + 1
-            for (secondIndex in second.indices) {
-                val substitutionCost = if (first[firstIndex] == second[secondIndex]) 0 else 1
-                current[secondIndex + 1] = minOf(
-                    current[secondIndex] + 1,
-                    previous[secondIndex + 1] + 1,
-                    previous[secondIndex] + substitutionCost
-                )
-            }
-            val swap = previous
-            previous = current
-            current = swap
-        }
-        return previous[second.length]
-    }
-
-    private data class Candidate(
-        val originalIndex: Int,
-        val line: LrcLine,
-        val normalizedVariants: List<String>
-    )
-
-    private data class TranslationParts(val main: String, val background: String?)
-
-    private data class MatchPlan(
-        val candidateIndex: Int,
-        val nativeSpan: Int,
-        val candidateSpan: Int,
-        val score: Double
-    )
 }

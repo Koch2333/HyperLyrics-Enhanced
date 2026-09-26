@@ -7,6 +7,8 @@
 package io.github.proify.lyricon.amprovider.xposed
 
 import android.annotation.SuppressLint
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Application
@@ -72,7 +74,6 @@ import io.github.proify.lyricon.amprovider.xposed.hooks.FunctionalAppleMusicHook
 import io.github.proify.lyricon.amprovider.xposed.lyrics.AppleOnlineSourceMenuHooks
 import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalReentryGuard
 import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalStack
-import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 import io.github.proify.lyricon.provider.LyriconFactory
 import io.github.proify.lyricon.provider.ProviderConstants
 import io.github.proify.lyricon.provider.ProviderLogo
@@ -93,26 +94,22 @@ import java.lang.reflect.Modifier
 import java.lang.ref.WeakReference
 import java.io.File
 import java.security.MessageDigest
-import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.WeakHashMap
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import android.content.SharedPreferences
 
 
 internal class AppleLyricsBlurHooks(
     private val runtime: AppleMusicProviderRuntime,
     private val preferences: () -> android.content.SharedPreferences?,
-    private val playbackHooks: () -> ApplePlaybackHooks,
+    internal val playbackHooks: () -> ApplePlaybackHooks,
     private val currentFragment: () -> Any?,
 ) {
-    private companion object {
+    internal companion object {
         const val APPLE_MUSIC_PACKAGE = "com.apple.android.music"
         const val APPLE_LYRICS_INITIAL_ANCHOR_Y_FRACTION = 0.22f
         const val APPLE_LYRICS_SCROLL_STATE_IDLE = 0
@@ -120,6 +117,7 @@ internal class AppleLyricsBlurHooks(
         const val APPLE_LYRICS_OUTGOING_RECHECK_DELAY_MS = 16L
         const val APPLE_LYRICS_BEFORE_FIRST_LINE_RECHECK_MAX_MS = 250L
         const val APPLE_LYRICS_HYPER_OS_SELF_BLUR_TYPE = 0
+        const val APPLE_LYRICS_BLUR_ANIMATION_DURATION_MS = 300L
     }
 
     private val application: Application
@@ -135,16 +133,8 @@ internal class AppleLyricsBlurHooks(
     private val contentUiLanguagePrefs: android.content.SharedPreferences?
         get() = preferences()
 
-    private val appleLyricsBlurRuntimeStates = Collections.synchronizedMap(
-        WeakHashMap<View, AppleLyricsBlurRuntimeState>()
-    )
-    private val appleLyricsBlurredViews = Collections.synchronizedSet(
-        Collections.newSetFromMap(WeakHashMap<View, Boolean>())
-    )
-    private val appleLyricsRecyclerViewsByAdapter = Collections.synchronizedMap(
-        WeakHashMap<Any, WeakReference<View>>()
-    )
-    private val appleLyricsRecyclerViewClassifications = WeakIdentityMap<View, Boolean>()
+    /** 滚动态与去重集合的持有者；Hook 发现/安装/事件转交仍由本类负责。 */
+    internal val blurState = AppleLyricsBlurState()
     private val appleLyricsRecyclerAdapterClassNames by lazy {
         hookResolver.configuredClassNames(AppleMusicHookPoint.LYRICS_RECYCLER_ADAPTER).toSet()
     }
@@ -167,16 +157,12 @@ internal class AppleLyricsBlurHooks(
         ?.runtimeMemberName(member)
         ?: error("Apple Music lyrics adapter target unavailable: ${adapter.javaClass.name}")
 
-    private fun lyricsUiMember(member: AppleMusicRuntimeMember): String =
+    internal fun lyricsUiMember(member: AppleMusicRuntimeMember): String =
         lyricsUiTarget.runtimeMemberName(member)
 
-    private fun lyricsNativeMember(member: AppleMusicRuntimeMember): String =
+    internal fun lyricsNativeMember(member: AppleMusicRuntimeMember): String =
         lyricsNativeTarget.runtimeMemberName(member)
-    private val appleLyricsChildAdapterPositionMethods =
-        ConcurrentHashMap<Class<*>, Method>()
-    private val appleLyricsHyperOsMethods = Collections.synchronizedMap(
-        WeakHashMap<Class<*>, AppleLyricsHyperOsMethods>()
-    )
+
 
     fun isAppleLyricsRecyclerAdapter(adapter: Any?): Boolean =
         adapter?.javaClass?.name in appleLyricsRecyclerAdapterClassNames
@@ -188,6 +174,13 @@ internal class AppleLyricsBlurHooks(
             RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_EFFECT,
         ) ?: RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_EFFECT
         return AppleLyricsBlurPolicy.normalizeMode(configured)
+    }
+    internal fun appleLyricsBlurAnimationEnabled(): Boolean {
+        val prefs = contentUiLanguagePrefs
+        return prefs?.getBoolean(
+            RootConstants.KEY_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION,
+            RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION,
+        ) ?: RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LYRICS_BLUR_ANIMATION
     }
 
     private fun appleLyricsBlurRadiusRange(mode: Int): ClosedFloatingPointRange<Float> {
@@ -244,9 +237,8 @@ internal class AppleLyricsBlurHooks(
         lateinit var applyBlur: Runnable
         applyBlur = Runnable {
             val target = viewRef.get() ?: return@Runnable
-            val isCurrent = synchronized(appleLyricsBlurRuntimeStates) {
-                val state = appleLyricsBlurRuntimeStates[target]
-                if (state?.pendingApplyBlur !== applyBlur) {
+            val isCurrent = blurState.withRuntimeState(target) { state ->
+                if (state.pendingApplyBlur !== applyBlur) {
                     false
                 } else {
                     state.pendingApplyBlur = null
@@ -256,10 +248,7 @@ internal class AppleLyricsBlurHooks(
             if (!isCurrent) return@Runnable
             applyAppleLyricsBlur(target)
         }
-        val previous = synchronized(appleLyricsBlurRuntimeStates) {
-            val state = appleLyricsBlurRuntimeStates.getOrPut(recyclerViewAsView) {
-                AppleLyricsBlurRuntimeState()
-            }
+        val previous = blurState.withRuntimeState(recyclerViewAsView) { state ->
             state.pendingApplyBlur.also { state.pendingApplyBlur = applyBlur }
         }
         previous?.let(recyclerViewAsView::removeCallbacks)
@@ -272,9 +261,7 @@ internal class AppleLyricsBlurHooks(
 
     private fun resetAppleLyricsBlurRuntimeState(recyclerView: Any?) {
         val recyclerViewAsView = recyclerView as? View ?: return
-        val previous = synchronized(appleLyricsBlurRuntimeStates) {
-            appleLyricsBlurRuntimeStates.remove(recyclerViewAsView)?.pendingApplyBlur
-        }
+        val previous = blurState.removeRuntimeState(recyclerViewAsView)?.pendingApplyBlur
         previous?.let(recyclerViewAsView::removeCallbacks)
         clearAppleLyricsBlurForRecycler(recyclerViewAsView)
         scheduleAppleLyricsBlur(recyclerViewAsView)
@@ -282,10 +269,7 @@ internal class AppleLyricsBlurHooks(
 
     private fun suspendAppleLyricsBlurForScroll(recyclerView: Any?) {
         val recyclerViewAsView = recyclerView as? View ?: return
-        val becameSuspended = synchronized(appleLyricsBlurRuntimeStates) {
-            val state = appleLyricsBlurRuntimeStates.getOrPut(recyclerViewAsView) {
-                AppleLyricsBlurRuntimeState()
-            }
+        val becameSuspended = blurState.withRuntimeState(recyclerViewAsView) { state ->
             state.pendingProgrammaticRecenterPosition = null
             if (state.suspendedForScroll) {
                 false
@@ -309,20 +293,15 @@ internal class AppleLyricsBlurHooks(
         targetPosition: Int,
     ) {
         if (layoutManager == null || targetPosition < 0) return
-        val recyclerView = synchronized(appleLyricsBlurRuntimeStates) {
-            appleLyricsBlurRuntimeStates.keys.firstOrNull { candidate ->
-                runCatching {
-                    AppleReflection.call(candidate, "getLayoutManager")
-                }.getOrNull() === layoutManager
-            }
+        val recyclerView = blurState.firstRuntimeStateKey { candidate ->
+            runCatching {
+                AppleReflection.call(candidate, "getLayoutManager")
+            }.getOrNull() === layoutManager
         } ?: return
         if (appleLyricsRecyclerScrollState(recyclerView) != APPLE_LYRICS_SCROLL_STATE_IDLE) {
             return
         }
-        val marked = synchronized(appleLyricsBlurRuntimeStates) {
-            val state = appleLyricsBlurRuntimeStates.getOrPut(recyclerView) {
-                AppleLyricsBlurRuntimeState()
-            }
+        val marked = blurState.withRuntimeState(recyclerView) { state ->
             if (!state.suspendedForScroll) {
                 false
             } else {
@@ -358,8 +337,7 @@ internal class AppleLyricsBlurHooks(
         )
         val scrollState = appleLyricsRecyclerScrollState(recyclerViewAsView)
         var completedTarget: Int? = null
-        val completed = synchronized(appleLyricsBlurRuntimeStates) {
-            val state = appleLyricsBlurRuntimeStates[recyclerViewAsView] ?: return@synchronized false
+        val completed = blurState.withExistingRuntimeState(recyclerViewAsView) { state ->
             val targetPosition = state.pendingProgrammaticRecenterPosition
             if (
                 !shouldCompleteAppleLyricsProgrammaticRecenter(
@@ -376,7 +354,7 @@ internal class AppleLyricsBlurHooks(
                 completedTarget = targetPosition
                 true
             }
-        }
+        } ?: false
         if (completed) {
             scheduleAppleLyricsBlur(recyclerViewAsView)
             ProviderLogger.debug(
@@ -413,14 +391,9 @@ internal class AppleLyricsBlurHooks(
 
     private fun onAppleLyricsActiveLinesUpdated(adapter: Any?) {
         adapter ?: return
-        val recyclerView = synchronized(appleLyricsRecyclerViewsByAdapter) {
-            appleLyricsRecyclerViewsByAdapter[adapter]?.get()
-        } ?: return
+        val recyclerView = blurState.recyclerFor(adapter) ?: return
         val activePositions = appleLyricsActiveAdapterPositions(adapter)
-        val changed = synchronized(appleLyricsBlurRuntimeStates) {
-            val state = appleLyricsBlurRuntimeStates.getOrPut(recyclerView) {
-                AppleLyricsBlurRuntimeState()
-            }
+        val changed = blurState.withRuntimeState(recyclerView) { state ->
             updateAppleLyricsActivePositions(state, activePositions)
         }
         if (changed) scheduleAppleLyricsBlur(recyclerView)
@@ -456,11 +429,7 @@ internal class AppleLyricsBlurHooks(
 
     private fun applyAppleLyricsBlur(recyclerView: View) {
         val container = recyclerView as? ViewGroup ?: return
-        val state = synchronized(appleLyricsBlurRuntimeStates) {
-            appleLyricsBlurRuntimeStates.getOrPut(recyclerView) {
-                AppleLyricsBlurRuntimeState()
-            }
-        }
+        val state = blurState.withRuntimeState(recyclerView) { it }
         val mode = appleLyricsBlurMode()
         if (mode == AppleLyricsBlurPolicy.OFF) {
             state.pendingOutgoingPositions = emptySet()
@@ -486,29 +455,27 @@ internal class AppleLyricsBlurHooks(
             )
             return
         }
-        appleLyricsRecyclerViewsByAdapter[adapter] = WeakReference(recyclerView)
-        synchronized(appleLyricsBlurRuntimeStates) {
-            state.also { currentState ->
-                if (currentState.adapterRef?.get() !== adapter) {
-                    currentState.adapterRef = WeakReference(adapter)
-                    currentState.settledAnchorTopY = null
-                    currentState.suspendedForScroll = false
-                    currentState.pendingProgrammaticRecenterPosition = null
-                    currentState.lastActivePositions = emptySet()
-                    currentState.pendingOutgoingPositions = emptySet()
-                    currentState.outgoingZoneTopByPosition = emptyMap()
-                }
-                if (
-                    recyclerView.height > 0 &&
-                    currentState.recyclerHeight != recyclerView.height
-                ) {
-                    currentState.recyclerHeight = recyclerView.height
-                    currentState.settledAnchorTopY = null
-                    currentState.suspendedForScroll = false
-                    currentState.pendingProgrammaticRecenterPosition = null
-                    currentState.pendingOutgoingPositions = emptySet()
-                    currentState.outgoingZoneTopByPosition = emptyMap()
-                }
+        blurState.rememberRecycler(adapter, recyclerView)
+        blurState.withRuntimeState(recyclerView) { currentState ->
+            if (currentState.adapterRef?.get() !== adapter) {
+                currentState.adapterRef = WeakReference(adapter)
+                currentState.settledAnchorTopY = null
+                currentState.suspendedForScroll = false
+                currentState.pendingProgrammaticRecenterPosition = null
+                currentState.lastActivePositions = emptySet()
+                currentState.pendingOutgoingPositions = emptySet()
+                currentState.outgoingZoneTopByPosition = emptyMap()
+            }
+            if (
+                recyclerView.height > 0 &&
+                currentState.recyclerHeight != recyclerView.height
+            ) {
+                currentState.recyclerHeight = recyclerView.height
+                currentState.settledAnchorTopY = null
+                currentState.suspendedForScroll = false
+                currentState.pendingProgrammaticRecenterPosition = null
+                currentState.pendingOutgoingPositions = emptySet()
+                currentState.outgoingZoneTopByPosition = emptyMap()
             }
         }
         if (appleLyricsRecyclerScrollState(recyclerView) != APPLE_LYRICS_SCROLL_STATE_IDLE) {
@@ -774,580 +741,6 @@ internal class AppleLyricsBlurHooks(
         }
     }
 
-    private fun appleLyricsChildTopY(view: View): Float =
-        view.top + view.translationY
-
-    private fun appleLyricsChildBottomY(view: View): Float =
-        view.bottom + view.translationY
-
-    private fun appleLyricsRecyclerScrollState(recyclerView: Any): Int =
-        runCatching {
-            (AppleReflection.call(recyclerView, "getScrollState") as? Number)?.toInt()
-        }.getOrNull() ?: APPLE_LYRICS_SCROLL_STATE_IDLE
-
-    fun appleLyricsActiveAdapterPositions(adapter: Any): Set<Int> =
-        ((runCatching {
-            AppleReflection.call(
-                adapter,
-                lyricsAdapterMember(
-                    adapter,
-                    AppleMusicRuntimeMember.LYRICS_ADAPTER_ACTIVE_POSITIONS_METHOD,
-                ),
-            )
-        }.getOrNull() as? Iterable<*>)
-            ?.mapNotNull { (it as? Number)?.toInt()?.takeIf { position -> position >= 0 } }
-            ?.toSet())
-            .orEmpty()
-
-    private fun appleLyricsLineBeginMs(
-        adapter: Any,
-        lyrics: Any,
-        lineIndex: Int,
-    ): Long? = runCatching {
-        val linePointer = AppleReflection.call(
-            lyrics,
-            lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LINE_AT_METHOD),
-            lineIndex,
-        ) ?: return@runCatching null
-        val nativeLine = AppleReflection.call(
-            linePointer,
-            lyricsNativeMember(AppleMusicRuntimeMember.LYRICS_NATIVE_POINTER_GET_METHOD),
-        ) ?: return@runCatching null
-        (AppleReflection.call(
-            nativeLine,
-            lyricsNativeMember(AppleMusicRuntimeMember.LYRICS_NATIVE_BEGIN_METHOD),
-        ) as? Number)?.toLong()
-    }.getOrNull()
-
-    private fun appleLyricsFirstLineBeginMs(adapter: Any): Long? = runCatching {
-        val lyrics = AppleReflection.call(
-            adapter,
-            lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LYRICS_METHOD),
-        ) ?: return@runCatching null
-        val lineCount = (
-            AppleReflection.call(
-                lyrics,
-                lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LINE_COUNT_METHOD),
-            ) as? Number
-            )?.toInt()
-            ?: return@runCatching null
-        if (lineCount <= 0) return@runCatching null
-        appleLyricsLineBeginMs(adapter, lyrics, 0)
-    }.getOrNull()
-
-    fun appleLyricsAdapterPositionForPlayback(
-        adapter: Any,
-        playbackPositionMs: Long,
-    ): Int? = runCatching {
-        val lyrics = AppleReflection.call(
-            adapter,
-            lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LYRICS_METHOD),
-        ) ?: return@runCatching null
-        val lineCount = (AppleReflection.call(
-            lyrics,
-            lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LINE_COUNT_METHOD),
-        ) as? Number)?.toInt() ?: return@runCatching null
-        if (lineCount <= 0) return@runCatching null
-        val itemCount = appleRecyclerAdapterItemCount(adapter)
-        selectAppleLyricsPlaybackAdapterPosition(
-            lineBeginsMs = (0 until lineCount).map { lineIndex ->
-                appleLyricsLineBeginMs(adapter, lyrics, lineIndex)
-            },
-            playbackPositionMs = playbackPositionMs,
-            itemCount = itemCount,
-        )
-    }.getOrNull()
-
-    /**
-     * Returns a compact, debug-only view of the adapter's lyric time axis and the
-     * adapter positions that are relevant to the current layout. Adapter positions
-     * are deliberately not assumed to equal lyric indexes: both the direct position
-     * probes and the complete logical begin-time list are emitted so that a later
-     * diagnosis can prove or falsify that assumption from runtime evidence.
-     */
-    fun appleLyricsAdapterDebugSnapshot(
-        adapter: Any,
-        relevantPositions: Iterable<Int> = emptyList(),
-        playbackPositionMs: Long? = null,
-    ): String {
-        val active = appleLyricsActiveAdapterPositions(adapter).sorted()
-        val itemCount = runCatching {
-            (AppleReflection.call(adapter, "getItemCount") as? Number)?.toInt()
-        }.getOrNull() ?: 0
-        val lyrics = runCatching {
-            AppleReflection.call(
-                adapter,
-                lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LYRICS_METHOD),
-            )
-        }.getOrNull()
-        val lineCount = lyrics?.let {
-            runCatching {
-                (AppleReflection.call(
-                    it,
-                    lyricsAdapterMember(adapter, AppleMusicRuntimeMember.LYRICS_ADAPTER_LINE_COUNT_METHOD),
-                ) as? Number)?.toInt()
-            }.getOrNull()
-        } ?: 0
-        val logicalBegins = if (lyrics == null || lineCount <= 0) {
-            emptyList()
-        } else {
-            (0 until lineCount.coerceAtMost(256)).mapNotNull { index ->
-                appleLyricsLineBeginMs(adapter, lyrics, index)?.let { index to it }
-            }
-        }
-        val playbackLine = playbackPositionMs?.let { position ->
-            logicalBegins.indexOfLast { (_, begin) -> begin <= position }
-                .takeIf { it >= 0 }
-                ?.let { logicalBegins[it].first }
-        }
-        val positions = (relevantPositions.asSequence() + active.asSequence())
-            .filter { it >= 0 }
-            .distinct()
-            .sorted()
-            .take(48)
-            .toList()
-        val viewTypes = positions.joinToString(",") { position ->
-            val viewType = appleLyricsAdapterItemViewType(adapter, position)
-            "$position:${viewType ?: "?"}"
-        }
-        val directBegins = if (lyrics == null) {
-            emptyList()
-        } else {
-            positions.mapNotNull { position ->
-                appleLyricsLineBeginMs(adapter, lyrics, position)?.let { "$position:$it" }
-            }
-        }
-        val logicalSample = logicalBegins
-            .take(16)
-            .joinToString(",") { (index, begin) -> "$index:$begin" }
-        return "adapter=${adapter.javaClass.name}@${System.identityHashCode(adapter)}," +
-            "itemCount=$itemCount,active=$active,viewTypes=[$viewTypes]," +
-            "logicalLineCount=$lineCount,logicalBegins=[$logicalSample]," +
-            "directPositionBegins=[${directBegins.joinToString(",")}]," +
-            "playback=${playbackPositionMs ?: "none"},playbackLine=$playbackLine"
-    }
-
-    private fun appleLyricsCurrentPlaybackPositionMs(): Long? = playbackHooks().currentPositionMs()
-
-    private fun appleLyricsVisiblePositionedChildren(
-        recyclerView: View,
-    ): List<Pair<Int, View>> {
-        val container = recyclerView as? ViewGroup ?: return emptyList()
-        return buildList {
-            repeat(container.childCount) { index ->
-                val child = container.getChildAt(index)
-                    ?.takeIf {
-                        it.visibility == View.VISIBLE && it.width > 0 && it.height > 0
-                    }
-                    ?: return@repeat
-                appleLyricsChildAdapterPosition(recyclerView, child)
-                    .takeIf { it >= 0 }
-                    ?.let { position -> add(position to child) }
-            }
-        }
-    }
-
-    private fun appleLyricsInstrumentalAdapterPositions(
-        adapter: Any,
-        positionedChildren: List<Pair<Int, View>>,
-    ): Set<Int> = positionedChildren.mapNotNull { (position, child) ->
-        position.takeIf {
-            appleLyricsAdapterItemViewType(adapter, position) == 2 ||
-                appleLyricsIsInstrumentalIndicator(child)
-        }
-    }.toSet()
-
-    private fun appleLyricsWritersCreditsAdapterPositions(
-        adapter: Any,
-        positionedChildren: List<Pair<Int, View>>,
-    ): Set<Int> = positionedChildren.mapNotNull { (position, _) ->
-        position.takeIf { appleLyricsAdapterItemViewType(adapter, position) == 1 }
-    }.toSet()
-
-    private fun appleLyricsAdapterItemViewType(adapter: Any, position: Int): Int? =
-        runCatching {
-            (AppleReflection.call(adapter, "getItemViewType", position) as? Number)?.toInt()
-        }.getOrNull() ?: runCatching {
-            (AppleReflection.call(
-                adapter,
-                lyricsAdapterMember(
-                    adapter,
-                    AppleMusicRuntimeMember.LYRICS_ADAPTER_ITEM_VIEW_TYPE_METHOD,
-                ),
-                position,
-            ) as? Number)?.toInt()
-        }.getOrNull()
-
-    private fun appleLyricsIsInstrumentalIndicator(view: View): Boolean {
-        val rootId = runCatching {
-            view.resources.getIdentifier(
-                "lyrics_instrumental_root",
-                "id",
-                APPLE_MUSIC_PACKAGE,
-            )
-        }.getOrDefault(0)
-        return rootId != 0 && view.findViewById<View>(rootId) != null
-    }
-
-    fun appleLyricsChildAdapterPosition(recyclerView: Any, child: View): Int {
-        val recyclerViewAsView = recyclerView as? View ?: return -1
-        val namedPosition = runCatching {
-            (AppleReflection.call(recyclerViewAsView, "getChildAdapterPosition", child) as? Number)
-                ?.toInt()
-        }.getOrNull()?.takeIf { it >= 0 }
-        if (namedPosition != null) return namedPosition
-
-        val method = appleLyricsChildAdapterPositionMethods[recyclerViewAsView.javaClass]
-            ?: findAppleLyricsChildAdapterPositionMethod(recyclerViewAsView.javaClass)?.also {
-                appleLyricsChildAdapterPositionMethods[recyclerViewAsView.javaClass] = it
-            }
-            ?: return -1
-        return runCatching {
-            (method.invoke(null, child) as? Number)?.toInt()
-        }.getOrNull()?.takeIf { it >= 0 } ?: -1
-    }
-
-    private fun findAppleLyricsChildAdapterPositionMethod(clazz: Class<*>): Method? =
-        generateSequence(clazz) { it.superclass }
-            .flatMap { it.declaredMethods.asSequence() }
-            .firstOrNull { method ->
-                Modifier.isStatic(method.modifiers) &&
-                    method.returnType == Int::class.javaPrimitiveType &&
-                    method.parameterTypes.contentEquals(arrayOf(View::class.java))
-            }
-            ?.apply { isAccessible = true }
-
-    private fun logAppleLyricsBlurDiagnostic(
-        recyclerView: View,
-        state: AppleLyricsBlurRuntimeState,
-        stage: String,
-        mode: Int,
-        adapter: Any? = null,
-        activePositions: Set<Int> = emptySet(),
-        instrumentalPositions: Set<Int> = emptySet(),
-        writersCreditsPositions: Set<Int> = emptySet(),
-        focusPositions: Set<Int> = activePositions,
-        positionedChildren: List<Pair<Int, View>> = emptyList(),
-        radiusByPosition: Map<Int, Int> = emptyMap(),
-        deferredBlurPositions: Set<Int> = emptySet(),
-        outgoingBottomByPosition: Map<Int, Int> = emptyMap(),
-        currentZoneTopByPosition: Map<Int, Int> = emptyMap(),
-        currentPositionMs: Long? = null,
-        firstLineBeginMs: Long? = null,
-    ) {
-        if (!BuildConfig.DEBUG) return
-        val visiblePositions = positionedChildren.map(Pair<Int, View>::first)
-        val nativeRenderEffectCount = positionedChildren.count { (_, child) ->
-            appleLyricsHasNativeRenderEffect(child)
-        }
-        val signature = listOf(
-            stage,
-            mode,
-            adapter?.javaClass?.name,
-            appleLyricsRecyclerScrollState(recyclerView),
-            activePositions.sorted(),
-            instrumentalPositions.sorted(),
-            writersCreditsPositions.sorted(),
-            focusPositions.sorted(),
-            visiblePositions,
-            state.suspendedForScroll,
-            state.settledAnchorTopY?.roundToInt(),
-            state.pendingProgrammaticRecenterPosition,
-            radiusByPosition,
-            deferredBlurPositions.sorted(),
-            outgoingBottomByPosition,
-            currentZoneTopByPosition,
-            currentPositionMs,
-            firstLineBeginMs,
-            nativeRenderEffectCount,
-        ).joinToString("|")
-        if (state.lastDiagnosticSignature == signature) return
-        state.lastDiagnosticSignature = signature
-        ProviderLogger.diagnostic(
-            "Apple lyrics blur: stage=$stage, mode=$mode, " +
-                "adapter=${adapter?.javaClass?.name ?: "none"}, " +
-                "scrollState=${appleLyricsRecyclerScrollState(recyclerView)}, " +
-                "active=${activePositions.sorted()}, " +
-                "instrumental=${instrumentalPositions.sorted()}, " +
-                "writers=${writersCreditsPositions.sorted()}, " +
-                "focus=${focusPositions.sorted()}, visible=$visiblePositions, " +
-                "suspended=${state.suspendedForScroll}, " +
-                "anchor=${state.settledAnchorTopY?.roundToInt() ?: "none"}, " +
-                "pendingRecenter=${state.pendingProgrammaticRecenterPosition ?: "none"}, " +
-                "deferred=${deferredBlurPositions.sorted()}, " +
-                "outgoingBottom=$outgoingBottomByPosition, " +
-                "currentZoneTop=$currentZoneTopByPosition, radii=$radiusByPosition, " +
-                "currentPosition=$currentPositionMs, firstLineBegin=$firstLineBeginMs, " +
-                "nativeEffects=$nativeRenderEffectCount"
-        )
-    }
-
-    private fun findAppleLyricsScrollToPositionWithOffsetMethod(clazz: Class<*>): Method? {
-        runCatching {
-            AppleReflection.findMethod(
-                clazz,
-                "scrollToPositionWithOffset",
-                parameterCount = 2,
-            )
-        }.getOrNull()?.takeIf { method ->
-            method.returnType == Void.TYPE &&
-                method.parameterTypes.contentEquals(
-                    arrayOf(
-                        Int::class.javaPrimitiveType,
-                        Int::class.javaPrimitiveType,
-                    )
-                )
-        }?.let { return it }
-
-        return generateSequence(clazz) { it.superclass }
-            .flatMap { it.declaredMethods.asSequence() }
-            .firstOrNull { method ->
-                Modifier.isPublic(method.modifiers) &&
-                    !Modifier.isStatic(method.modifiers) &&
-                    !Modifier.isFinal(method.modifiers) &&
-                    method.returnType == Void.TYPE &&
-                    method.parameterTypes.contentEquals(
-                        arrayOf(
-                            Int::class.javaPrimitiveType,
-                            Int::class.javaPrimitiveType,
-                        )
-                    )
-            }
-            ?.apply { isAccessible = true }
-    }
-
-    private fun appleLyricsHasNativeRenderEffect(view: View): Boolean =
-        runCatching {
-            AppleReflection.call(view, "getRenderEffect") != null
-        }.recoverCatching {
-            AppleReflection.field(view, "mRenderEffect") != null
-        }.getOrDefault(false)
-
-    private fun applyAppleLyricsBlur(view: View, mode: Int, radiusPx: Int) {
-        if (BuildConfig.DEBUG) {
-            ProviderLogger.debug("[LyricsScrollDiag] applyBlur: view=${view.javaClass.simpleName}@${System.identityHashCode(view)}, mode=$mode, radius=$radiusPx")
-        }
-        appleLyricsBlurredViews.add(view)
-        when (mode) {
-            AppleLyricsBlurPolicy.NATIVE -> {
-                clearAppleLyricsHyperOsBlur(view)
-                applyAppleLyricsNativeBlur(view, radiusPx)
-            }
-            AppleLyricsBlurPolicy.ADVANCED_MATERIAL -> {
-                view.setRenderEffect(null)
-                if (!applyAppleLyricsHyperOsBlur(view, radiusPx)) {
-                    clearAppleLyricsBlur(view)
-                }
-            }
-            else -> clearAppleLyricsBlur(view)
-        }
-    }
-
-    private fun applyAppleLyricsNativeBlur(view: View, radiusPx: Int) {
-        view.setRenderEffect(
-            radiusPx.takeIf { it > 0 }?.let { radius ->
-                RenderEffect.createBlurEffect(
-                    radius.toFloat(),
-                    radius.toFloat(),
-                    Shader.TileMode.CLAMP,
-                )
-            }
-        )
-    }
-
-    private fun applyAppleLyricsHyperOsBlur(view: View, radiusPx: Int): Boolean {
-        val methods = appleLyricsHyperOsMethods(view)
-        val setSelfBlur = methods.setSelfBlur ?: return false
-        return runCatching {
-            methods.setSelfBlurType?.invoke(view, APPLE_LYRICS_HYPER_OS_SELF_BLUR_TYPE)
-            setSelfBlur.invoke(view, radiusPx.coerceAtLeast(0), ArrayList<Any>())
-            true
-        }.getOrElse {
-            false
-        }
-    }
-
-    private fun clearAppleLyricsBlur(view: View) {
-        if (BuildConfig.DEBUG) {
-            ProviderLogger.debug("[LyricsScrollDiag] clearBlur: view=${view.javaClass.simpleName}@${System.identityHashCode(view)}")
-        }
-        view.setRenderEffect(null)
-        clearAppleLyricsHyperOsBlur(view)
-    }
-
-    private fun clearAppleLyricsBlurForRecycler(recyclerView: View) {
-        (recyclerView as? ViewGroup)?.let { container ->
-            repeat(container.childCount) { index ->
-                container.getChildAt(index)?.let(::clearAppleLyricsBlur)
-            }
-        }
-        val affectedViews = synchronized(appleLyricsBlurredViews) {
-            appleLyricsBlurredViews.toList().also { appleLyricsBlurredViews.clear() }
-        }
-        affectedViews.forEach(::clearAppleLyricsBlur)
-    }
-
-    private fun clearAppleLyricsHyperOsBlur(view: View) {
-        val methods = appleLyricsHyperOsMethods(view)
-        runCatching {
-            methods.setSelfBlur?.invoke(view, 0, ArrayList<Any>())
-        }
-    }
-
-    private fun appleLyricsHyperOsMethods(view: View): AppleLyricsHyperOsMethods =
-        synchronized(appleLyricsHyperOsMethods) {
-            appleLyricsHyperOsMethods.getOrPut(view.javaClass) {
-                fun findPublicMethod(name: String, vararg parameterTypes: Class<*>): Method? =
-                    runCatching {
-                        view.javaClass.getMethod(name, *parameterTypes).apply {
-                            isAccessible = true
-                        }
-                    }.getOrNull()
-
-                AppleLyricsHyperOsMethods(
-                    setSelfBlur = findPublicMethod(
-                        "setMiSelfBlur",
-                        Int::class.javaPrimitiveType!!,
-                        ArrayList::class.java,
-                    ),
-                    setSelfBlurType = findPublicMethod(
-                        "setMiSelfBlurType",
-                        Int::class.javaPrimitiveType!!,
-                    ),
-                )
-            }
-        }
-
-
-    fun isAppleLyricsRecyclerView(recyclerView: Any): Boolean {
-        val recyclerViewAsView = recyclerView as? View ?: return false
-        appleLyricsRecyclerViewClassifications[recyclerViewAsView]?.let { return it }
-        val resourceEntryName = runCatching {
-            recyclerViewAsView.resources.getResourceEntryName(recyclerViewAsView.id)
-        }.getOrNull()
-        val isLyrics = resourceEntryName == "lyrics_main_content" ||
-            isAppleLyricsRecyclerAdapter(appleRecyclerAdapter(recyclerView))
-        appleLyricsRecyclerViewClassifications[recyclerViewAsView] = isLyrics
-        return isLyrics
-    }
-
-    fun resolveAppleLyricsRecyclerView(fragment: Any): Any? {
-        runCatching {
-            AppleReflection.call(
-                fragment,
-                lyricsUiMember(AppleMusicRuntimeMember.LYRICS_UI_RECYCLER_VIEW_METHOD),
-            )
-        }.getOrNull()?.takeIf(::isAppleRecyclerViewInstance)?.let { return it }
-
-        runCatching {
-            val binding = AppleReflection.field(
-                fragment,
-                lyricsUiMember(AppleMusicRuntimeMember.LYRICS_UI_BINDING_FIELD),
-            ) ?: return@runCatching null
-            AppleReflection.field(
-                binding,
-                lyricsUiMember(AppleMusicRuntimeMember.LYRICS_UI_BINDING_RECYCLER_FIELD),
-            )
-        }.getOrNull()?.takeIf(::isAppleRecyclerViewInstance)?.let { recyclerView ->
-            ProviderLogger.debug(
-                "Apple Music 歌词 RecyclerView 已解析: source=PlayerLyricsViewFragment.i0.a0"
-            )
-            return recyclerView
-        }
-
-        instanceFieldValues(fragment)
-            .filter(::isDataBindingInstance)
-            .firstNotNullOfOrNull(::directRecyclerViewField)
-            ?.let { recyclerView ->
-                ProviderLogger.debug(
-                    "Apple Music 歌词 RecyclerView 已解析: source=databinding_scan"
-                )
-                return recyclerView
-            }
-        return directRecyclerViewField(fragment)
-    }
-
-    private fun directRecyclerViewField(instance: Any): Any? =
-        generateSequence<Class<*>>(instance.javaClass) { it.superclass }
-            .flatMap { it.declaredFields.asSequence() }
-            .filter { isAppleRecyclerViewClass(it.type) }
-            .firstNotNullOfOrNull { field ->
-                runCatching {
-                    field.isAccessible = true
-                    field.get(instance)
-                }.getOrNull()?.takeIf(::isAppleRecyclerViewInstance)
-            }
-
-    private fun isDataBindingInstance(instance: Any): Boolean =
-        generateSequence<Class<*>>(instance.javaClass) { it.superclass }
-            .any { it.name == "androidx.databinding.ViewDataBinding" }
-
-    private fun instanceFieldValues(instance: Any): Sequence<Any> =
-        generateSequence<Class<*>>(instance.javaClass) { it.superclass }
-            .flatMap { it.declaredFields.asSequence() }
-            .filterNot { Modifier.isStatic(it.modifiers) }
-            .mapNotNull { field ->
-                runCatching {
-                    field.isAccessible = true
-                    field.get(instance)
-                }.getOrNull()
-            }
-
-    fun isAppleRecyclerViewInstance(value: Any): Boolean =
-        isAppleRecyclerViewClass(value.javaClass)
-
-    fun isAppleRecyclerViewClass(clazz: Class<*>): Boolean =
-        generateSequence(clazz) { it.superclass }
-            .any { it.name == "androidx.recyclerview.widget.RecyclerView" }
-
-    fun appleRecyclerAdapter(recyclerView: Any): Any? =
-        runCatching { AppleReflection.call(recyclerView, "getAdapter") }.getOrNull()
-
-    fun appleRecyclerAdapterItemCount(adapter: Any): Int =
-        runCatching {
-            AppleReflection.call(adapter, "getItemCount") as? Number
-        }.recoverCatching {
-            AppleReflection.call(
-                adapter,
-                lyricsAdapterMember(
-                    adapter,
-                    AppleMusicRuntimeMember.LYRICS_ADAPTER_ITEM_COUNT_METHOD,
-                ),
-            ) as? Number
-        }.getOrNull()?.toInt()?.coerceAtLeast(0) ?: 0
-
-    /**
-     * Invoke the host's verified two-int scroll method without relying on a
-     * decompiler/display name. Apple Music's lyrics layout manager is loaded by
-     * the host ClassLoader and may expose an obfuscated method name.
-     */
-    fun appleLyricsScrollToPositionWithOffset(
-        layoutManager: Any,
-        position: Int,
-        offset: Int,
-    ): String? {
-        val method = findAppleLyricsScrollToPositionWithOffsetMethod(layoutManager.javaClass)
-            ?: return null
-        return runCatching {
-            method.invoke(layoutManager, position, offset)
-            "${method.declaringClass.name}#${method.name}"
-        }.getOrNull()
-    }
-
-    fun appleRecyclerNotifyDataSetChanged(adapter: Any) {
-        runCatching {
-            AppleReflection.call(adapter, "notifyDataSetChanged")
-        }.recoverCatching {
-            AppleReflection.call(
-                adapter,
-                lyricsAdapterMember(
-                    adapter,
-                    AppleMusicRuntimeMember.LYRICS_ADAPTER_NOTIFY_DATA_CHANGED_METHOD,
-                ),
-            )
-        }.getOrThrow()
-    }
-
     fun hookAppleLyricsBlurEffect() {
         runCatching {
             val recyclerClass = classLoader.loadClass("androidx.recyclerview.widget.RecyclerView")
@@ -1368,9 +761,7 @@ internal class AppleLyricsBlurHooks(
                     )
                     hookRegistrar.installHook(method, after = { chain, _ ->
                         if (name == "setAdapter") {
-                            (chain.thisObject as? View)?.let(
-                                appleLyricsRecyclerViewClassifications::remove
-                            )
+                            (chain.thisObject as? View)?.let(blurState::forgetClassification)
                         }
                         chain.thisObject
                             ?.takeIf(::isAppleLyricsRecyclerView)
@@ -1378,6 +769,17 @@ internal class AppleLyricsBlurHooks(
                                 if (name == "setAdapter") {
                                     resetAppleLyricsBlurRuntimeState(recyclerView)
                                 } else {
+                                    if (name == "onChildAttachedToWindow") {
+                                        // 只有复用且带过模糊状态的视图才可能有残留效果或未结束的动画；
+                                        // 无状态视图直接跳过，避免每次挂载都执行效果清除
+                                        (chain.args.firstOrNull() as? View)?.let { child ->
+                                            val hasBlurState =
+                                                blurState.containsRuntimeState(child)
+                                            if (hasBlurState) {
+                                                clearAppleLyricsBlur(child)
+                                            }
+                                        }
+                                    }
                                     if (name == "onLayout") {
                                         completeAppleLyricsProgrammaticRecenter(recyclerView)
                                     }

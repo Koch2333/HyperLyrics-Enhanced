@@ -14,22 +14,22 @@ import java.util.concurrent.ConcurrentHashMap
 internal interface AppleContentItemMetadataHost {
     fun containerNavigationBinding(contentItem: Any): InAppContainerNavigationRef?
 
-    fun effectiveAlias(mediaId: String): AppleInternalCatalogResolver.Alias?
+    fun effectiveAlias(mediaId: String): Alias?
 
     fun registerContainerItem(mediaId: String, contentItem: Any, kind: InAppContainerKind)
 
     fun localizedEntityType(
         contentItem: Any,
-    ): AppleInternalCatalogResolver.LocalizedEntityType?
+    ): LocalizedEntityType?
 
     fun recordComposeMediaId(mediaId: String)
 
     fun recordCurrentRecyclerMediaId(mediaId: String)
 
-    fun requestPriority(mediaId: String): AppleInternalCatalogResolver.RequestPriority
+    fun requestPriority(mediaId: String): RequestPriority
 
     fun shouldResolveFromGetter(
-        priority: AppleInternalCatalogResolver.RequestPriority,
+        priority: RequestPriority,
     ): Boolean
 
     fun registerPlaybackItem(
@@ -43,14 +43,14 @@ internal interface AppleContentItemMetadataHost {
 
     fun applyAliasToPlaybackItem(
         playbackItem: Any,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         notifyChange: Boolean,
     )
 
     fun metadataOverride(
-        entityType: AppleInternalCatalogResolver.LocalizedEntityType,
+        entityType: LocalizedEntityType,
         getter: AppleContentItemGetter,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         original: String?,
     ): String?
 }
@@ -219,4 +219,79 @@ internal class AppleContentItemMetadataHooks(
     }
 
     fun <T> withOriginalGetters(block: () -> T): T = getterGuard.run(block)
+}
+
+/**
+ * ContentItem 元数据 Hook 的默认宿主实现：orchestrator 依赖以 supplier 显式注入，保持原匿名
+ * 实现"调用期解析"的语义。
+ */
+internal class DefaultAppleContentItemMetadataHost(
+    private val containerNavigationBindingFn: (Any) -> InAppContainerNavigationRef?,
+    private val effectiveAliasFn: (String) -> Alias?,
+    private val registerContainerItemFn: (String, Any, InAppContainerKind) -> Unit,
+    private val localizedEntityTypeFn: (Any) -> LocalizedEntityType?,
+    private val recordComposeMediaIdFn: (String) -> Unit,
+    private val recordCurrentRecyclerMediaIdFn: (String) -> Unit,
+    private val requestPriorityFn: (String) -> RequestPriority,
+    private val shouldResolveFromGetterFn: (RequestPriority) -> Boolean,
+    private val registerPlaybackItemFn: (String, Any, Boolean, Boolean) -> Unit,
+    private val shouldRequestOverrideFn: (String) -> Boolean,
+    private val applyAliasToPlaybackItemFn: (Any, Alias, Boolean) -> Unit,
+    private val metadataOverrideFn: (
+        LocalizedEntityType, AppleContentItemGetter, Alias, String?,
+    ) -> String?,
+) : AppleContentItemMetadataHost {
+    override fun containerNavigationBinding(contentItem: Any): InAppContainerNavigationRef? =
+        containerNavigationBindingFn(contentItem)
+
+    override fun effectiveAlias(mediaId: String): Alias? =
+        effectiveAliasFn(mediaId)
+
+    override fun registerContainerItem(mediaId: String, contentItem: Any, kind: InAppContainerKind) {
+        registerContainerItemFn(mediaId, contentItem, kind)
+    }
+
+    override fun localizedEntityType(contentItem: Any): LocalizedEntityType? =
+        localizedEntityTypeFn(contentItem)
+
+    override fun recordComposeMediaId(mediaId: String) {
+        recordComposeMediaIdFn(mediaId)
+    }
+
+    override fun recordCurrentRecyclerMediaId(mediaId: String) {
+        recordCurrentRecyclerMediaIdFn(mediaId)
+    }
+
+    override fun requestPriority(mediaId: String): RequestPriority =
+        requestPriorityFn(mediaId)
+
+    override fun shouldResolveFromGetter(priority: RequestPriority): Boolean =
+        shouldResolveFromGetterFn(priority)
+
+    override fun registerPlaybackItem(
+        mediaId: String,
+        playbackItem: Any,
+        notifyChange: Boolean,
+        analyzeMetadata: Boolean,
+    ) {
+        registerPlaybackItemFn(mediaId, playbackItem, notifyChange, analyzeMetadata)
+    }
+
+    override fun shouldRequestOverride(mediaId: String): Boolean =
+        shouldRequestOverrideFn(mediaId)
+
+    override fun applyAliasToPlaybackItem(
+        playbackItem: Any,
+        alias: Alias,
+        notifyChange: Boolean,
+    ) {
+        applyAliasToPlaybackItemFn(playbackItem, alias, notifyChange)
+    }
+
+    override fun metadataOverride(
+        entityType: LocalizedEntityType,
+        getter: AppleContentItemGetter,
+        alias: Alias,
+        original: String?,
+    ): String? = metadataOverrideFn(entityType, getter, alias, original)
 }

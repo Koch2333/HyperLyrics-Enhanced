@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright 2026 Proify, Tomakino, juren233
  * Licensed under the Apache License, Version 2.0
  * http://www.apache.org/licenses/LICENSE-2.0
@@ -20,6 +20,8 @@ import android.view.ViewGroup
 import android.view.ViewParent
 import androidx.core.graphics.withSave
 import androidx.core.view.doOnAttach
+import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import com.juren233.hyperlyricsenhanced.lyric.model.LyricLine
 import com.juren233.hyperlyricsenhanced.lyric.view.Highlight
 import com.juren233.hyperlyricsenhanced.lyric.view.LyricPlayListener
@@ -27,11 +29,13 @@ import com.juren233.hyperlyricsenhanced.lyric.view.Marquee
 import com.juren233.hyperlyricsenhanced.lyric.view.TextLook
 import com.juren233.hyperlyricsenhanced.lyric.view.UpdatableColor
 import com.juren233.hyperlyricsenhanced.lyric.view.WordMotion
+import com.juren233.hyperlyricsenhanced.lyric.view.LyricHugMeasureWindow
 import com.juren233.hyperlyricsenhanced.lyric.view.dp
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.LyricModel
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.createModel
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.emptyLyricModel
 import com.juren233.hyperlyricsenhanced.lyric.view.sp
+import kotlin.math.abs
 import kotlin.math.ceil
 
 open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null) :
@@ -46,6 +50,10 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     var isRightSide = false
     var siblingView: SpaceGateLyricLineView? = null
     var spaceGateEnabled = true
+
+    /** 分离模式挖孔布局；null 表示当前几何/内容下不挖孔。 */
+    private var cachedGateSplit: GateSplitLayout? = null
+    private var gateSplitKey: List<Any?>? = null
 
 
     override val textPaint: TextPaint = TextPaintX().apply { textSize = 24f.sp }
@@ -71,7 +79,12 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     val isPlainText: Boolean get() = _model.isPlainText
     val isInterludeIndicator: Boolean get() = interludeDotsRenderer.isIndicator(_model)
     val isWordSync: Boolean get() = !isPlainText
-    val isOverflow: Boolean get() = lineWidth > getSpaceGateVirtualWidth()
+    // 溢出判定与滚动使用同一内容宽度：挖孔把条带撑宽了 holeWidth，
+    // 只看未挖孔行宽会让“未挖孔装得下、挖孔后尾巴出界”的行永远不滚动。
+    val isOverflow: Boolean get() = marqueeContentWidth() > getSpaceGateVirtualWidth()
+
+    private fun marqueeContentWidth(): Float =
+        cachedGateSplit?.holedWidth ?: lineWidth
     val isPlaying: Boolean get() = activeRenderer.isPlaying
     val isFinished: Boolean get() = activeRenderer.isFinished
     val isStarted: Boolean get() = activeRenderer.isStarted
@@ -88,6 +101,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             field = value
             syncRenderer.centerIfPossible = value
             scrollRenderer.centerIfPossible = value
+            traceSwitch("centering_changed")
             invalidate()
         }
 
@@ -97,6 +111,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             field = value
             syncRenderer.alignRight = value
             scrollRenderer.alignRight = value
+            traceSwitch("right_alignment_changed")
             invalidate()
             siblingView?.invalidate()
         }
@@ -106,6 +121,26 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             field = value
             syncRenderer.playListener = value
         }
+
+    /**
+     * 动态长度模式：测量宽度收缩为当前行文字实际宽度（不超过可用宽度），
+     * 让系统按内容实测宽度计算超级岛总宽度；文字超长时回到可用宽度并沿用滚动。
+     */
+    var hugContentWidth: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value) hugWidthFloor = null
+            requestLayout()
+        }
+
+    /**
+     * 动态长度二段测量的宽度下限，由 SpaceGateRichLyricLineView 在测量期下发：
+     * 取组内最长行（对唱固定长度时为全曲最长行）与自身 hug 宽度的较大值，
+     * 让短于下限的行保留“视图宽度 − 文字宽度”的换边/居中偏移空间。
+     * null 表示不设下限，hug 行为不变。
+     */
+    internal var hugWidthFloor: Int? = null
 
     var isWordCharMotionEnabled: Boolean
         get() = syncRenderer.isCharMotionEnabled
@@ -199,6 +234,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     fun setLyric(rawLine: LyricLine?) {
         val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
 
+        traceSwitch("before_bind", dumpHistory = true)
         reset()
         scrollUnlocked = false
         scrollStarted = false
@@ -208,6 +244,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         activeRenderer = if (_model.isPlainText) scrollRenderer else syncRenderer
         refreshSizes()
         updateColorsIfReady()
+        traceSwitch("after_bind")
         invalidate()
     }
 
@@ -251,13 +288,48 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         if (isStaticPreview) return
         doOnAttach {
             if (isStaticPreview) return@doOnAttach
+            if (!scrollUnlocked) {
+                MarqueeDiag.d(this, "unlocked") { "overflow=$isOverflow playing=$playbackActive" }
+            }
             scrollUnlocked = true
             if (isPlainText && playbackActive) startScrolling()
         }
     }
 
+    /**
+     * 换句切换过渡（淡出窗口）暂停滚动/逐字步进：布局冻结管不住 draw 层动画，
+     * 淡出中的旧句若继续滚动，视觉上就是"换句前位置先移动"。暂停让旧句在被
+     * 替换前像素级静止；新内容落地后由正常进度 tick 恢复。
+     */
+    private var contentSwitchPaused = false
+    private val switchTrace = if (BuildConfig.DEBUG) LyricSwitchTrace(this) else null
+
+    private fun traceSwitch(event: String, dumpHistory: Boolean = false) {
+        if (!BuildConfig.DEBUG || !hugContentWidth || _model.text.isEmpty()) return
+        if (spaceGateEnabled) return // Split rendering has a separate virtual canvas.
+        switchTrace?.record(
+            event, _model, scrollWidth, lineState.scrollOffset,
+            centerIfPossible, alignRight, contentSwitchPaused,
+            animator.isFrameLoopRunning, dumpHistory
+        )
+    }
+
+    fun pauseForContentSwitch() {
+        if (contentSwitchPaused) return
+        traceSwitch("before_pause", dumpHistory = true)
+        contentSwitchPaused = true
+        animator.stop()
+        invalidate()
+    }
+
+    fun resumeFromContentSwitch() {
+        if (!contentSwitchPaused) return
+        contentSwitchPaused = false
+        invalidate()
+    }
+
     fun seekTo(posMs: Long) {
-        if (isStaticPreview) return
+        if (contentSwitchPaused || isStaticPreview) return
         if (isInterludeIndicator) {
             interludeDotsRenderer.updatePosition(posMs)
             invalidate()
@@ -280,7 +352,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     }
 
     fun updatePosition(posMs: Long) {
-        if (isStaticPreview) return
+        if (contentSwitchPaused || isStaticPreview) return
         if (isInterludeIndicator) {
             interludeDotsRenderer.updatePosition(posMs)
             if (playbackActive) {
@@ -332,6 +404,10 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     }
 
     private fun resumePlaybackAnimation() {
+        if (contentSwitchPaused) {
+            traceSwitch("resume_blocked_while_switch_paused")
+            return
+        }
         if (isPlainText) {
             if (!scrollUnlocked) return
             if (!scrollStarted) {
@@ -349,7 +425,10 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     }
 
     fun relayout() {
+        traceSwitch("before_relayout")
+        ensureGateSplit()
         if (isWordSync) syncRenderer.updateLayout(_model, lineState, getSpaceGateVirtualWidth(), measuredHeight)
+        traceSwitch("after_relayout")
     }
 
     override fun updateColor(primary: IntArray, background: IntArray, highlight: IntArray) {
@@ -371,6 +450,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         lineShadowRenderer.clear()
         _model = emptyLyricModel()
         activeRenderer = scrollRenderer
+        lastWidthOverflow = null
         refreshSizes()
         invalidate()
     }
@@ -386,19 +466,108 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             refreshSizes()
             updateColorsIfReady()
         }
+        if (w != oldw && w > 0) {
+            MarqueeDiag.d(this, "width_changed") {
+                "w=$w oldw=$oldw overflow=$isOverflow lineWidth=$lineWidth virtualWidth=${getSpaceGateVirtualWidth()}"
+            }
+            onAvailableWidthChanged()
+        }
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        evaluateShownRecovery()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        evaluateShownRecovery()
+    }
+
+    /** 上一次可见性评估结果；null 表示尚未评估过。语义见 LyricLineView.evaluateShownRecovery。 */
+    private var lastShownState: Boolean? = null
+
+    private fun evaluateShownRecovery() {
+        val shown = isShown
+        val previous = lastShownState
+        lastShownState = shown
+        if (previous == null || previous == shown) return
+        MarqueeDiag.i(this, "shown_flip") {
+            "shown=$shown overflow=$isOverflow unlocked=$scrollUnlocked " +
+                "started=$scrollStarted rendererPlaying=${scrollRenderer.isPlaying} " +
+                "frameRunning=${animator.isFrameLoopRunning}"
+        }
+        if (!shown) return
+        if (!MarqueeRestartPolicy.canResumeFrameLoopOnShown(
+                playbackActive = playbackActive,
+                isStaticPreview = isStaticPreview,
+                isPlainText = isPlainText,
+                scrollUnlocked = scrollUnlocked,
+                isOverflow = isOverflow,
+                rendererPlaying = scrollRenderer.isPlaying,
+                frameLoopRunning = animator.isFrameLoopRunning,
+            )
+        ) {
+            return
+        }
+        MarqueeDiag.i(this, "shown_resume") { "帧回调在隐藏窗口死亡，重新可见后续播" }
+        animator.startIfNeeded()
+    }
+
+    /** 上一次宽度评估时的溢出状态基线，语义见 LyricLineView.lastWidthOverflow。 */
+    private var lastWidthOverflow: Boolean? = null
+
+    /**
+     * See LyricLineView.onAvailableWidthChanged. 拼接模式下溢出判定用的是左右
+     * 两个槽位的虚拟总宽：任一侧槽宽变化都会改变另一侧的溢出结论，所以触发时
+     * 通知对侧视图重新评估（通知不再回传，避免互相递归）。
+     */
+    private fun onAvailableWidthChanged(notifySibling: Boolean = true) {
+        if (notifySibling) {
+            siblingView?.onAvailableWidthChanged(notifySibling = false)
+        }
+        if (!isRightSide && spaceGateEnabled) return // Slave delegates animation
+        val newOverflow = isOverflow
+        val previous = lastWidthOverflow
+        lastWidthOverflow = newOverflow
+        val canRestart = MarqueeRestartPolicy.canRestartOnWidthChange(
+            playbackActive = playbackActive,
+            isStaticPreview = isStaticPreview,
+            isPlainText = isPlainText,
+            scrollUnlocked = scrollUnlocked,
+            previousOverflow = previous,
+            isOverflow = newOverflow,
+            isShown = isShown,
+            rendererPlaying = scrollRenderer.isPlaying,
+            frameLoopRunning = animator.isFrameLoopRunning,
+        )
+        MarqueeDiag.i(this, "width_flip_eval") {
+            "prev=$previous new=$newOverflow restarted=$canRestart " +
+                "playing=$playbackActive unlocked=$scrollUnlocked started=$scrollStarted " +
+                "shown=$isShown rendererPlaying=${scrollRenderer.isPlaying} " +
+                "frameRunning=${animator.isFrameLoopRunning}"
+        }
+        if (!canRestart) {
+            return
+        }
+        scrollStarted = false
+        startScrolling()
     }
 
     override fun onDraw(canvas: Canvas) {
         if (!spaceGateEnabled) {
-            drawContent(canvas, measuredWidth)
+            drawContent(canvas, scrollWidth)
             return
         }
 
         val master = if (isRightSide) this else siblingView
         if (master == null) {
-            drawContent(canvas, measuredWidth)
+            // 无对端时退回单槽渲染，挖孔引用一并清掉，避免残留分段绘制。
+            if (gateSplitKey != null) clearGateSplit()
+            drawContent(canvas, scrollWidth)
             return
         }
+        ensureGateSplit()
 
         val sibling = siblingView
         val (leftView, rightView) = if (isRightSide) {
@@ -434,6 +603,57 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         }
     }
 
+    /**
+     * 计算并缓存挖孔布局。左右两槽基于同一行内容与同一组几何输入独立计算，
+     * 结果确定性一致；键命中即跳过。失效后同步清空两个渲染器的挖孔引用。
+     */
+    private fun ensureGateSplit() {
+        val sibling = siblingView
+        if (!spaceGateEnabled || sibling == null) {
+            if (gateSplitKey != null) clearGateSplit()
+            return
+        }
+        val leftView = if (isRightSide) sibling else this
+        val rightView = if (isRightSide) this else sibling
+        fun laidOutWidth(view: SpaceGateLyricLineView): Int =
+            view.width.takeIf { it > 0 } ?: view.measuredWidth
+        val leftWidth = laidOutWidth(leftView)
+        val rightWidth = laidOutWidth(rightView)
+        val key = listOf<Any?>(
+            _model.text,
+            _model.wordText,
+            _model.width.toBits(),
+            textPaint.textSize.toBits(),
+            leftWidth,
+            rightWidth,
+            centerIfPossible,
+            alignRight,
+            _model.isAlignedRight,
+        )
+        if (key == gateSplitKey) return
+        gateSplitKey = key
+        val computed = GateSplitLayout.compute(
+            model = _model,
+            paint = textPaint,
+            typefaceSelector = currentTypefaceSelector,
+            leftWidth = leftWidth,
+            rightWidth = rightWidth,
+            virtualWidth = maxOf(scrollWidth, leftWidth + rightWidth),
+            centerIfPossible = centerIfPossible,
+            alignRight = alignRight,
+        )
+        cachedGateSplit = computed
+        scrollRenderer.gateSplit = computed
+        syncRenderer.gateSplit = computed
+    }
+
+    private fun clearGateSplit() {
+        gateSplitKey = null
+        cachedGateSplit = null
+        scrollRenderer.gateSplit = null
+        syncRenderer.gateSplit = null
+    }
+
     private fun drawContent(canvas: Canvas, availableWidth: Int) {
         if (interludeDotsRenderer.isIndicator(_model)) {
             interludeDotsRenderer.draw(
@@ -455,6 +675,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     }
 
     private fun drawShadowAndContent(canvas: Canvas, availableWidth: Int) {
+        traceSwitch("draw")
         lineShadowRenderer.draw(
             canvas = canvas,
             model = _model,
@@ -467,13 +688,14 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             centerIfPossible = centerIfPossible,
             alignRight = alignRight,
             ghostSpacing = ghostSpacing,
+            gateSplit = cachedGateSplit,
         )
         textPaint.withoutShadowLayer {
             activeRenderer.draw(canvas, _model, textPaint, lineState, availableWidth, measuredHeight)
         }
     }
 
-    private fun currentFontSignature(): Int =
+    internal fun currentFontSignature(): Int =
         31 * System.identityHashCode(baseTypeface) + System.identityHashCode(narrowTypeface)
 
     private fun findGateRoot(view: View): View? {
@@ -484,9 +706,15 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         return current as? View
     }
 
+    /**
+     * 跑马灯判定与滚动使用的可见宽度：布局宽度优先，语义见 LyricLineView.scrollWidth。
+     */
+    val scrollWidth: Int
+        get() = width.takeIf { it > 0 } ?: measuredWidth
+
     private fun getSpaceGateVirtualWidth(): Int {
-        if (!spaceGateEnabled) return measuredWidth
-        val master = if (isRightSide) this else siblingView ?: return measuredWidth
+        if (!spaceGateEnabled) return scrollWidth
+        val master = if (isRightSide) this else siblingView ?: return scrollWidth
 
         val sibling = siblingView
         val (leftView, rightView) = if (isRightSide) {
@@ -495,8 +723,13 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
             Pair(this, sibling ?: this)
         }
 
-        val virtualWidth = leftView.width + rightView.width
-        return maxOf(measuredWidth, virtualWidth)
+        // 两侧都按布局宽度取值（未布局时回退测量宽度），避免瞬态测量把
+        // 虚拟总宽撑大、令溢出判定失效。
+        fun laidOutWidth(view: SpaceGateLyricLineView): Int =
+            view.width.takeIf { it > 0 } ?: view.measuredWidth
+
+        val virtualWidth = laidOutWidth(leftView) + laidOutWidth(rightView)
+        return maxOf(scrollWidth, virtualWidth)
     }
 
     override fun getLeftFadingEdgeStrength(): Float {
@@ -539,7 +772,8 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     }
 
     override fun onMeasure(wSpec: Int, hSpec: Int) {
-        val w = MeasureSpec.getSize(wSpec)
+        val specW = MeasureSpec.getSize(wSpec)
+        val w = if (hugContentWidth) resolveHugContentWidth(specW) else specW
         val charMotionPadding = if (isWordCharMotionEnabled) {
             val maxLift = maxOf(wordMotion.cjkLiftFactor, wordMotion.latinLiftFactor)
             ceil(textPaint.textSize * maxLift).toInt()
@@ -548,6 +782,58 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
         }
         val textHeight = (textPaint.descent() - textPaint.ascent()).toInt() + charMotionPadding
         setMeasuredDimension(w, resolveSize(textHeight, hSpec))
+    }
+
+    private fun resolveHugContentWidth(specWidth: Int): Int {
+        val shadowRadius = textPaint.getShadowLayerRadius()
+        val shadowPad = if (shadowRadius > 0f) {
+            ceil(shadowRadius + abs(textPaint.getShadowLayerDx())).toInt()
+        } else {
+            0
+        }
+        val hugWithFloor = maxOf(ceil(lineWidth).toInt() + shadowPad, hugWidthFloor ?: 0)
+        // 两种测量角色分开（160156/160157 各错一半）：
+        // - 岛宽计算探测窗口内报告固有宽度（不被 spec 截断），计算输入恒定，岛宽不振荡；
+        // - 窗口外的真实布局测量按可用宽度截断，行布局与绘制不超出实际胶囊。
+        // floor 未设置时保持原行为：超长行回到可用宽度并沿用滚动。
+        val hug = when {
+            hugWidthFloor == null -> hugWithFloor.coerceIn(0, specWidth)
+            LyricHugMeasureWindow.reportIntrinsicWidth -> hugWithFloor
+            else -> hugWithFloor.coerceIn(0, specWidth)
+        }
+        if (BuildConfig.DEBUG) {
+            HookLogger.d(
+                "LyricHug",
+                "slot=${(parent as? View)?.tag}, lineWidth=$lineWidth, shadowPad=$shadowPad, " +
+                    "spec=$specWidth, floor=${hugWidthFloor ?: 0}, final=$hug, " +
+                    "view=${System.identityHashCode(this).toString(16)}"
+            )
+        }
+        return hug
+    }
+
+    /**
+     * 用本视图当前的绘制参数（字号/字体选择器/阴影/间奏点）测量一行歌词
+     * 落定后的 hug 宽度，不改变视图任何状态。
+     * 与 [setLyric] 后的 [lineWidth] 实测走同一条管线，用于动态长度在
+     * 预览提升动画期间同步预判内容落地后的岛宽。
+     */
+    fun measureIncomingHugWidth(rawLine: LyricLine?): Int {
+        val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
+        val model = line?.normalize()?.createModel() ?: return 0
+        val width = if (interludeDotsRenderer.isIndicator(model)) {
+            interludeDotsRenderer.width(textPaint.textSize)
+        } else {
+            model.updateSizes(textPaint, currentTypefaceSelector)
+            model.width
+        }
+        val shadowRadius = textPaint.getShadowLayerRadius()
+        val shadowPad = if (shadowRadius > 0f) {
+            ceil(shadowRadius + abs(textPaint.getShadowLayerDx())).toInt()
+        } else {
+            0
+        }
+        return ceil(width).toInt() + shadowPad
     }
 
     override fun onVisibilityAggregated(isVisible: Boolean) {
@@ -561,15 +847,36 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        MarqueeDiag.i(this, "detached") {
+            "reset 会清空 unlocked/started/宽度基线：overflow=$isOverflow"
+        }
         reset()
     }
 
     private fun startScrolling() {
         if (!isRightSide && spaceGateEnabled) return // Slave delegates animation
-        if (!playbackActive || isStaticPreview || !isPlainText || !scrollUnlocked || scrollStarted) return
+        // See LyricLineView.startScrolling: the overflow test must gate the latch, otherwise
+        // the marquee is permanently unavailable when the first request ran before the final
+        // dynamic width existed.
+        val canStart = MarqueeStartPolicy.canStart(
+            playbackActive = playbackActive,
+            isStaticPreview = isStaticPreview,
+            isPlainText = isPlainText,
+            scrollUnlocked = scrollUnlocked,
+            scrollStarted = scrollStarted,
+            isOverflow = isOverflow,
+        )
+        MarqueeDiag.d(this, if (canStart) "start_latch" else "start_skip") {
+            "overflow=$isOverflow lineWidth=$lineWidth virtualWidth=${getSpaceGateVirtualWidth()} " +
+                "playing=$playbackActive unlocked=$scrollUnlocked started=$scrollStarted " +
+                "shown=$isShown frameRunning=${animator.isFrameLoopRunning} " +
+                "rendererPlaying=${scrollRenderer.isPlaying}"
+        }
+        if (!canStart) {
+            return
+        }
         scrollStarted = true
         lineState.reset()
-        if (!isOverflow) return
         post {
             scrollRenderer.update(_model, lineState, 0, getSpaceGateVirtualWidth(), measuredHeight)
             animator.stop()
@@ -615,11 +922,15 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
     private inner class Animator : Choreographer.FrameCallback {
         private var running = false
         private var lastFrameNanos = 0L
+        private var lastReportedFinished = false
+
+        val isFrameLoopRunning: Boolean get() = running
 
         fun startIfNeeded() {
             if (!isRightSide && spaceGateEnabled) return // Slave doesn't run frame callback
             if (playbackActive && !running && isAttachedToWindow && isShown) {
                 running = true
+                lastReportedFinished = false
                 lastFrameNanos = 0L
                 post { Choreographer.getInstance().postFrameCallback(this) }
             }
@@ -637,6 +948,7 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
                 return
             }
 
+            ensureGateSplit()
             val virtualWidth = getSpaceGateVirtualWidth()
             val deltaNanos = if (lastFrameNanos == 0L) 0L else frameTimeNanos - lastFrameNanos
             lastFrameNanos = frameTimeNanos
@@ -647,6 +959,15 @@ open class SpaceGateLyricLineView(context: Context, attrs: AttributeSet? = null)
                 postInvalidateOnAnimation()
                 siblingView?.postInvalidateOnAnimation()
             }
+
+            val finishedNow = renderer.isFinished
+            if (finishedNow && !lastReportedFinished) {
+                MarqueeDiag.i(this@SpaceGateLyricLineView, "renderer_finished") {
+                    "overflow=$isOverflow virtualWidth=$virtualWidth lineWidth=$lineWidth " +
+                        "stopAtEnd=${scrollRenderer.stopAtEnd} repeat=${scrollRenderer.repeatCount}"
+                }
+            }
+            lastReportedFinished = finishedNow
 
             if (running && renderer.isPlaying) {
                 Choreographer.getInstance().postFrameCallback(this)

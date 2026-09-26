@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.amprovider.xposed
 
 import com.juren233.hyperlyricsenhanced.BuildConfig
+import java.util.concurrent.atomic.AtomicLong
 
 internal enum class AppleMediaApiTextAttribute(
     val getterRuntimeMember: AppleMusicRuntimeMember,
@@ -36,18 +37,18 @@ internal interface AppleMediaApiMetadataHost {
         analyzeMetadata: Boolean,
     )
 
-    fun effectiveAlias(mediaId: String): AppleInternalCatalogResolver.Alias?
+    fun effectiveAlias(mediaId: String): Alias?
 
     fun applyAliasToPlaybackItem(
         playbackItem: Any,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         notifyChange: Boolean,
     )
 
     fun shouldShareOriginalSongLanguage(
         localizedTitle: String?,
         localizedArtist: String?,
-        alias: AppleInternalCatalogResolver.Alias?,
+        alias: Alias?,
     ): Boolean
 
     fun rememberOriginalLanguageForArtist(mediaId: String, language: String)
@@ -58,7 +59,7 @@ internal interface AppleMediaApiMetadataHost {
 
     fun applyAliasToMetadataRefs(
         mediaId: String,
-        alias: AppleInternalCatalogResolver.Alias,
+        alias: Alias,
         forceRebind: Boolean,
         notifyModelChange: Boolean,
     )
@@ -67,7 +68,7 @@ internal interface AppleMediaApiMetadataHost {
 
     fun scheduleMetadataResolution(
         mediaIds: Collection<String>,
-        priority: AppleInternalCatalogResolver.RequestPriority,
+        priority: RequestPriority,
         originalResolutionMode: InAppOriginalResolutionMode,
     )
 
@@ -312,7 +313,7 @@ internal class AppleMediaApiMetadataCoordinator(
             metadataStore.sharedOriginalArtist(artistId),
             catalogResolver.cachedLocalizedMetadata(
                 selection = selection,
-                entityType = AppleInternalCatalogResolver.LocalizedEntityType.ARTIST,
+                entityType = LocalizedEntityType.ARTIST,
                 mediaId = artistId,
             ),
             catalogResolver.cachedLocalizedArtist(
@@ -404,7 +405,7 @@ internal class AppleMediaApiMetadataCoordinator(
             if (host.shouldRequestOverride(mediaId)) {
                 host.scheduleMetadataResolution(
                     mediaIds = listOf(mediaId),
-                    priority = AppleInternalCatalogResolver.RequestPriority.VISIBLE,
+                    priority = RequestPriority.VISIBLE,
                     originalResolutionMode = InAppOriginalResolutionMode.ORIGINAL_FIRST,
                 )
             }
@@ -429,7 +430,7 @@ internal class AppleMediaApiMetadataCoordinator(
         album: String?,
     ): Set<String> = buildSet {
         artist?.takeIf(String::isNotBlank)?.let { value ->
-            add("name:${AppleInternalCatalogResolver.normalizedArtistNameKey(value)}")
+            add("name:${normalizedArtistNameKey(value)}")
         }
         val albumName = when (kind) {
             InAppLibraryEntityKind.ALBUM -> name
@@ -437,11 +438,11 @@ internal class AppleMediaApiMetadataCoordinator(
             InAppLibraryEntityKind.ARTIST -> null
         }
         albumName?.takeIf(String::isNotBlank)?.let { value ->
-            add("album:${AppleInternalCatalogResolver.normalizedArtistNameKey(value)}")
+            add("album:${normalizedArtistNameKey(value)}")
         }
         if (kind == InAppLibraryEntityKind.ARTIST) {
             name?.takeIf(String::isNotBlank)?.let { value ->
-                add("name:${AppleInternalCatalogResolver.normalizedArtistNameKey(value)}")
+                add("name:${normalizedArtistNameKey(value)}")
             }
         }
     }
@@ -479,7 +480,7 @@ internal class AppleMediaApiMetadataCoordinator(
                 }
                 ?.takeIf(String::isNotBlank)
                 ?.let { artistName ->
-                    add("name:${AppleInternalCatalogResolver.normalizedArtistNameKey(artistName)}")
+                    add("name:${normalizedArtistNameKey(artistName)}")
                 }
         }
     }
@@ -521,4 +522,93 @@ internal class AppleMediaApiMetadataCoordinator(
 
     private fun catalogMember(member: AppleMusicRuntimeMember): String =
         catalogTarget.runtimeMemberName(member)
+}
+
+/**
+ * Media API 元数据协调器的默认宿主实现：orchestrator 依赖以 supplier 显式注入，保持原匿名
+ * 实现"调用期解析"的语义；traceSequence 为根单例构造期值可直捕。
+ */
+internal class DefaultAppleMediaApiMetadataHost(
+    private val contentItemMediaIdFn: (Any) -> String?,
+    private val registerPlaybackItemFn: (String, Any, Boolean, Boolean) -> Unit,
+    private val effectiveAliasFn: (String) -> Alias?,
+    private val applyAliasToPlaybackItemFn: (Any, Alias, Boolean) -> Unit,
+    private val shouldShareOriginalSongLanguageFn: (String?, String?, Alias?) -> Boolean,
+    private val rememberOriginalLanguageForArtistFn: (String, String) -> Unit,
+    private val hydrateSharedArtistOverridesFn: (String) -> Unit,
+    private val markMetadataVisibleFn: (Collection<String>) -> Unit,
+    private val applyAliasToMetadataRefsFn: (String, Alias, Boolean, Boolean) -> Unit,
+    private val shouldRequestOverrideFn: (String) -> Boolean,
+    private val scheduleMetadataResolutionFn: (
+        Collection<String>, RequestPriority, InAppOriginalResolutionMode,
+    ) -> Unit,
+    private val configuredContentUiLanguageFn: () -> Int,
+    private val traceSequence: AtomicLong,
+) : AppleMediaApiMetadataHost {
+    override fun contentItemMediaId(contentItem: Any): String? =
+        contentItemMediaIdFn(contentItem)
+
+    override fun registerPlaybackItem(
+        mediaId: String,
+        playbackItem: Any,
+        notifyChange: Boolean,
+        analyzeMetadata: Boolean,
+    ) {
+        registerPlaybackItemFn(mediaId, playbackItem, notifyChange, analyzeMetadata)
+    }
+
+    override fun effectiveAlias(mediaId: String): Alias? =
+        effectiveAliasFn(mediaId)
+
+    override fun applyAliasToPlaybackItem(
+        playbackItem: Any,
+        alias: Alias,
+        notifyChange: Boolean,
+    ) {
+        applyAliasToPlaybackItemFn(playbackItem, alias, notifyChange)
+    }
+
+    override fun shouldShareOriginalSongLanguage(
+        localizedTitle: String?,
+        localizedArtist: String?,
+        alias: Alias?,
+    ): Boolean = shouldShareOriginalSongLanguageFn(localizedTitle, localizedArtist, alias)
+
+    override fun rememberOriginalLanguageForArtist(mediaId: String, language: String) {
+        rememberOriginalLanguageForArtistFn(mediaId, language)
+    }
+
+    override fun hydrateSharedArtistOverrides(mediaId: String) {
+        hydrateSharedArtistOverridesFn(mediaId)
+    }
+
+    override fun markMetadataVisible(mediaIds: Collection<String>) {
+        markMetadataVisibleFn(mediaIds)
+    }
+
+    override fun applyAliasToMetadataRefs(
+        mediaId: String,
+        alias: Alias,
+        forceRebind: Boolean,
+        notifyModelChange: Boolean,
+    ) {
+        applyAliasToMetadataRefsFn(mediaId, alias, forceRebind, notifyModelChange)
+    }
+
+    override fun shouldRequestOverride(mediaId: String): Boolean =
+        shouldRequestOverrideFn(mediaId)
+
+    override fun scheduleMetadataResolution(
+        mediaIds: Collection<String>,
+        priority: RequestPriority,
+        originalResolutionMode: InAppOriginalResolutionMode,
+    ) {
+        scheduleMetadataResolutionFn(mediaIds, priority, originalResolutionMode)
+    }
+
+    override fun configuredContentUiLanguage(): Int =
+        configuredContentUiLanguageFn()
+
+    override fun nextTraceSequence(): Long =
+        traceSequence.incrementAndGet()
 }

@@ -18,6 +18,8 @@ internal data class IslandSlotRuntimeConfig(
     val rightPaddingRightDp: Int,
     val leftMaxWidthDp: Int,
     val rightMaxWidthDp: Int,
+    val dynamicWidthEnabled: Boolean,
+    val duetFixedLengthEnabled: Boolean,
     val pauseBehavior: Int,
     val forceNextSongAtEnd: Boolean,
     val nextSongDurationSeconds: Int,
@@ -66,20 +68,53 @@ internal data class IslandSlotRuntimeConfig(
     val wordMotionCjkWave: Float,
     val wordMotionLatinLift: Float,
     val wordMotionLatinWave: Float,
+    val dynamicLimitEnabled: Boolean = false,
 ) {
     val translationDisplay: Boolean
         get() = translationDisplayMode != RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF
 
     val isSplitMode: Boolean
-        get() = activeMode == 1
+        get() = activeMode == RootConstants.HOOK_LYRIC_MODE_SPLIT
 
     fun lyricPosition(isLeft: Boolean): Int = if (isLeft) leftLyricPosition else rightLyricPosition
 
+    // 分离模式两槽是同一条文本带，两侧位置显示整体按默认处理：
+    // 任意一侧被居中/靠右偏好单独挪动都会撕开拼接视口。
     fun centerLyric(isLeft: Boolean): Boolean =
-        IslandLyricPosition.centers(lyricPosition(isLeft))
+        !isSplitMode && IslandLyricPosition.centers(lyricPosition(isLeft))
 
     fun rightAlignLyric(isLeft: Boolean): Boolean =
-        IslandLyricPosition.alignsRight(lyricPosition(isLeft))
+        !isSplitMode && IslandLyricPosition.alignsRight(lyricPosition(isLeft))
+
+    /**
+     * Horizontal placement for content-width slots. Apply this at both the
+     * injected wrapper and the native module boundary: aligning only the inner
+     * wrapper cannot override the right native module's END layout gravity.
+     */
+    fun wrapperHorizontalGravity(isLeft: Boolean): Int = when {
+        centerLyric(isLeft) -> android.view.Gravity.CENTER_HORIZONTAL
+        rightAlignLyric(isLeft) -> android.view.Gravity.END
+        else -> android.view.Gravity.START
+    }
+
+    /**
+     * 动态长度下歌词槽的行级对唱锚点：位置偏好为「默认」时，行级右对唱
+     * （isAlignedRight）必须把 wrapper 与原生模块整体锚到 END 才可见——
+     * 原生机型公式把左右 area 镜像成等宽，多出的镜像余量在 wrapper 之外，
+     * 行内偏移够不到（160169 真机：42px 模块内部 + 27px area 余量全部留在右侧）。
+     * 只在歌词槽（模式 7）且用户未显式选居中/靠右时生效；读「已绑定行」，
+     * 淡出窗口内保持旧句方向，与内容同点落地。
+     */
+    fun wrapperHorizontalGravity(isLeft: Boolean, duetLineAlignedRight: Boolean?): Int {
+        val base = wrapperHorizontalGravity(isLeft)
+        // 分离模式两槽共享同一条文本带，任一侧 wrapper 被对唱锚点单独挪动
+        // 都会让两个视口错位；对唱方向交给行级 isAlignedRight 在带内表达。
+        if (isSplitMode) return base
+        if (duetLineAlignedRight != true || !dynamicWidthEnabled) return base
+        if (centerLyric(isLeft) || rightAlignLyric(isLeft)) return base
+        val isLyricSlot = (if (isLeft) leftMode else rightMode) == 7
+        return if (isLyricSlot) android.view.Gravity.END else base
+    }
 
     val groupVocalCenteringEnabled: Boolean
         get() = IslandLyricPosition.supportsGroupVocalCentering(
@@ -91,6 +126,9 @@ internal data class IslandSlotRuntimeConfig(
     val styleSignature: String = listOf(
         activeMode,
         textSizeSp,
+        dynamicWidthEnabled,
+        duetFixedLengthEnabled,
+        dynamicLimitEnabled,
         textSizeRatio,
         fontWeight,
         fontItalic,
@@ -150,7 +188,7 @@ internal data class IslandSlotRuntimeConfig(
         get() = AdjacentTranslationPolicy.targetIsLeft(leftMode, rightMode)
 
     val shouldInjectLeft: Boolean
-        get() = leftMode != 0 ||
+        get() = (dynamicLimitEnabled || leftMaxWidthDp > 0) && (leftMode != 0 ||
             nextSongPreviewStyle == RootConstants.ISLAND_NEXT_SONG_PREVIEW_STYLE_FULL ||
             (
                 nextSongPreviewStyle == RootConstants.ISLAND_NEXT_SONG_PREVIEW_STYLE_HALF &&
@@ -159,10 +197,10 @@ internal data class IslandSlotRuntimeConfig(
             adjacentBackgroundTranslation &&
                 supportsAdjacentBackgroundTranslation &&
                 adjacentTranslationTargetIsLeft == true
-            )
+            ))
 
     val shouldInjectRight: Boolean
-        get() = rightMode != 0 ||
+        get() = (dynamicLimitEnabled || rightMaxWidthDp > 0) && (rightMode != 0 ||
             nextSongPreviewStyle == RootConstants.ISLAND_NEXT_SONG_PREVIEW_STYLE_FULL ||
             (
                 nextSongPreviewStyle == RootConstants.ISLAND_NEXT_SONG_PREVIEW_STYLE_HALF &&
@@ -171,7 +209,7 @@ internal data class IslandSlotRuntimeConfig(
             adjacentBackgroundTranslation &&
                 supportsAdjacentBackgroundTranslation &&
                 adjacentTranslationTargetIsLeft == false
-            )
+            ))
 
     val nextSongPreviewEnabled: Boolean
         get() = nextSongPreviewStyle != RootConstants.ISLAND_NEXT_SONG_PREVIEW_STYLE_NONE
@@ -212,13 +250,23 @@ internal data class IslandSlotRuntimeConfig(
     }
 
     fun paddingRightDp(parentName: String): Int {
-        return if (isLeftParent(parentName)) leftPaddingRightDp else rightPaddingRightDp
+        val base = if (isLeftParent(parentName)) leftPaddingRightDp else rightPaddingRightDp
+        // 律动图标与注入内容在模块内各自布局，间隔只能由内容包装层的右内边距提供。
+        return if (!isLeftParent(parentName) && showRhythm) base + RHYTHM_TRAILING_GAP_DP else base
     }
 
     fun widthPx(rootView: View, parentName: String): Int? {
-        val maxWidthDp = maxWidthDp(parentName)
+        val metrics = rootView.resources.displayMetrics
+        return contentWidthPx(metrics.widthPixels, metrics.density, isLeftParent(parentName))
+    }
+
+    internal fun contentWidthPx(screenWidthPx: Int, density: Float, isLeft: Boolean): Int? {
+        // Automatic mode uses a physical measurement bound; the native-result limiter
+        // supplies the final status-bar-safe geometry, including cover and cutout space.
+        if (dynamicLimitEnabled) return (screenWidthPx / 2).coerceAtLeast(1)
+        val maxWidthDp = if (isLeft) leftMaxWidthDp else rightMaxWidthDp
         if (maxWidthDp <= 0) return null
-        return (maxWidthDp * rootView.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        return (maxWidthDp * density).toInt().coerceAtLeast(1)
     }
 
     fun paddingLeftPx(rootView: View, parentName: String): Int {
@@ -230,6 +278,9 @@ internal data class IslandSlotRuntimeConfig(
     }
 
     companion object {
+        /** 音频律动开启时，右槽注入内容与律动图标之间的固定间隔。 */
+        internal const val RHYTHM_TRAILING_GAP_DP = 6
+
         internal fun resolveNextSongPreviewStyle(
             hasStoredStyle: Boolean,
             storedStyle: Int,
@@ -289,6 +340,9 @@ internal data class IslandSlotRuntimeConfig(
         }
 
         fun from(prefs: SharedPreferences): IslandSlotRuntimeConfig {
+            val dynamicLimitEnabled = runtimeBoolean(prefs,
+                RootConstants.KEY_HOOK_ISLAND_DYNAMIC_LIMIT,
+                RootConstants.DEFAULT_HOOK_ISLAND_DYNAMIC_LIMIT)
             val activeMode = runtimeInt(
                 prefs,
                 RootConstants.KEY_HOOK_LYRIC_MODE,
@@ -320,8 +374,15 @@ internal data class IslandSlotRuntimeConfig(
                 leftPaddingRightDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_LEFT_PADDING_RIGHT, RootConstants.DEFAULT_HOOK_ISLAND_LEFT_PADDING_RIGHT),
                 rightPaddingLeftDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_RIGHT_PADDING_LEFT, RootConstants.DEFAULT_HOOK_ISLAND_RIGHT_PADDING_LEFT),
                 rightPaddingRightDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_RIGHT_PADDING_RIGHT, RootConstants.DEFAULT_HOOK_ISLAND_RIGHT_PADDING_RIGHT),
-                leftMaxWidthDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH, RootConstants.DEFAULT_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH),
-                rightMaxWidthDp = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH, RootConstants.DEFAULT_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH),
+                // Do not even read manual lengths while automatic control is active.
+                leftMaxWidthDp = if (dynamicLimitEnabled) 0 else runtimeInt(prefs, RootConstants.KEY_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH, RootConstants.DEFAULT_HOOK_ISLAND_LEFT_CONTENT_MAX_WIDTH),
+                rightMaxWidthDp = if (dynamicLimitEnabled) 0 else runtimeInt(prefs, RootConstants.KEY_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH, RootConstants.DEFAULT_HOOK_ISLAND_RIGHT_CONTENT_MAX_WIDTH),
+                dynamicLimitEnabled = dynamicLimitEnabled,
+                dynamicWidthEnabled = prefs.getBoolean(RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH, RootConstants.DEFAULT_HOOK_ISLAND_DYNAMIC_WIDTH),
+                duetFixedLengthEnabled = prefs.getBoolean(
+                    RootConstants.KEY_HOOK_ISLAND_DUET_FIXED_LENGTH,
+                    RootConstants.DEFAULT_HOOK_ISLAND_DUET_FIXED_LENGTH
+                ),
                 pauseBehavior = prefs.getInt(RootConstants.KEY_HOOK_ISLAND_BEHAVIOR_AFTER_PAUSE, RootConstants.DEFAULT_HOOK_ISLAND_BEHAVIOR_AFTER_PAUSE),
                 forceNextSongAtEnd = prefs.getBoolean(
                     RootConstants.KEY_HOOK_ISLAND_FORCE_NEXT_SONG_AT_END,

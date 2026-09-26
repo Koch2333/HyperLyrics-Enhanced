@@ -1,6 +1,7 @@
 package com.juren233.hyperlyricsenhanced.root
 
 import android.os.SystemClock
+import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.lyric.LyricMetadataKeys
 import com.juren233.hyperlyricsenhanced.lyric.model.RichLyricLine
 import com.juren233.hyperlyricsenhanced.lyric.model.Song
@@ -15,6 +16,7 @@ import com.juren233.hyperlyricsenhanced.lyric.view.TitleSlot
 import com.juren233.hyperlyricsenhanced.provider.OfficialProviderCatalog
 import com.juren233.hyperlyricsenhanced.root.utils.DisplayDiagnosticLogger
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
+import com.juren233.hyperlyricsenhanced.root.utils.MediaCardDiagnosticLogger
 
 object LyriconDataBridge : StateResetter {
 
@@ -64,7 +66,23 @@ object LyriconDataBridge : StateResetter {
     /** AI 翻译完成后的回调，由 LyriconSource 设置 */
     var onAiTranslationComplete: (() -> Unit)? = null
 
+    private val songChangedListeners =
+        java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addSongChangedListener(listener: () -> Unit) {
+        songChangedListeners.add(listener)
+    }
+
+    fun removeSongChangedListener(listener: () -> Unit) {
+        songChangedListeners.remove(listener)
+    }
+
     fun updateLyricPackage(packageName: String?) {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "package_update_begin",
+            details = "incomingPackage=${MediaCardDiagnosticLogger.sanitize(packageName)}",
+        )
         activePackageName = packageName
         currentLyricPackageName = packageName
         DisplayDiagnosticLogger.log(
@@ -72,6 +90,43 @@ object LyriconDataBridge : StateResetter {
             result = if (packageName.isNullOrBlank()) "skipped" else "accepted",
             reason = if (packageName.isNullOrBlank()) "package_missing" else "package_updated",
         )
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "package_update_complete",
+            details = "package=${MediaCardDiagnosticLogger.sanitize(packageName)}",
+        )
+    }
+
+    @Volatile
+    private var earlyNextLinePreviewMs: Long? = null
+
+    fun configureEarlyNextLinePreview(mode: Int, customMs: Int) {
+        earlyNextLinePreviewMs = when (mode) {
+            1 -> 0L
+            2 -> 100L
+            3 -> 200L
+            4 -> 300L
+            5 -> 400L
+            RootConstants.EARLY_NEXT_LINE_PREVIEW_CUSTOM -> customMs.coerceAtLeast(0).toLong()
+            else -> null
+        }
+    }
+
+    /** Select only the immediate successor; keep its original word and translation timing. */
+    private fun earlyNextLinePreview(line: TimedLine?, position: Long): TimedLine? {
+        val advanceMs = earlyNextLinePreviewMs ?: return null
+        line ?: return null
+        if (line.metadata?.getBoolean(SongPreprocessor.KEY_TITLE_LINE) == true ||
+            line.metadata?.getBoolean(LyricMetadataKeys.INSTRUMENTAL) == true ||
+            line.end <= line.begin
+        ) return null
+        val next = line.next ?: return null
+        if (next.begin <= line.begin || next.text.isNullOrBlank() ||
+            next.metadata?.getBoolean(SongPreprocessor.KEY_TITLE_LINE) == true ||
+            next.metadata?.getBoolean(LyricMetadataKeys.INSTRUMENTAL) == true
+        ) return null
+        val previewStart = (line.end - advanceMs).coerceAtLeast(line.begin)
+        return next.takeIf { position >= previewStart && position < next.begin }
     }
 
     private var timingNavigator: TimingNavigator<TimedLine> = TimingNavigator(emptyArray())
@@ -81,6 +136,11 @@ object LyriconDataBridge : StateResetter {
     private var currentInterludeLine: IRichLyricLine? = null
 
     fun updateSong(song: Song?) {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "song_update_begin",
+            details = "incomingId=${MediaCardDiagnosticLogger.sanitize(song?.id)},incomingTitle=${MediaCardDiagnosticLogger.sanitize(song?.name)},incomingLines=${song?.lyrics.orEmpty().size}",
+        )
         HookLogger.d("LyriconDataBridge", "歌曲变更: ${song?.name}")
         isTextMode = false
         currentSong = song
@@ -113,6 +173,15 @@ object LyriconDataBridge : StateResetter {
                 "song_updated"
             },
         )
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "song_update_complete",
+            reason = if (song == null) "cleared" else "prepared",
+            details = "incomingId=${MediaCardDiagnosticLogger.sanitize(song?.id)},version=${versionCounter.get()}",
+        )
+        if (song != null) {
+            songChangedListeners.forEach { listener -> listener() }
+        }
     }
 
     fun replaceSameSongContent(song: Song): Boolean {
@@ -160,7 +229,14 @@ object LyriconDataBridge : StateResetter {
 
     fun updatePosition(position: Long): Boolean {
         playbackPositionEstimator.update(position, monotonicTimeMs())
-        return applyPosition(position)
+        val changed = applyPosition(position)
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "position_applied",
+            details = "position=$position,lyricChanged=$changed",
+            positionSample = true,
+        )
+        return changed
     }
 
     fun updateEstimatedPosition(position: Long): Boolean = applyPosition(position)
@@ -169,6 +245,11 @@ object LyriconDataBridge : StateResetter {
         playbackPositionEstimator.estimate(monotonicTimeMs())
 
     fun updatePlaybackState(isPlaying: Boolean) {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "playback_state_update",
+            details = "isPlaying=$isPlaying,previous=$currentPlaybackState",
+        )
         currentPlaybackState = isPlaying
         playbackPositionEstimator.setPlaying(isPlaying, monotonicTimeMs())
         DisplayDiagnosticLogger.log(
@@ -206,7 +287,15 @@ object LyriconDataBridge : StateResetter {
 
         val previousLine = currentLyricLine
         val previousInterlude = currentInterlude
-        val interlude = interludeTracker.evaluate(position, foundLine, previousInterlude)
+        val interlude = interludeTracker.evaluate(
+            position,
+            foundLine,
+            previousInterlude,
+            earlyNextLinePreviewMs,
+        )
+        // 长间奏（>=7s）整段归间奏指示器；提前预览只在间奏之外生效——
+        // 短间隙直接预览，间奏尾部按提前量提前切到下一句。
+        val previewLine = if (interlude == null) earlyNextLinePreview(foundLine, position) else null
         currentInterlude = interlude
         currentInterludeType = interlude?.type
 
@@ -228,11 +317,11 @@ object LyriconDataBridge : StateResetter {
             }
         } else {
             currentInterludeLine = null
-            foundLine
+            previewLine ?: foundLine
         }
 
         currentLyricLine = displayLine
-        currentNextLyricLine = interlude?.next ?: foundLine?.next
+        currentNextLyricLine = interlude?.next ?: (previewLine ?: foundLine)?.next
         val newText = displayLine?.text ?: currentLyric ?: ""
         val changed = displayLine !== previousLine || newText != currentLyric
 
@@ -248,6 +337,11 @@ object LyriconDataBridge : StateResetter {
     }
 
     fun updateLyric(text: String?) {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "plain_text_update",
+            details = "textLen=${text?.length ?: 0}",
+        )
         isTextMode = true
         currentInterlude = null
         currentInterludeLine = null
@@ -267,6 +361,11 @@ object LyriconDataBridge : StateResetter {
     }
 
     fun updateLyricLine(line: IRichLyricLine) {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "lyric_line_update_begin",
+            details = "line=${MediaCardDiagnosticLogger.identity(line)},begin=${line.begin},end=${line.end},textLen=${line.text?.length ?: 0}",
+        )
         isTextMode = false
         currentInterlude = null
         currentInterludeLine = null
@@ -281,6 +380,12 @@ object LyriconDataBridge : StateResetter {
                 "stale_callback_line",
                 extra = "callbackBegin=${callbackLine.begin}, expectedBegin=${expectedLine.begin}",
             )
+            MediaCardDiagnosticLogger.log(
+                stage = "bridge",
+                event = "lyric_line_update_dropped",
+                reason = "stale_callback_line",
+                details = "callbackBegin=${callbackLine.begin},expectedBegin=${expectedLine.begin}",
+            )
             return
         }
         if (preparedLine != null && currentPosition >= preparedLine.end) {
@@ -290,6 +395,12 @@ object LyriconDataBridge : StateResetter {
                 "expired_callback_line",
                 extra = "callbackEnd=${preparedLine.end}",
             )
+            MediaCardDiagnosticLogger.log(
+                stage = "bridge",
+                event = "lyric_line_update_dropped",
+                reason = "expired_callback_line",
+                details = "callbackEnd=${preparedLine.end},currentPosition=$currentPosition",
+            )
             return
         }
 
@@ -297,14 +408,30 @@ object LyriconDataBridge : StateResetter {
         currentUnmergedLyricLine = line
         currentNextLyricLine = preparedLine?.next
         currentLyric = currentLyricLine?.text
+        // Provider callbacks can repeat the still-singing line after the preview boundary.
+        // Resolve from the playback position again so a callback cannot undo the preview.
+        if (earlyNextLinePreviewMs != null && preparedLine != null) {
+            applyPosition(currentPosition)
+        }
         DisplayDiagnosticLogger.log(
             channel = "BRIDGE",
             result = "accepted",
             reason = if (preparedLine == null) "callback_line_unmatched" else "callback_line_matched",
         )
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "lyric_line_update_complete",
+            reason = if (preparedLine == null) "callback_line_unmatched" else "callback_line_matched",
+            details = "currentBegin=${currentLyricLine?.begin},currentEnd=${currentLyricLine?.end}",
+        )
     }
 
     override fun clearState() {
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "clear_begin",
+            details = "oldSongId=${MediaCardDiagnosticLogger.sanitize(currentSong?.id)},oldPosition=$currentPosition,oldPlaying=$currentPlaybackState",
+        )
         currentSong = null
         currentSongName = null
         currentLyric = null
@@ -326,6 +453,11 @@ object LyriconDataBridge : StateResetter {
         DisplayDiagnosticLogger.clear("BRIDGE")
 
         versionCounter.incrementAndGet()
+        MediaCardDiagnosticLogger.log(
+            stage = "bridge",
+            event = "clear_complete",
+            details = "version=${versionCounter.get()}",
+        )
     }
 
     private fun findPreparedLine(line: IRichLyricLine): TimedLine? {
@@ -341,12 +473,16 @@ object LyriconDataBridge : StateResetter {
         return matched
     }
 
+    /**
+     * Returns the current display group for the Island.
+     *
+     * The next-line preference controls only the optional preview rendered by
+     * IslandSlotContentAssembler. It must not replace an Apple Music merged
+     * current group with the unmerged line, otherwise concurrent vocals and
+     * overlapping lines disappear when the preference is disabled.
+     */
     fun currentLyricLineForIsland(nextLyricLineEnabled: Boolean): IRichLyricLine? =
-        if (nextLyricLineEnabled || currentInterlude != null) {
-            currentLyricLine
-        } else {
-            currentUnmergedLyricLine ?: currentLyricLine
-        }
+        currentLyricLine
 
     private fun TimingNavigator<TimedLine>.lineAtOrPrevious(position: Long): TimedLine? =
         findPreviousEntry(position)

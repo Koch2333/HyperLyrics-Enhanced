@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright 2026 Proify, Tomakino, juren233
  * Licensed under the Apache License, Version 2.0
  * http://www.apache.org/licenses/LICENSE-2.0
@@ -17,6 +17,8 @@ import android.util.AttributeSet
 import android.view.Choreographer
 import android.view.View
 import androidx.core.view.doOnAttach
+import com.juren233.hyperlyricsenhanced.BuildConfig
+import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import com.juren233.hyperlyricsenhanced.lyric.model.LyricLine
 import com.juren233.hyperlyricsenhanced.lyric.view.Highlight
 import com.juren233.hyperlyricsenhanced.lyric.view.LyricPlayListener
@@ -24,11 +26,13 @@ import com.juren233.hyperlyricsenhanced.lyric.view.Marquee
 import com.juren233.hyperlyricsenhanced.lyric.view.TextLook
 import com.juren233.hyperlyricsenhanced.lyric.view.UpdatableColor
 import com.juren233.hyperlyricsenhanced.lyric.view.WordMotion
+import com.juren233.hyperlyricsenhanced.lyric.view.LyricHugMeasureWindow
 import com.juren233.hyperlyricsenhanced.lyric.view.dp
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.LyricModel
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.createModel
 import com.juren233.hyperlyricsenhanced.lyric.view.line.model.emptyLyricModel
 import com.juren233.hyperlyricsenhanced.lyric.view.sp
+import kotlin.math.abs
 import kotlin.math.ceil
 
 open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
@@ -62,7 +66,17 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     val isPlainText: Boolean get() = _model.isPlainText
     val isInterludeIndicator: Boolean get() = interludeDotsRenderer.isIndicator(_model)
     val isWordSync: Boolean get() = !isPlainText
-    val isOverflow: Boolean get() = lineWidth > measuredWidth
+
+    /**
+     * 跑马灯判定与滚动使用的可见宽度：布局宽度优先。
+     * 原生岛会以展开几何做瞬态测量（spec 远大于动态上限后的最终布局），
+     * measuredWidth 会被瞬态污染——渲染器据此误判"文本放得下"并永久判完成，
+     * 而布局宽度才是用户实际看到的宽度。首次布局前回退 measuredWidth。
+     */
+    val scrollWidth: Int
+        get() = width.takeIf { it > 0 } ?: measuredWidth
+
+    val isOverflow: Boolean get() = lineWidth > scrollWidth
     val isPlaying: Boolean get() = activeRenderer.isPlaying
     val isFinished: Boolean get() = activeRenderer.isFinished
     val isStarted: Boolean get() = activeRenderer.isStarted
@@ -79,6 +93,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             field = value
             syncRenderer.centerIfPossible = value
             scrollRenderer.centerIfPossible = value
+            traceSwitch("centering_changed")
             invalidate()
         }
 
@@ -88,6 +103,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             field = value
             syncRenderer.alignRight = value
             scrollRenderer.alignRight = value
+            traceSwitch("right_alignment_changed")
             invalidate()
         }
 
@@ -96,6 +112,26 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             field = value
             syncRenderer.playListener = value
         }
+
+    /**
+     * 动态长度模式：测量宽度收缩为当前行文字实际宽度（不超过可用宽度），
+     * 让系统按内容实测宽度计算超级岛总宽度；文字超长时回到可用宽度并沿用滚动。
+     */
+    var hugContentWidth: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value) hugWidthFloor = null
+            requestLayout()
+        }
+
+    /**
+     * 动态长度二段测量的宽度下限，由 RichLyricLineView 在测量期下发：
+     * 取组内最长行（对唱固定长度时为全曲最长行）与自身 hug 宽度的较大值，
+     * 让短于下限的行保留“视图宽度 − 文字宽度”的换边/居中偏移空间。
+     * null 表示不设下限，hug 行为不变。
+     */
+    internal var hugWidthFloor: Int? = null
 
     var isWordCharMotionEnabled: Boolean
         get() = syncRenderer.isCharMotionEnabled
@@ -168,10 +204,37 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
 
     val textSize: Float get() = textPaint.textSize
 
-    fun currentTextStartX(): Float = resolveTextStartX(lineWidth, _model.isAlignedRight)
+    fun currentTextStartX(availableWidthOverride: Float? = null): Float =
+        resolveTextStartX(lineWidth, _model.isAlignedRight, availableWidthOverride = availableWidthOverride)
 
-    fun textStartX(text: String?, isAlignedRight: Boolean): Float =
-        resolveTextStartX(textPaint.measureText(text.orEmpty()), isAlignedRight)
+    fun textStartX(
+        text: String?,
+        isAlignedRight: Boolean,
+        centerIfPossibleOverride: Boolean? = null,
+        alignRightOverride: Boolean? = null,
+        availableWidthOverride: Float? = null
+    ): Float {
+        // 必须与 LyricModel.updateSizes 同管线测宽：混排窄体开启时英数走窄字体
+        // （≈0.8×宽），朴素 measureText 全按基础字体会高估 ~25%，提升动画的
+        // 横向目标被算小/误判溢出锚到左缘，落地按模型真宽居中即视觉跳变。
+        val raw = text.orEmpty()
+        val selector = currentTypefaceSelector
+        val measuredWidth = if (selector != null) {
+            MixedTypefaceText.measureText(textPaint, raw, selector)
+        } else {
+            val measureWidth = textPaint.measureText(raw)
+            val bounds = android.graphics.Rect()
+            textPaint.getTextBounds(raw, 0, raw.length, bounds)
+            if (bounds.right > measureWidth) bounds.right.toFloat() else measureWidth
+        }
+        return resolveTextStartX(
+            measuredWidth,
+            isAlignedRight,
+            centerIfPossibleOverride,
+            alignRightOverride,
+            availableWidthOverride
+        )
+    }
 
     fun setTextSize(size: Float) {
         val needsUpdate = textPaint.textSize != size || syncRenderer.bgPaint.textSize != size
@@ -179,7 +242,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         textPaint.textSize = size
         syncRenderer.setTextSize(size)
         refreshSizes()
-        syncRenderer.updateLayout(_model, lineState, measuredWidth, measuredHeight)
+        syncRenderer.updateLayout(_model, lineState, scrollWidth, measuredHeight)
         invalidate()
     }
 
@@ -193,6 +256,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     fun setLyric(rawLine: LyricLine?) {
         val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
 
+        traceSwitch("before_bind", dumpHistory = true)
         reset()
         scrollUnlocked = false
         scrollStarted = false
@@ -202,6 +266,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         activeRenderer = if (_model.isPlainText) scrollRenderer else syncRenderer
         refreshSizes()
         updateColorsIfReady()
+        traceSwitch("after_bind")
         invalidate()
     }
 
@@ -245,13 +310,47 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         if (isStaticPreview) return
         doOnAttach {
             if (isStaticPreview) return@doOnAttach
+            if (!scrollUnlocked) {
+                MarqueeDiag.d(this, "unlocked") { "overflow=$isOverflow playing=$playbackActive" }
+            }
             scrollUnlocked = true
             if (isPlainText && playbackActive) startScrolling()
         }
     }
 
+    /**
+     * 换句切换过渡（淡出窗口）暂停滚动/逐字步进：布局冻结管不住 draw 层动画，
+     * 淡出中的旧句若继续滚动，视觉上就是"换句前位置先移动"。暂停让旧句在被
+     * 替换前像素级静止；新内容落地后由正常进度 tick 恢复。
+     */
+    private var contentSwitchPaused = false
+    private val switchTrace = if (BuildConfig.DEBUG) LyricSwitchTrace(this) else null
+
+    private fun traceSwitch(event: String, dumpHistory: Boolean = false) {
+        if (!BuildConfig.DEBUG || !hugContentWidth || _model.text.isEmpty()) return
+        switchTrace?.record(
+            event, _model, scrollWidth, lineState.scrollOffset,
+            centerIfPossible, alignRight, contentSwitchPaused,
+            animator.isFrameLoopRunning, dumpHistory
+        )
+    }
+
+    fun pauseForContentSwitch() {
+        if (contentSwitchPaused) return
+        traceSwitch("before_pause", dumpHistory = true)
+        contentSwitchPaused = true
+        animator.stop()
+        invalidate()
+    }
+
+    fun resumeFromContentSwitch() {
+        if (!contentSwitchPaused) return
+        contentSwitchPaused = false
+        invalidate()
+    }
+
     fun seekTo(posMs: Long) {
-        if (isStaticPreview) return
+        if (contentSwitchPaused || isStaticPreview) return
         if (isInterludeIndicator) {
             interludeDotsRenderer.updatePosition(posMs)
             invalidate()
@@ -260,7 +359,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         if (isPlainText) {
             if (playbackActive) startScrolling()
         } else {
-            activeRenderer.seek(_model, lineState, posMs, measuredWidth, measuredHeight)
+            activeRenderer.seek(_model, lineState, posMs, scrollWidth, measuredHeight)
             if (playbackActive) {
                 animator.startIfNeeded()
             } else {
@@ -271,7 +370,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     fun updatePosition(posMs: Long) {
-        if (isStaticPreview) return
+        if (contentSwitchPaused || isStaticPreview) return
         if (isInterludeIndicator) {
             interludeDotsRenderer.updatePosition(posMs)
             if (playbackActive) postInvalidateOnAnimation() else invalidate()
@@ -280,12 +379,12 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         if (isWordSync) {
             if (syncRenderer.isScrollOnly && !isOverflow) return
             if (playbackActive) {
-                activeRenderer.update(_model, lineState, posMs, measuredWidth, measuredHeight)
+                activeRenderer.update(_model, lineState, posMs, scrollWidth, measuredHeight)
                 if (syncRenderer.isPlaying && !syncRenderer.isFinished) {
                     animator.startIfNeeded()
                 }
             } else {
-                activeRenderer.seek(_model, lineState, posMs, measuredWidth, measuredHeight)
+                activeRenderer.seek(_model, lineState, posMs, scrollWidth, measuredHeight)
                 animator.stop()
                 invalidate()
             }
@@ -304,7 +403,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         if (!active) {
             animator.stop()
             (activeRenderer as? WordSyncRenderer)?.let { renderer ->
-                renderer.freeze(_model, lineState, measuredWidth)
+                renderer.freeze(_model, lineState, scrollWidth)
                 if (isShown) invalidate()
             }
             return
@@ -314,6 +413,10 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     private fun resumePlaybackAnimation() {
+        if (contentSwitchPaused) {
+            traceSwitch("resume_blocked_while_switch_paused")
+            return
+        }
         if (isPlainText) {
             if (!scrollUnlocked) return
             if (!scrollStarted) {
@@ -331,7 +434,9 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     fun relayout() {
-        if (isWordSync) syncRenderer.updateLayout(_model, lineState, measuredWidth, measuredHeight)
+        traceSwitch("before_relayout")
+        if (isWordSync) syncRenderer.updateLayout(_model, lineState, scrollWidth, measuredHeight)
+        traceSwitch("after_relayout")
     }
 
     override fun updateColor(primary: IntArray, background: IntArray, highlight: IntArray) {
@@ -353,6 +458,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         lineShadowRenderer.clear()
         _model = emptyLyricModel()
         activeRenderer = scrollRenderer
+        lastWidthOverflow = null
         refreshSizes()
         invalidate()
     }
@@ -368,6 +474,97 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             refreshSizes()
             updateColorsIfReady()
         }
+        if (w != oldw && w > 0) {
+            MarqueeDiag.d(this, "width_changed") {
+                "w=$w oldw=$oldw overflow=$isOverflow lineWidth=$lineWidth"
+            }
+            onAvailableWidthChanged()
+        }
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        evaluateShownRecovery()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        evaluateShownRecovery()
+    }
+
+    /** 上一次可见性评估结果；null 表示尚未评估过。 */
+    private var lastShownState: Boolean? = null
+
+    /**
+     * 隐藏窗口（岛收起、fake 过渡、暂停隐藏）里 Animator.doFrame 因 !isShown
+     * 自停且无人再踢，形成"渲染器自认在播放但帧回调没跑"的卡死态。重新可见时
+     * 直接续播（不重置滚动位置）；判定交给 MarqueeRestartPolicy.canResumeFrameLoopOnShown。
+     */
+    private fun evaluateShownRecovery() {
+        val shown = isShown
+        val previous = lastShownState
+        lastShownState = shown
+        if (previous == null || previous == shown) return
+        MarqueeDiag.i(this, "shown_flip") {
+            "shown=$shown overflow=$isOverflow unlocked=$scrollUnlocked " +
+                "started=$scrollStarted rendererPlaying=${scrollRenderer.isPlaying} " +
+                "frameRunning=${animator.isFrameLoopRunning}"
+        }
+        if (!shown) return
+        if (!MarqueeRestartPolicy.canResumeFrameLoopOnShown(
+                playbackActive = playbackActive,
+                isStaticPreview = isStaticPreview,
+                isPlainText = isPlainText,
+                scrollUnlocked = scrollUnlocked,
+                isOverflow = isOverflow,
+                rendererPlaying = scrollRenderer.isPlaying,
+                frameLoopRunning = animator.isFrameLoopRunning,
+            )
+        ) {
+            return
+        }
+        MarqueeDiag.i(this, "shown_resume") { "帧回调在隐藏窗口死亡，重新可见后续播" }
+        animator.startIfNeeded()
+    }
+
+    /**
+     * 上一次宽度评估时的溢出状态基线。null 表示尚无基线（新行/首次布局）。
+     * 宽度变化只在"放得下 → 放不下"翻转时才允许重启跑马灯；放不下 → 放不下
+     * 的宽度变化（换句重算、状态栏内容变化）不得打断或重启本侧行。
+     */
+    private var lastWidthOverflow: Boolean? = null
+
+    /**
+     * 动态宽度/动态上限会在同一行显示期间改变岛宽（换句、状态栏内容变化触发
+     * 重算）。宽度实际变化时按溢出状态翻转重新评估跑马灯，判定交给
+     * MarqueeRestartPolicy。
+     */
+    private fun onAvailableWidthChanged() {
+        val newOverflow = isOverflow
+        val previous = lastWidthOverflow
+        lastWidthOverflow = newOverflow
+        val canRestart = MarqueeRestartPolicy.canRestartOnWidthChange(
+            playbackActive = playbackActive,
+            isStaticPreview = isStaticPreview,
+            isPlainText = isPlainText,
+            scrollUnlocked = scrollUnlocked,
+            previousOverflow = previous,
+            isOverflow = newOverflow,
+            isShown = isShown,
+            rendererPlaying = scrollRenderer.isPlaying,
+            frameLoopRunning = animator.isFrameLoopRunning,
+        )
+        MarqueeDiag.i(this, "width_flip_eval") {
+            "prev=$previous new=$newOverflow restarted=$canRestart " +
+                "playing=$playbackActive unlocked=$scrollUnlocked started=$scrollStarted " +
+                "shown=$isShown rendererPlaying=${scrollRenderer.isPlaying} " +
+                "frameRunning=${animator.isFrameLoopRunning}"
+        }
+        if (!canRestart) {
+            return
+        }
+        scrollStarted = false
+        startScrolling()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -376,18 +573,19 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
                 canvas,
                 _model,
                 textPaint,
-                measuredWidth,
+                scrollWidth,
                 measuredHeight,
                 centerIfPossible,
                 alignRight
             )
             if (playbackActive && !isStaticPreview && isShown) postInvalidateOnAnimation()
         } else {
-            drawShadowAndContent(canvas, measuredWidth)
+            drawShadowAndContent(canvas, scrollWidth)
         }
     }
 
     private fun drawShadowAndContent(canvas: Canvas, availableWidth: Int) {
+        traceSwitch("draw")
         lineShadowRenderer.draw(
             canvas = canvas,
             model = _model,
@@ -406,7 +604,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         }
     }
 
-    private fun currentFontSignature(): Int =
+    internal fun currentFontSignature(): Int =
         31 * System.identityHashCode(baseTypeface) + System.identityHashCode(narrowTypeface)
 
     override fun getLeftFadingEdgeStrength(): Float {
@@ -447,7 +645,8 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     override fun onMeasure(wSpec: Int, hSpec: Int) {
-        val w = MeasureSpec.getSize(wSpec)
+        val specW = MeasureSpec.getSize(wSpec)
+        val w = if (hugContentWidth) resolveHugContentWidth(specW) else specW
         val charMotionPadding = if (isWordCharMotionEnabled) {
             val maxLift = maxOf(wordMotion.cjkLiftFactor, wordMotion.latinLiftFactor)
             ceil(textPaint.textSize * maxLift).toInt()
@@ -456,6 +655,58 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         }
         val textHeight = (textPaint.descent() - textPaint.ascent()).toInt() + charMotionPadding
         setMeasuredDimension(w, resolveSize(textHeight, hSpec))
+    }
+
+    private fun resolveHugContentWidth(specWidth: Int): Int {
+        val shadowRadius = textPaint.getShadowLayerRadius()
+        val shadowPad = if (shadowRadius > 0f) {
+            ceil(shadowRadius + abs(textPaint.getShadowLayerDx())).toInt()
+        } else {
+            0
+        }
+        val hugWithFloor = maxOf(ceil(lineWidth).toInt() + shadowPad, hugWidthFloor ?: 0)
+        // 两种测量角色分开（160156/160157 各错一半）：
+        // - 岛宽计算探测窗口内报告固有宽度（不被 spec 截断），计算输入恒定，岛宽不振荡；
+        // - 窗口外的真实布局测量按可用宽度截断，行布局与绘制不超出实际胶囊。
+        // floor 未设置时保持原行为：超长行回到可用宽度并沿用滚动。
+        val hug = when {
+            hugWidthFloor == null -> hugWithFloor.coerceIn(0, specWidth)
+            LyricHugMeasureWindow.reportIntrinsicWidth -> hugWithFloor
+            else -> hugWithFloor.coerceIn(0, specWidth)
+        }
+        if (BuildConfig.DEBUG) {
+            HookLogger.d(
+                "LyricHug",
+                "slot=${(parent as? View)?.tag}, lineWidth=$lineWidth, shadowPad=$shadowPad, " +
+                    "spec=$specWidth, floor=${hugWidthFloor ?: 0}, final=$hug, " +
+                    "view=${System.identityHashCode(this).toString(16)}"
+            )
+        }
+        return hug
+    }
+
+    /**
+     * 用本视图当前的绘制参数（字号/字体选择器/阴影/间奏点）测量一行歌词
+     * 落定后的 hug 宽度，不改变视图任何状态。
+     * 与 [setLyric] 后的 [lineWidth] 实测走同一条管线，用于动态长度在
+     * 预览提升动画期间同步预判内容落地后的岛宽。
+     */
+    fun measureIncomingHugWidth(rawLine: LyricLine?): Int {
+        val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
+        val model = line?.normalize()?.createModel() ?: return 0
+        val width = if (interludeDotsRenderer.isIndicator(model)) {
+            interludeDotsRenderer.width(textPaint.textSize)
+        } else {
+            model.updateSizes(textPaint, currentTypefaceSelector)
+            model.width
+        }
+        val shadowRadius = textPaint.getShadowLayerRadius()
+        val shadowPad = if (shadowRadius > 0f) {
+            ceil(shadowRadius + abs(textPaint.getShadowLayerDx())).toInt()
+        } else {
+            0
+        }
+        return ceil(width).toInt() + shadowPad
     }
 
     override fun onVisibilityAggregated(isVisible: Boolean) {
@@ -469,16 +720,39 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        MarqueeDiag.i(this, "detached") {
+            "reset 会清空 unlocked/started/宽度基线：overflow=$isOverflow"
+        }
         reset()
     }
 
     private fun startScrolling() {
-        if (!playbackActive || isStaticPreview || !isPlainText || !scrollUnlocked || scrollStarted) return
+        // Do not latch before the overflow check: with dynamic island width the first
+        // requestScroll can run before the final measured width exists. Latching there
+        // permanently blocked scrolling even after the text really overflowed, so
+        // truncated text was clipped instead of scrolling. Staying retryable lets the
+        // next position tick start the marquee once the width has settled.
+        val canStart = MarqueeStartPolicy.canStart(
+            playbackActive = playbackActive,
+            isStaticPreview = isStaticPreview,
+            isPlainText = isPlainText,
+            scrollUnlocked = scrollUnlocked,
+            scrollStarted = scrollStarted,
+            isOverflow = isOverflow,
+        )
+        MarqueeDiag.d(this, if (canStart) "start_latch" else "start_skip") {
+            "overflow=$isOverflow lineWidth=$lineWidth scrollWidth=$scrollWidth measuredWidth=$measuredWidth " +
+                "playing=$playbackActive unlocked=$scrollUnlocked started=$scrollStarted " +
+                "shown=$isShown frameRunning=${animator.isFrameLoopRunning} " +
+                "rendererPlaying=${scrollRenderer.isPlaying}"
+        }
+        if (!canStart) {
+            return
+        }
         scrollStarted = true
         lineState.reset()
-        if (!isOverflow) return
         post {
-            scrollRenderer.update(_model, lineState, 0, measuredWidth, measuredHeight)
+            scrollRenderer.update(_model, lineState, 0, scrollWidth, measuredHeight)
             animator.stop()
             animator.startIfNeeded()
         }
@@ -502,12 +776,25 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         }
     }
 
-    private fun resolveTextStartX(textWidth: Float, isAlignedRight: Boolean): Float {
-        val availableWidth = measuredWidth.toFloat()
+    private fun resolveTextStartX(
+        textWidth: Float,
+        isAlignedRight: Boolean,
+        centerIfPossibleOverride: Boolean? = null,
+        alignRightOverride: Boolean? = null,
+        availableWidthOverride: Float? = null
+    ): Float {
+        // 布局宽度优先：原生岛以展开几何做瞬态测量时 measuredWidth 会被抬到
+        // hug 下限（如对唱全曲最长行），据此算出的换边/居中偏移会把文本推出
+        // 实际岛宽造成裁切；scrollWidth 才是用户可见宽度，语义同 scrollWidth 属性。
+        // availableWidthOverride 供提升动画按落定宽度（pendingHugWidth）预算
+        // 横向目标：按当前旧宽算会因溢出分支把上升线锚到左缘、落地才居中。
+        val availableWidth = availableWidthOverride ?: scrollWidth.toFloat()
+        val centerFlag = centerIfPossibleOverride ?: centerIfPossible
+        val rightFlag = alignRightOverride ?: alignRight
         return when {
             textWidth >= availableWidth -> 0f
-            alignRight -> availableWidth - textWidth
-            centerIfPossible -> (availableWidth - textWidth) / 2f
+            rightFlag -> availableWidth - textWidth
+            centerFlag -> (availableWidth - textWidth) / 2f
             isAlignedRight -> availableWidth - textWidth
             else -> 0f
         }
@@ -533,10 +820,14 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     private inner class Animator : Choreographer.FrameCallback {
         private var running = false
         private var lastFrameNanos = 0L
+        private var lastReportedFinished = false
+
+        val isFrameLoopRunning: Boolean get() = running
 
         fun startIfNeeded() {
             if (playbackActive && !running && isAttachedToWindow && isShown) {
                 running = true
+                lastReportedFinished = false
                 lastFrameNanos = 0L
                 post { Choreographer.getInstance().postFrameCallback(this) }
             }
@@ -558,8 +849,18 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             lastFrameNanos = frameTimeNanos
 
             val renderer = activeRenderer
-            val changed = renderer.step(deltaNanos, _model, lineState, measuredWidth)
+            val changed = renderer.step(deltaNanos, _model, lineState, scrollWidth)
             if (changed) postInvalidateOnAnimation()
+
+            val finishedNow = renderer.isFinished
+            if (finishedNow && !lastReportedFinished) {
+                MarqueeDiag.i(this@LyricLineView, "renderer_finished") {
+                    "overflow=$isOverflow scrollWidth=$scrollWidth measuredWidth=$measuredWidth " +
+                        "lineWidth=$lineWidth stopAtEnd=${scrollRenderer.stopAtEnd} " +
+                        "repeat=${scrollRenderer.repeatCount}"
+                }
+            }
+            lastReportedFinished = finishedNow
 
             if (running && renderer.isPlaying) {
                 Choreographer.getInstance().postFrameCallback(this)
