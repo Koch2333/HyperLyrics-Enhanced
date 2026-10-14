@@ -28,6 +28,7 @@ import kotlin.math.abs
  * （TAIL 避让）；X 不晚于 Y（可能是同一词）。过渡窗口随总滚动距离
  * 收缩以免互相侵入端点。纯函数：主从两槽与阴影同输入必然同输出。
  */
+@ConsistentCopyVisibility
 internal data class SeamStripPlan private constructor(
     /** 接缝（视口虚拟坐标）＝左槽宽；渐隐裁剪用。 */
     val seamX: Float,
@@ -59,6 +60,7 @@ internal data class SeamStripPlan private constructor(
     )
 
     /** 跨缝绘制的裁剪/渐隐参数，换算进已平移 xShift 的段内坐标系。 */
+    @ConsistentCopyVisibility
     internal data class SeamFade internal constructor(
         val alpha: Float,
         val seamLocalX: Float,

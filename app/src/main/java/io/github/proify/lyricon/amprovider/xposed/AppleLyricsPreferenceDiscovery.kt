@@ -95,11 +95,11 @@ internal object AppleLyricsPreferenceDiscovery {
         // Ambiguity is rejected even if only one candidate happens to fit later shape checks.
         val setter = setters.singleOrNull() ?: return null
         val cache = setter.writes.singleOrNull {
-            it.declaringClass == owner && Modifier.isStatic(it.modifiers) && it.type == java.lang.Boolean::class.java
+            it.declaringClass == owner && Modifier.isStatic(it.modifiers) && it.type == Boolean::class.javaObjectType
         } ?: return null
         val storeGetters = setter.invokes.filter {
             it.declaringClass == owner && Modifier.isStatic(it.modifiers) && it.parameterCount == 0 &&
-                !it.returnType.isPrimitive && it.returnType != java.lang.Boolean::class.java
+                !it.returnType.isPrimitive && it.returnType != Boolean::class.javaObjectType
         }
         val storeGetter = storeGetters.singleOrNull() ?: return null
         val storeWriter = setter.invokes.singleOrNull {

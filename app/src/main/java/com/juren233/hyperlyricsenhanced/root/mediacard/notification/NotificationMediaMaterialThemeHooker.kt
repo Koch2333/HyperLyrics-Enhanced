@@ -67,7 +67,7 @@ internal object NotificationMediaMaterialThemeHooker {
             val applyMethod = runCatching {
                 effectClass.getDeclaredMethod(
                     NotificationMediaHookMethodProfile.EFFECT_APPLY_METHOD,
-                    Object::class.java,
+                    Any::class.java,
                     Context::class.java,
                 )
             }.getOrNull()
@@ -129,7 +129,7 @@ internal object NotificationMediaMaterialThemeHooker {
         override fun intercept(chain: Chain): Any? {
             val view = chain.getArg(0) ?: return chain.proceed()
             val context = chain.getArg(1) as? Context ?: return chain.proceed()
-            val inFlight = inFlightViews.get()
+            val inFlight = checkNotNull(inFlightViews.get())
             if (!inFlight.add(view)) return chain.proceed()
             try {
                 appliedViews[view] = AppliedMaterial(applyMethod, context)

@@ -69,7 +69,7 @@ internal object IslandShortLyricTransition {
             return UpdateResult.NOT_HANDLED
         }
         val flying = active?.renderer?.snapshot()?.takeIf { it.text == fallback.text }
-        val rightHandoff = rightPreview != null || (flying != null && active?.rightHandoff == true)
+        val rightHandoff = rightPreview != null || (flying != null && active.rightHandoff)
         val promoting = active == null && !right.isNextLinePromotionRunning &&
             right.willAnimateNextLinePromotion(incoming)
         val sameMain = active == null && !right.isNextLinePromotionRunning &&
@@ -93,7 +93,7 @@ internal object IslandShortLyricTransition {
         )
         val outgoing = if (rightHandoff) active?.outgoingSnapshot() ?: right.layoutRoleSnapshot() else null
         fun oldFrame(slot: SpaceGateRichLyricLineView): Picture {
-            if (flying != null && active != null && !(slot === left && active.preserveLeftMetadata)) {
+            if (flying != null && !(slot === left && active.preserveLeftMetadata)) {
                 return slot.recordLayoutRoleFrame(draw = { active.draw(it, slot, includeLyric = false) })
             }
             val lyricSlot = slot === right || oldFull

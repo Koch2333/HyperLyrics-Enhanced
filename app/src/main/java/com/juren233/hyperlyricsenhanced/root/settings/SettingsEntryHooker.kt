@@ -130,6 +130,8 @@ object SettingsEntryHooker {
         /** updateHeaderList 之后：先移除既有入口，再按位置模式重新插入或保持移除。 */
         private fun applyEntryList(chain: Chain) {
             val activity = chain.thisObject as? Activity ?: return
+            // The hooked platform API owns this mutable header list; generic types are erased.
+            @Suppress("UNCHECKED_CAST")
             val headers = chain.args.firstOrNull() as? MutableList<Any> ?: return
 
             val ids = ArrayList<Long>(headers.size)

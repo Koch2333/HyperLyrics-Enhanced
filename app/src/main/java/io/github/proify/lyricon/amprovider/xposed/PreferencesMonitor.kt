@@ -93,6 +93,6 @@ internal fun readAppleLyricsPreference(
     ) as? Boolean
     // The original store read blocks on DataStore; avoid repeating it in lyric getters.
     // A real setter callback that arrives during the cold read must win over its snapshot.
-    pronunciationSnapshot?.compareAndSet(null, selected)
+    pronunciationSnapshot?.updateAndGet { current -> current ?: selected }
     return pronunciationSnapshot?.get() ?: selected
 }

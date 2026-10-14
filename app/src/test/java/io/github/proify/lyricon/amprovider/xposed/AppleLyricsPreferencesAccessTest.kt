@@ -47,6 +47,28 @@ class AppleLyricsPreferencesAccessTest {
         assertEquals(false, readAppleLyricsPreference(TypedPreferences::class.java, target, false))
     }
 
+    @Test
+    fun `setter during cold read wins over stale store result`() {
+        val target = AppleMusicHookTarget(
+            TypedPreferences::class.java.name,
+            runtimeMemberNames = mapOf(
+                AppleMusicRuntimeMember.LYRICS_PREFERENCES_PRONUNCIATION_CACHE_FIELD to "cached",
+                AppleMusicRuntimeMember.LYRICS_PREFERENCES_PRONUNCIATION_KEY_FIELD to "key",
+                AppleMusicRuntimeMember.LYRICS_PREFERENCES_STORE_GETTER to "store",
+                AppleMusicRuntimeMember.LYRICS_PREFERENCES_STORE_READ_METHOD to "read",
+            ),
+        )
+        TypedPreferences.cached = null
+        val snapshot = AtomicReference<Boolean?>()
+        TypedPreferences.onRead = { snapshot.set(false) }
+        try {
+            assertEquals(false, readAppleLyricsPreference(TypedPreferences::class.java, target, true, snapshot))
+            assertEquals(false, snapshot.get())
+        } finally {
+            TypedPreferences.onRead = null
+        }
+    }
+
     class LegacyPreferences {
         companion object {
             @JvmStatic fun translation() = false
@@ -59,6 +81,7 @@ class AppleLyricsPreferencesAccessTest {
             @JvmField var cached: Boolean? = null
             @JvmField val key = "pronunciation"
             @JvmField var reads = 0
+            var onRead: (() -> Unit)? = null
             @JvmStatic fun translation() = false
             @JvmStatic fun store() = TypedStore()
         }
@@ -67,6 +90,7 @@ class AppleLyricsPreferencesAccessTest {
     class TypedStore {
         fun read(key: String, default: Any): Any {
             TypedPreferences.reads++
+            TypedPreferences.onRead?.invoke()
             return if (key == TypedPreferences.key) true else default
         }
     }

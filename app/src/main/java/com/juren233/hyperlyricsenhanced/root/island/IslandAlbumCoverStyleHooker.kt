@@ -550,7 +550,7 @@ internal object IslandAlbumCoverStyleHooker {
                     HookLogger.d(
                         TAG,
                         "流光探测: 封面图标更新 method=$methodName " +
-                            "data=${data?.javaClass?.simpleName}@${System.identityHashCode(data)}"
+                            "data=${data.javaClass.simpleName}@${System.identityHashCode(data)}"
                     )
                 }
                 // 在封面样式替换 Drawable 之前，把原生封面图标交给流光取色快速路径。
