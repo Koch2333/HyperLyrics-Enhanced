@@ -21,7 +21,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 internal fun AppleInternalCatalogResolver.invalidateOriginalEntity(mediaId: String, entityType: LocalizedEntityType) {
-    persistentOriginalCache.remove(originalDirectEntityCacheKey(entityType, mediaId))
+    val directCacheKey = originalDirectEntityCacheKey(entityType, mediaId)
+    persistentOriginalCache.remove(directCacheKey)
+    caches.forgetOriginalEntityMisses(directCacheKey)
 }
 
 internal fun AppleInternalCatalogResolver.enqueueOriginalEntityRequest(request: OriginalEntityRequest) {
@@ -38,34 +40,142 @@ internal fun AppleInternalCatalogResolver.processOriginalEntityBatch() {
     if (batch.isEmpty()) return
     val first = batch.first()
 
-    queryByConfiguredRegion(
-        mediaIds = batch.flatMap(OriginalEntityRequest::lookupIds).distinct(),
-        entityType = first.entityType,
-        storefront = first.storefront,
-        language = first.language,
-    ) { resolved ->
-        batch.forEach { request ->
-            val alias = selectExactOriginalEntityAlias(
-                mediaId = request.mediaId,
-                lookupIds = request.lookupIds,
-                resolved = resolved.mapValues { it.value.alias },
-                sourceLanguage = request.language,
-            )
-            if (alias != null) {
-                persistentOriginalCache.put(request.directCacheKey, alias)
+    // 主地区空条目时按 cn → hk → tw → mo 串行回退：每个地区命中的请求立即发布，
+    // 后续地区只重查仍缺失的请求；批次槽位只在全部候选与等价专辑查询结束后释放一次。
+    resolveOriginalEntityAcrossStorefronts(
+        requests = batch,
+        candidates = originalEntityStorefrontCandidates(first.language),
+        query = { candidate, lookupIds, onResult ->
+            queryByConfiguredRegionResult(
+                mediaIds = lookupIds,
+                entityType = first.entityType,
+                storefront = candidate.storefront,
+                language = candidate.language,
+            ) { resolved ->
+                onResult(
+                    resolved?.mapValues { (_, song) -> normalizeOriginalEntityAlias(song.alias) },
+                )
             }
-            ProviderLogger.info(
-                "Apple 原地区实体查询完成: id=${request.mediaId}, " +
-                    "entityType=${request.entityType}, language=${request.language}, " +
-                    "batch=${batch.size}, priority=${request.priority}, hit=${alias != null}, " +
-                    "value=${alias?.title}/${alias?.artist}/${alias?.album}"
+        },
+        onResolved = { request, alias, storefronts ->
+            publishOriginalEntityResult(
+                request = request,
+                alias = alias,
+                batchSize = batch.size,
+                storefronts = storefronts,
             )
-            request.callbacks.forEach { callback -> callback(alias) }
-        }
-        dispatch.endOriginalEntityBatch(first.priority)
-        scheduleOriginalEntityBatchIfCapacity()
+        },
+    ) { unresolved, confirmedAbsent, storefronts ->
+        resolveOriginalEntityBatchResults(
+            requests = unresolved,
+            exact = emptyMap(),
+            queryEquivalentAlbum = ::queryEquivalentOriginalAlbum,
+            onResolved = { request, alias ->
+                // 等价专辑查询无法区分网络失败与真实空结果，专辑不写负缓存。
+                if (
+                    alias == null &&
+                    confirmedAbsent &&
+                    request.entityType != LocalizedEntityType.ALBUM
+                ) {
+                    caches.rememberOriginalEntityMiss(
+                        originalEntityMissKey(request.directCacheKey, request.language),
+                    )
+                }
+                publishOriginalEntityResult(
+                    request = request,
+                    alias = alias,
+                    batchSize = batch.size,
+                    storefronts = storefronts,
+                )
+            },
+            onComplete = {
+                dispatch.endOriginalEntityBatch(first.priority)
+                scheduleOriginalEntityBatchIfCapacity()
+            },
+        )
     }
     scheduleOriginalEntityBatchIfCapacity()
+}
+
+/**
+ * 主地区查不到条目时按候选地区（中文为 cn → hk → tw → mo）串行重查：
+ * 每个地区返回后，已命中的请求立即经 [onResolved] 发布，不等待后续回退；
+ * 下一个地区只查询仍缺失请求的 lookupIds。全部候选结束后，以剩余请求调用一次 [onComplete]。
+ *
+ * [query] 回调 null 表示请求失败或超时（不是目录空结果）；只要出现过一次，
+ * `confirmedAbsent` 即为 false，调用方不得据此写负缓存。
+ * 并发槽位不在这里处理（批次槽位仍由调用方在 [onComplete] 链路结束后释放一次）。
+ */
+internal fun resolveOriginalEntityAcrossStorefronts(
+    requests: List<OriginalEntityRequest>,
+    candidates: List<OriginalStorefrontCandidate>,
+    query: (
+        candidate: OriginalStorefrontCandidate,
+        lookupIds: List<String>,
+        onResult: (Map<String, Alias>?) -> Unit,
+    ) -> Unit,
+    onResolved: (request: OriginalEntityRequest, alias: Alias, storefronts: List<String>) -> Unit,
+    onComplete: (
+        unresolved: List<OriginalEntityRequest>,
+        confirmedAbsent: Boolean,
+        storefronts: List<String>,
+    ) -> Unit,
+) {
+    val queried = mutableListOf<String>()
+    var confirmedAbsent = true
+
+    fun queryNext(index: Int, pending: List<OriginalEntityRequest>) {
+        val candidate = candidates.getOrNull(index)
+        if (candidate == null || pending.isEmpty()) {
+            onComplete(
+                pending,
+                confirmedAbsent && candidate == null && queried.isNotEmpty(),
+                queried.toList(),
+            )
+            return
+        }
+        queried += candidate.storefront
+        val lookupIds = pending.flatMap(OriginalEntityRequest::lookupIds).distinct()
+        query(candidate, lookupIds) { resolved ->
+            if (resolved == null) confirmedAbsent = false
+            val storefronts = queried.toList()
+            val stillPending = pending.filter { request ->
+                val alias = resolved?.let {
+                    selectExactOriginalEntityAlias(
+                        mediaId = request.mediaId,
+                        lookupIds = request.lookupIds,
+                        resolved = it,
+                        sourceLanguage = request.language,
+                    )
+                }
+                if (alias != null) onResolved(request, alias, storefronts)
+                alias == null
+            }
+            queryNext(index + 1, stillPending)
+        }
+    }
+
+    queryNext(0, requests)
+}
+
+private fun AppleInternalCatalogResolver.publishOriginalEntityResult(
+    request: OriginalEntityRequest,
+    alias: Alias?,
+    batchSize: Int,
+    storefronts: List<String>,
+) {
+    if (alias != null) {
+        persistentOriginalCache.put(request.directCacheKey, alias)
+    }
+    ProviderLogger.info(
+        "Apple 原地区实体查询完成: id=${request.mediaId}, " +
+            "entityType=${request.entityType}, language=${request.language}, " +
+            "storefronts=${storefronts.joinToString(",")}, " +
+            "fallback=${storefronts.size > 1}, " +
+            "batch=$batchSize, priority=${request.priority}, hit=${alias != null}, " +
+            "value=${alias?.title}/${alias?.artist}/${alias?.album}"
+    )
+    request.callbacks.forEach { callback -> callback(alias) }
 }
 
 internal fun AppleInternalCatalogResolver.scheduleOriginalEntityBatchIfCapacity() {
@@ -471,7 +581,12 @@ internal const val CACHE_SIZE = 64
 internal const val LOCALIZED_CACHE_SIZE = 4_096
 internal const val LOCALIZED_ARTIST_ALIAS_CACHE_SIZE = 2_048
 internal const val REQUEST_PRIORITY_CACHE_SIZE = 2_048
-internal const val ORIGINAL_METADATA_CACHE_SCHEMA = "V2"
+// V2 could promote an arbitrary regional translation (Japanese first) into an original
+// entity and then persist that language for the artist. Those entries have no provenance
+// with which to repair them safely; rebuild only this derived cache, leaving the old rows.
+internal const val ORIGINAL_METADATA_CACHE_SCHEMA = "V3"
+internal const val ORIGINAL_ARTIST_REGION_PREFERENCES =
+    "hyperlyricsenhanced_apple_original_artist_regions_$ORIGINAL_METADATA_CACHE_SCHEMA"
 
 internal fun isCoroutineSuspended(value: Any?): Boolean =
     value is Enum<*> && value.name == "COROUTINE_SUSPENDED"
@@ -489,6 +604,10 @@ internal fun originalDirectEntityCacheKey(
         "$ORIGINAL_METADATA_CACHE_SCHEMA:$entityType:${mediaId.trim()}"
 }
 
+/** 负缓存键：同一实体在不同原地区语言下的缺失互不影响。 */
+internal fun originalEntityMissKey(directCacheKey: String, language: String): String =
+    "${language.trim()}|$directCacheKey"
+
 internal fun legacyAmbiguousSongCacheKey(mediaId: String): String =
     "SONG:${mediaId.trim()}"
 
@@ -500,15 +619,15 @@ internal fun originalEntityCacheKey(
     "$ORIGINAL_METADATA_CACHE_SCHEMA:$entityType:${language.trim()}:${mediaId.trim()}"
 
 /**
- * Direct keys are always tried first. The remaining keys cover aliases written before
- * direct entity keys were introduced and equivalent catalog IDs collected from the same
- * Media API object.
+ * Direct originals and equivalent catalog IDs are always tried first. A language-specific
+ * compatibility entry is eligible only when the caller already knows the original language;
+ * the existence of a translation in a storefront is not evidence of an artist's origin.
  */
 internal fun originalEntityCacheLookupKeys(
     entityType: LocalizedEntityType,
     mediaId: String,
     lookupIds: Collection<String> = emptyList(),
-    languages: Collection<String> = ORIGINAL_LANGUAGE_PROBE_ORDER,
+    languages: Collection<String> = emptyList(),
 ): List<String> {
     val ids = sequenceOf(mediaId)
         .plus(lookupIds.asSequence())
@@ -559,6 +678,8 @@ internal const val ORIGINAL_ENTITY_BATCH_SIZE = 50
 internal const val MAX_ORIGINAL_ENTITY_BATCHES_RUNNING = 3
 internal const val MAX_BACKGROUND_ORIGINAL_ENTITY_BATCHES_RUNNING = 2
 internal const val ORIGINAL_ENTITY_BATCH_DELAY_MS = 32L
+internal const val ORIGINAL_ENTITY_MISS_TTL_MS = 10 * 60_000L
+internal const val ORIGINAL_ENTITY_MISS_CACHE_SIZE = 1_024
 internal const val QUERY_SLOW_RESPONSE_MS = 6_000L
 internal const val QUERY_TIMEOUT_MS = 30_000L
 internal const val ARTIST_ALIAS_CACHE_SCHEMA = "V2"
@@ -572,19 +693,6 @@ internal const val CATALOG_REQUEST_TOKEN_PARAM = "hle_catalog_request"
  */
 internal const val AMP_HTTP_MODULE_MARKER_PARAM = "hle_catalog_module"
 internal const val AMP_HTTP_MODULE_MARKER_VALUE = "1"
-internal val ORIGINAL_LANGUAGE_PROBE_ORDER = listOf(
-    "ja-JP",
-    "ko-KR",
-    "zh-Hans-CN",
-    "th-TH",
-    "ru-RU",
-    "uk-UA",
-    "ar-SA",
-    "he-IL",
-    "hi-IN",
-    "el-GR",
-    "bg-BG",
-)
 
 internal fun originalLanguageCacheKeyVariants(language: String): List<String> = when (
     canonicalOriginalLanguage(language)
@@ -707,4 +815,3 @@ internal fun languageTagsForOriginalMetadata(
         .orEmpty()
     return genreLanguages.ifEmpty { languageTagsForIsrc(isrc) }
 }
-

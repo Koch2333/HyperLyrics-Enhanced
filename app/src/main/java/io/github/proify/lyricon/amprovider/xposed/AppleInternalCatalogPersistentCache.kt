@@ -31,9 +31,14 @@ private const val STOREFRONT_APPLY_MAX_ATTEMPTS = 6
 internal fun AppleInternalCatalogResolver.applyContentUiLanguage(selection: Int) {
     contentUiLanguageSelection = selection
     warmPersistentLocalizedCache(selection)
-    if (activeCatalogRequest.get() != null) return
-    if (!restoreStorefrontAccess(isFirstAttempt = true)) {
-        scheduleStorefrontApplyRetry()
+    // The provider is assembled after Application.onCreate (the superclass), while
+    // AppleMusicApplication.onCreate is still initializing applicationConnector.
+    // Defer MediaApi access until that main-thread startup call has returned.
+    mainHandler.post {
+        if (activeCatalogRequest.get() != null) return@post
+        if (!restoreStorefrontAccess(isFirstAttempt = true)) {
+            scheduleStorefrontApplyRetry()
+        }
     }
 }
 
@@ -246,9 +251,14 @@ internal fun AppleInternalCatalogResolver.resolveCachedOriginalEntity(
             mediaId = normalizedId,
             lookupIds = lookupIds,
         ),
+        accept = { alias -> isAcceptableOriginalAlias(alias, alias.language) },
         onResult = { hit ->
-            val validAlias = hit?.alias?.takeIf {
-                isAcceptableOriginalAlias(it, canonicalOriginalLanguage(it.language))
+            val validAlias = hit?.alias
+            if (BuildConfig.DEBUG) {
+                ProviderLogger.info(
+                    "Apple 原名实体缓存读取: id=$normalizedId, entityType=$entityType, " +
+                        "key=${hit?.key}, language=${validAlias?.language}, hit=${hit != null}"
+                )
             }
             if (validAlias != null && hit.key != directKey) {
                 // Promote compatibility/alternate-ID hits so subsequent home builders use the

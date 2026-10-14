@@ -101,6 +101,7 @@ object OnlineLyricTargeter {
         album: String? = null,
         originalAlbum: String? = null,
         collectSourceStatuses: Boolean = false,
+        allowArtistIdentityNearMiss: Boolean = false,
     ): FetchOutcome {
         val outcome = performSearch(
             context = context,
@@ -119,6 +120,7 @@ object OnlineLyricTargeter {
             album = album,
             originalAlbum = originalAlbum,
             collectSourceStatuses = collectSourceStatuses,
+            allowArtistIdentityNearMiss = allowArtistIdentityNearMiss,
         )
         if (outcome.lines != null) {
             return FetchOutcome(
@@ -197,6 +199,7 @@ object OnlineLyricTargeter {
         album: String?,
         originalAlbum: String?,
         collectSourceStatuses: Boolean,
+        allowArtistIdentityNearMiss: Boolean = false,
     ): SearchOutcome {
         val ne = LyricApiProvider.getNeSource(context)
         val qm = LyricApiProvider.qmSource
@@ -262,6 +265,7 @@ object OnlineLyricTargeter {
                 album = metadata.album,
                 originalAlbum = null,
                 collectSourceStatuses = collectSourceStatuses,
+                allowArtistIdentityNearMiss = allowArtistIdentityNearMiss,
                 statusSources = if (index == 0) statusOnlySources else emptyList(),
             )
             if (collectSourceStatuses) {
@@ -310,6 +314,7 @@ object OnlineLyricTargeter {
         originalAlbum: String?,
         collectSourceStatuses: Boolean,
         statusSources: List<SearchSource> = emptyList(),
+        allowArtistIdentityNearMiss: Boolean = false,
     ): SearchOutcome {
 
         val keyword = "$title $artist"
@@ -433,13 +438,14 @@ object OnlineLyricTargeter {
             if (attempt.song != null) {
                 if (attempt.score > bestScore) bestScore = attempt.score
                 if (!attempt.passAttempted) {
-                    nearMissFor(source, attempt, multiCredit)?.let { nearMiss ->
-                        bestNearMiss = if (bestNearMiss == null) {
-                            nearMiss
-                        } else {
-                            preferNearMiss(bestNearMiss, nearMiss)
+                    nearMissFor(source, attempt, multiCredit, allowArtistIdentityNearMiss)
+                        ?.let { nearMiss ->
+                            bestNearMiss = if (bestNearMiss == null) {
+                                nearMiss
+                            } else {
+                                preferNearMiss(bestNearMiss, nearMiss)
+                            }
                         }
-                    }
                 }
             }
         }
@@ -500,6 +506,9 @@ object OnlineLyricTargeter {
         val progressiveKeywords = buildList {
             add(sourceKeyword)
             if (allowFallbackRetry) {
+                for (variant in artistSearchVariants(artist)) {
+                    add(if (source.sourceType == Source.KUGOU) "$variant - $title" else "$title $variant")
+                }
                 addAll(resolveSearchKeywords(title, artist, album))
                 if (multiCredit) add(fallbackKeyword)
             }
@@ -658,6 +667,9 @@ object OnlineLyricTargeter {
                         wordLines = toWordLines(lyricsResult),
                         song = bestSong,
                         score = localBestScore,
+                        titleMatched = titleMatched,
+                        durationClose = durationClose,
+                        artistMatched = artistMatched,
                         status = statusFor(source.sourceType, lyricsResult, list),
                     )
                 }

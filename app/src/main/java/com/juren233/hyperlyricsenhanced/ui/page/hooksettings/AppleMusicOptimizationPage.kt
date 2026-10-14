@@ -111,11 +111,19 @@ fun AppleMusicOptimizationPage(
             )
         )
     }
+    var preventNetworkAutoSkip by remember {
+        mutableStateOf(
+            prefs.getBoolean(
+                RootConstants.KEY_HOOK_APPLE_MUSIC_PREVENT_NETWORK_AUTO_SKIP,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_PREVENT_NETWORK_AUTO_SKIP,
+            )
+        )
+    }
     var simplifyTraditionalLyrics by remember {
         mutableStateOf(
             prefs.getBoolean(
-                RootConstants.KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS,
-                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS,
+                RootConstants.KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_CONTENT,
+                RootConstants.DEFAULT_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_CONTENT,
             )
         )
     }
@@ -533,6 +541,22 @@ fun AppleMusicOptimizationPage(
                         )
                     },
                 )
+                SwitchPreference(
+                    title = stringResource(
+                        R.string.title_apple_music_prevent_network_auto_skip
+                    ),
+                    summary = stringResource(
+                        R.string.summary_apple_music_prevent_network_auto_skip
+                    ),
+                    checked = preventNetworkAutoSkip,
+                    onCheckedChange = { enabled ->
+                        preventNetworkAutoSkip = enabled
+                        saveConfig(
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_PREVENT_NETWORK_AUTO_SKIP,
+                            enabled,
+                        )
+                    },
+                )
             }
         }
         item(key = "app_display_title") {
@@ -546,13 +570,13 @@ fun AppleMusicOptimizationPage(
             ) {
                 SwitchPreference(
                     title = stringResource(
-                        R.string.title_apple_music_simplify_traditional_lyrics
+                        R.string.title_apple_music_simplify_traditional_content
                     ),
                     checked = simplifyTraditionalLyrics,
                     onCheckedChange = { enabled ->
                         simplifyTraditionalLyrics = enabled
                         saveConfig(
-                            RootConstants.KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_LYRICS,
+                            RootConstants.KEY_HOOK_APPLE_MUSIC_SIMPLIFY_TRADITIONAL_CONTENT,
                             enabled,
                         )
                     },

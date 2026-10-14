@@ -15,6 +15,7 @@ import com.juren233.hyperlyricsenhanced.common.media.NextTrackMetadataCache
 import com.juren233.hyperlyricsenhanced.provider.OfficialProviderControlProtocol
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import io.github.proify.lyricon.central.inflate
+import io.github.proify.lyricon.central.ProviderFlowDiagnostics
 import io.github.proify.lyricon.central.json
 import io.github.proify.lyricon.central.util.ScreenStateMonitor
 import io.github.proify.lyricon.lyric.model.Song
@@ -62,13 +63,21 @@ internal class PlayerBinder(
     } else null
     private var lastPositionPublishDiagnosticAtMs = 0L
     private val playbackStateSequence = AtomicLong(0L)
+    private val closedInputDiagnostic = if (BuildConfig.DEBUG) AtomicBoolean(false) else null
 
     init {
         ScreenStateMonitor.addListener(this)
+        ProviderFlowDiagnostics.log("player_created", providerInfo) {
+            "playerBinder=${ProviderFlowDiagnostics.id(this)}"
+        }
     }
 
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        ProviderFlowDiagnostics.log("player_close", providerInfo) {
+            "playerBinder=${ProviderFlowDiagnostics.id(this)}, stateSequence=${playbackStateSequence.get()}, " +
+                "songId=${recorder.song?.id}, playing=${recorder.isPlaying}"
+        }
         ScreenStateMonitor.removeListener(this)
         stopPositionUpdate()
 
@@ -108,6 +117,9 @@ internal class PlayerBinder(
 
     @OptIn(ExperimentalSerializationApi::class)
     override fun setSong(bytes: ByteArray?) {
+        ProviderFlowDiagnostics.log("player_song_input", providerInfo) {
+            "playerBinder=${ProviderFlowDiagnostics.id(this)}, bytes=${bytes?.size}, closed=${closed.get()}"
+        }
         if (closed.get()) return
 
         val generation = songUpdateGeneration.incrementAndGet()
@@ -120,11 +132,19 @@ internal class PlayerBinder(
                         .use {
                             json.decodeFromStream(Song.serializer(), it)
                         }
+                }.onFailure { error ->
+                    ProviderFlowDiagnostics.log("player_song_decode_failed", providerInfo) {
+                        "playerBinder=${ProviderFlowDiagnostics.id(this@PlayerBinder)}, error=${error.javaClass.name}"
+                    }
                 }.getOrNull()
             }
 
             val normalized = song?.normalize()
             if (closed.get() || generation != songUpdateGeneration.get()) return@launch
+            ProviderFlowDiagnostics.log("player_song_decoded", providerInfo) {
+                "playerBinder=${ProviderFlowDiagnostics.id(this@PlayerBinder)}, closed=${closed.get()}, " +
+                    "songId=${normalized?.id}, lyrics=${normalized?.lyrics?.size ?: 0}"
+            }
             recorder.song = normalized
             playerEvents.safeNotify { onSongChanged(recorder, normalized) }
             // Song decoding is asynchronous: lyrics may arrive after the playback anchor.
@@ -134,7 +154,10 @@ internal class PlayerBinder(
     }
 
     override fun setPlaybackState(isPlaying: Boolean) {
-        if (closed.get()) return
+        if (closed.get()) {
+            logClosedInput("playback_boolean")
+            return
+        }
 
         val sequence = playbackStateSequence.incrementAndGet()
         if (BuildConfig.DEBUG) {
@@ -159,7 +182,10 @@ internal class PlayerBinder(
     }
 
     override fun setPlaybackState2(state: PlaybackState?) {
-        if (closed.get()) return
+        if (closed.get()) {
+            logClosedInput("playback_state")
+            return
+        }
 
         val sequence = playbackStateSequence.incrementAndGet()
 
@@ -392,7 +418,17 @@ internal class PlayerBinder(
         try {
             block()
         } catch (e: Exception) {
+            ProviderFlowDiagnostics.log("player_dispatch_failed", providerInfo) {
+                "playerBinder=${ProviderFlowDiagnostics.id(this@PlayerBinder)}, error=${e.javaClass.name}"
+            }
             Log.e(TAG, "player event dispatch failed", e)
+        }
+    }
+
+    private fun logClosedInput(input: String) {
+        if (closedInputDiagnostic?.compareAndSet(false, true) != true) return
+        ProviderFlowDiagnostics.log("closed_player_input", providerInfo) {
+            "playerBinder=${ProviderFlowDiagnostics.id(this)}, input=$input"
         }
     }
 

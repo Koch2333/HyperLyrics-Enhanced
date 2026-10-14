@@ -6,6 +6,7 @@ import android.content.Intent
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.FeatureEntryConfig
 import com.juren233.hyperlyricsenhanced.common.FeatureEntryInitializer
+import com.juren233.hyperlyricsenhanced.common.IslandFontWeightMode
 import com.juren233.hyperlyricsenhanced.common.LogLevelPolicy
 import com.juren233.hyperlyricsenhanced.common.PreferenceDiagnostics
 import com.juren233.hyperlyricsenhanced.common.PrefsBridge
@@ -24,6 +25,7 @@ class RootApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        IslandFontWeightMode.initialize(getSharedPreferences(UIConstants.PREF_NAME, Context.MODE_PRIVATE))
         LocaleUtils.clearLegacyPlatformLocale(this)
         AppUtils.initPredictiveBackGesture(this)
         applyBuildDefaultLogLevel()
@@ -35,7 +37,7 @@ class RootApplication : Application() {
             attachActivityFrameMetrics = true,
         )
         PrefsBridge.init(this)
-        StorageKeyMigrator.migrateLegacySuperIslandKeys(this)
+        StorageKeyMigrator.migrateLegacyKeys(this)
         appContext = this
         initializeFeatureEntries()
 
