@@ -145,7 +145,8 @@ internal class AppleAlbumComposeMetadataHooks(
                 exit = { mapping.remove() },
             )
             runtime.hookRegistrar.installResultOverrideHook(method(AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR)) { chain, original ->
-                val root = chain.args.getOrNull(1)
+                // 1611 compares Pair(root, trackEntities) instead of the bare root entity.
+                val root = chain.args.getOrNull(1).let { if (it is Pair<*, *>) it.first else it }
                 // Same-root aliases otherwise disappear at native distinctUntilChanged.
                 if (original == true && root != null && pages.invalidates(root) { page ->
                         page.vm.get()?.let { currentData?.invoke(it) }
