@@ -21,7 +21,7 @@ import java.lang.reflect.Method
 import java.util.WeakHashMap
 
 /**
- * Issue #35: read-only Super Island geometry and drawing-state snapshots.
+ * Issue #35: read-only HyperIsland geometry and drawing-state snapshots.
  * No listener, polling loop, extra measure/layout, or change to clipping is installed.
  * A bounded series samples the same content after native width calculation, through
  * the width animation, and after the marquee has had time to move. All entry points
@@ -266,13 +266,13 @@ internal object IslandOverlapDiagnostics {
                 else -> null
             }
             val main = when (target) {
-                is RichLyricLineView -> target.main.model.text
-                is SpaceGateRichLyricLineView -> target.main.model.text
+                is RichLyricLineView -> target.main.boundText
+                is SpaceGateRichLyricLineView -> target.main.boundText
                 else -> ""
             }
             val secondary = when (target) {
-                is RichLyricLineView -> target.secondary.model.text
-                is SpaceGateRichLyricLineView -> target.secondary.model.text
+                is RichLyricLineView -> target.secondary.boundText
+                is SpaceGateRichLyricLineView -> target.secondary.boundText
                 else -> ""
             }
             append('|').append(id(target)).append(':').append(main.length).append('/')

@@ -312,7 +312,7 @@ class SpaceGateRichLyricLineView(
         return canAnimateNextLinePromotion(
             wasPreview = secondaryIsNextLinePreview,
             currentMainText = currentMainText,
-            previewText = secondary.model.text,
+            previewText = secondary.boundText,
             nextMainText = nextMainText,
             lineAdvanced = hasLyricLineAdvanced(previousLine, targetLine),
             attached = isAttachedToWindow,
@@ -496,6 +496,16 @@ class SpaceGateRichLyricLineView(
         lastPosition = position
         main.updatePosition(position)
         secondary.updatePosition(position)
+    }
+
+    /**
+     * 宿主形变期间的逐字进度：内容、宽度、光晕与预览仍由延后批次在稳定后提交，
+     * 这里只让已上屏的逐字行继续走。不记 [lastPosition]，稳定后的 [setPosition] 照常完整执行。
+     */
+    fun advanceWordProgress(position: Long) {
+        if (animationTransition) return
+        main.updateWordProgress(position)
+        secondary.updateWordProgress(position)
     }
 
     fun setPlaybackActive(active: Boolean) {

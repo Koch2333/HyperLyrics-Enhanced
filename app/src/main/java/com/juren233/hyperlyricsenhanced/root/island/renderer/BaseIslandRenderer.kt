@@ -12,6 +12,7 @@ import com.juren233.hyperlyricsenhanced.lyric.view.SpaceGateRichLyricLineView
 import com.juren233.hyperlyricsenhanced.root.HookEntry
 import com.juren233.hyperlyricsenhanced.root.LyriconDataBridge
 import com.juren233.hyperlyricsenhanced.root.island.IslandAlbumCoverStyleHooker
+import com.juren233.hyperlyricsenhanced.root.island.IslandContentUpdateCoordinator
 import com.juren233.hyperlyricsenhanced.root.island.IslandHostFacade
 import com.juren233.hyperlyricsenhanced.root.island.IslandHostRetirementPolicy
 import com.juren233.hyperlyricsenhanced.root.island.IslandLyricTextInjector
@@ -31,6 +32,14 @@ import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import java.util.WeakHashMap
 
 object BaseIslandRenderer : IslandRenderer {
+
+    @Volatile private var retiredForReload = false
+
+    internal fun beginHotReload() {
+        retiredForReload = true
+        mainHandler.removeCallbacksAndMessages(null)
+        IslandContentUpdateCoordinator.release()
+    }
 
     private const val REFRESH_DEBOUNCE_MS = 32L
     private val SCREEN_ON_REFRESH_DELAYS_MS = longArrayOf(0L, 120L, 400L, 900L)
@@ -87,6 +96,7 @@ object BaseIslandRenderer : IslandRenderer {
     fun currentPlaybackActive(): Boolean = playbackActive
 
     override fun refreshActiveIsland() {
+        if (retiredForReload) return
         fullRefreshPending = true
         scheduleRefresh()
     }
@@ -97,6 +107,7 @@ object BaseIslandRenderer : IslandRenderer {
     }
 
     fun onScreenInteractive() {
+        if (retiredForReload) return
         val generation = ++screenRefreshGeneration
         SCREEN_ON_REFRESH_DELAYS_MS.forEach { delay ->
             mainHandler.postDelayed(
@@ -129,6 +140,7 @@ object BaseIslandRenderer : IslandRenderer {
     }
 
     fun refreshDynamicWidth() {
+        if (retiredForReload) return
         dynamicWidthRefreshPending = true
         scheduleRefresh()
     }
@@ -183,6 +195,7 @@ object BaseIslandRenderer : IslandRenderer {
         val config = IslandSlotRuntimeConfig.from(prefs)
         activeViews.forEach { (cv, _) ->
             cv.post {
+                if (retiredForReload || IslandContentUpdateCoordinator.deferContent(cv, refreshWidth)) return@post
                 // Existing content is refreshed below. Reconfiguring it here forces
                 // applySlotContent() to report a change on every screen-on retry, which
                 // incorrectly turns four content refreshes into four host width relayouts.
@@ -206,13 +219,24 @@ object BaseIslandRenderer : IslandRenderer {
                     IslandHostFacade.triggerSystemRelayout(cv)
                 }
                 val injected = IslandLyricTextInjector.hasInjectedLyricView(cv)
+                val hostDiagnostic = if (BuildConfig.DEBUG) runCatching {
+                    val shown = cv.isShown
+                    val attached = cv.isAttachedToWindow
+                    val visibility = cv.visibility
+                    val width = cv.width
+                    val height = cv.height
+                    ("hostShown=$shown, hostAttached=$attached, hostVisibility=$visibility, " +
+                        "hostWidth=$width, hostHeight=$height") to
+                        "$injected|$shown|$attached|$visibility|${width > 0}|${height > 0}"
+                }.getOrDefault("hostState=unavailable" to "unavailable") else "" to ""
                 DisplayDiagnosticLogger.log(
                     channel = "ISLAND",
-                    result = if (injected) "shown" else "skipped",
-                    reason = if (injected) "injected_view_visible" else "injection_unavailable",
+                    result = if (injected) "present" else "skipped",
+                    reason = if (injected) "injected_view_present" else "injection_unavailable",
                     extra = "targetViews=${activeViews.size}, injectionChanged=$injectionChanged, " +
-                        "playbackActive=$playbackActive",
+                        "playbackActive=$playbackActive, ${hostDiagnostic.first}",
                     dedupeKey = "ISLAND/refresh",
+                    infoState = hostDiagnostic.second,
                 )
             }
         }
@@ -223,11 +247,12 @@ object BaseIslandRenderer : IslandRenderer {
             result = "pending",
             reason = "refresh_scheduled",
             extra = "targetViews=${activeViews.size}, playbackActive=$playbackActive",
-            dedupeKey = "ISLAND/refresh",
+            dedupeKey = "ISLAND/refresh_pending",
         )
     }
 
     override fun updateLyricLine() {
+        if (retiredForReload) return
         if ((HookEntry.instance?.prefs?.getBoolean(RootConstants.KEY_HOOK_ENABLE_HYPER_ISLAND, RootConstants.DEFAULT_HOOK_ENABLE_HYPER_ISLAND)) != true) {
             DisplayDiagnosticLogger.log("ISLAND", "skipped", "feature_disabled")
             return
@@ -261,6 +286,7 @@ object BaseIslandRenderer : IslandRenderer {
         }
         activeViews.forEach { (cv, _) ->
                 cv.post {
+                    if (retiredForReload || IslandContentUpdateCoordinator.deferContent(cv)) return@post
                     val recoveryAction = IslandViewRecoveryPolicy.decide(
                         hasRegisteredHost = true,
                         hasInjectedView = IslandLyricTextInjector.hasInjectedLyricView(cv),
@@ -334,10 +360,12 @@ object BaseIslandRenderer : IslandRenderer {
     }
 
     override fun updatePosition(position: Long) {
+        if (retiredForReload) return
         updatePositionForActiveViews(position, isSeek = false)
     }
 
     override fun seekTo(position: Long) {
+        if (retiredForReload) return
         updatePositionForActiveViews(position, isSeek = true)
     }
 
@@ -350,6 +378,14 @@ object BaseIslandRenderer : IslandRenderer {
         IslandViewRegistry.snapshotAttachedInjectedViews(lyricPkg)
             .forEach { (cv, indexedViews) ->
                 cv.post {
+                    if (retiredForReload) return@post
+                    if (IslandContentUpdateCoordinator.deferContent(cv, isSeek = isSeek)) {
+                        // 形变期间只放行逐字进度，新句不再停在开头等宿主稳定；seek 与其余内容仍整批延后。
+                        if (!isSeek && IslandContentUpdateCoordinator.isRealContent(cv)) {
+                            advanceWordProgress(cv, indexedViews, position)
+                        }
+                        return@post
+                    }
                     if (indexedViews.isEmpty()) {
                         updateViewPosition(
                             cv.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG),
@@ -382,6 +418,7 @@ object BaseIslandRenderer : IslandRenderer {
     }
 
     override fun onPlaybackStateChanged(isPlaying: Boolean) {
+        if (retiredForReload) return
         val prefs = HookEntry.instance?.prefs ?: return
         if (!prefs.getBoolean(RootConstants.KEY_HOOK_ENABLE_HYPER_ISLAND, RootConstants.DEFAULT_HOOK_ENABLE_HYPER_ISLAND)) {
             clearAllViews()
@@ -467,7 +504,8 @@ object BaseIslandRenderer : IslandRenderer {
             .filter { (_, pkgName) -> lyricPkg == null || pkgName == lyricPkg }
             .forEach { (cv, _) ->
                 cv.post {
-                    IslandHostFacade.clearAndRefresh(cv)
+                    if (IslandContentUpdateCoordinator.deferContent(cv)) return@post
+                    if (!retiredForReload) IslandHostFacade.clearAndRefresh(cv)
                 }
             }
         clearedByPause = true
@@ -497,6 +535,21 @@ object BaseIslandRenderer : IslandRenderer {
         }
     }
 
+    private fun advanceWordProgress(cv: ViewGroup, indexedViews: List<View>, position: Long) {
+        val views = indexedViews.ifEmpty {
+            listOf(
+                cv.findViewWithTag<View>(IslandProbeUtils.LEFT_TEST_VIEW_TAG),
+                cv.findViewWithTag<View>(IslandProbeUtils.RIGHT_TEST_VIEW_TAG),
+            )
+        }
+        views.forEach { view ->
+            when (view) {
+                is RichLyricLineView -> view.advanceWordProgress(position)
+                is SpaceGateRichLyricLineView -> view.advanceWordProgress(position)
+            }
+        }
+    }
+
     private fun updateViewPosition(view: View?, position: Long, isSeek: Boolean) {
         when (view) {
             is RichLyricLineView -> if (isSeek) view.seekTo(position) else view.setPosition(position)
@@ -516,7 +569,25 @@ object BaseIslandRenderer : IslandRenderer {
         }
     }
 
+    internal fun releaseForReload() {
+        mainHandler.removeCallbacksAndMessages(null)
+        IslandContentUpdateCoordinator.release()
+        screenRefreshGeneration++
+        pauseTransitionGuard.reset()
+        playbackActive = false
+        clearedByPause = true
+        IslandViewRegistry.allRootsForReload().forEach { root ->
+            com.juren233.hyperlyricsenhanced.root.island.IslandTextHookerSupport
+                .clearInjectedIsland(root, suppressRelayout = true)
+        }
+        IslandViewRegistry.releaseForReload()
+        nextSongPreviewActive.clear()
+        injectionRecoveryFailures.clear()
+    }
+
     override fun clearAllViews() {
+        if (retiredForReload) return
+        IslandContentUpdateCoordinator.release()
         mainHandler.removeCallbacks(refreshRunnable)
         mainHandler.removeCallbacks(pauseRestoreRunnable)
         dynamicWidthRefreshPending = false
@@ -531,6 +602,39 @@ object BaseIslandRenderer : IslandRenderer {
                     IslandHostFacade.clearAndRefresh(cv)
                 }
             }
+    }
+
+    /** Called synchronously inside the settled batch; it deliberately reads the latest model. */
+    internal fun refreshAfterIslandSettled(cv: ViewGroup, isSeek: Boolean) {
+        if (retiredForReload || !cv.isAttachedToWindow) return
+        val prefs = HookEntry.instance?.prefs ?: return
+        if (!shouldRenderInjectedIsland()) {
+            IslandHostFacade.clearAndRefresh(cv)
+            return
+        }
+        val media = com.juren233.hyperlyricsenhanced.root.island.IslandTextHookerSupport
+            .extractMediaInfoFromContentOrReal(cv) ?: return
+        val packageName = LyriconDataBridge.currentLyricPackageName ?: return
+        if (media.packageName != packageName) return
+        val config = IslandSlotRuntimeConfig.from(prefs)
+        val injected = IslandLyricTextInjector.injectSlots(cv, reconfigureExisting = false)
+        val position = LyriconDataBridge.currentPosition
+        // Only a real seek cancels the old transition, before the latest content starts its own.
+        if (isSeek) {
+            updateViewPosition(cv.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG), position, isSeek = true)
+            updateViewPosition(cv.findViewWithTag(IslandProbeUtils.RIGHT_TEST_VIEW_TAG), position, isSeek = true)
+        }
+        val changed = updateContentForView(cv, packageName, prefs, config)
+        updateViewPosition(cv.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG), position, isSeek = false)
+        updateViewPosition(cv.findViewWithTag(IslandProbeUtils.RIGHT_TEST_VIEW_TAG), position, isSeek = false)
+        if (IslandContentUpdateCoordinator.isRealContent(cv)) {
+            IslandLyricTextInjector.resumeInjectedContentMotion(cv, playbackActive)
+        } else {
+            IslandLyricTextInjector.freezeInjectedLyricProgress(cv, position)
+        }
+        if (injected || (config.dynamicWidthEnabled && changed)) {
+            IslandHostFacade.triggerLyricContentRelayout(cv)
+        }
     }
 
     private fun updateContentForView(

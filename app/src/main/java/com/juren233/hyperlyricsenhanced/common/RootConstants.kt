@@ -24,10 +24,11 @@ object RootConstants {
     const val CLASSIC_AOD_FOCUS_REFRESH_AUTHORITY =
         "com.juren233.hyperlyricsenhanced.classic_aod_focus_refresh"
     const val CLASSIC_AOD_FOCUS_REFRESH_METHOD = "refresh"
+    const val CLASSIC_AOD_FOCUS_EXTRA_LYRIC_PACKAGE = "lyric_package"
     const val DEBUG_APPLE_PRONUNCIATION_DIAGNOSTIC_METHOD =
         "debug_apple_pronunciation_diagnostic"
 
-    // ================= HOOK & SUPER ISLAND KEYS =================
+    // ================= HOOK & HYPERISLAND KEYS =================
     const val KEY_HOOK_ENABLE_HYPER_ISLAND = "key_hook_enable_hyper_island"
     const val KEY_HOOK_ENABLE_DYNAMIC_ISLAND = "key_hook_enable_dynamic_island"
     const val KEY_HOOK_ENABLE_AOD_LYRICS = "key_hook_enable_aod_lyrics"

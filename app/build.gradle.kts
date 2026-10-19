@@ -11,7 +11,7 @@ plugins {
 val keystoreProperties = Properties().apply {
     val propertiesFile = rootProject.file("keystore.properties")
     if (propertiesFile.isFile) {
-        propertiesFile.inputStream().use(::load)
+        propertiesFile.reader(Charsets.UTF_8).use(::load)
     }
 }
 
@@ -40,8 +40,8 @@ android {
         applicationId = "com.juren233.hyperlyricsenhanced"
         minSdk = 33
         targetSdk = 37
-        versionCode = 215000
-        versionName = ciVersionName ?: "8.1.5"
+        versionCode = 220081
+        versionName = ciVersionName ?: "8.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

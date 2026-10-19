@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import com.juren233.hyperlyricsenhanced.R
 import com.juren233.hyperlyricsenhanced.provider.OfficialProviderCatalog
 import com.juren233.hyperlyricsenhanced.root.utils.ShellUtils
+import com.juren233.hyperlyricsenhanced.ui.component.AppWindowDialog
+import com.juren233.hyperlyricsenhanced.ui.utils.LocaleUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -40,7 +42,6 @@ import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.SnackbarDuration
 import top.yukonga.miuix.kmp.basic.SnackbarHostState
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.window.WindowDialog
 
 internal data class OneTapRefreshMusicApp(
     val packageName: String,
@@ -55,40 +56,29 @@ internal data class OneTapRefreshTargets(
 )
 
 internal object OneTapRefreshCatalog {
-    private val knownMusicApps = buildList {
-        val addedPackages = linkedSetOf<String>()
-
-        fun addKnownApp(packageName: String, displayName: String) {
-            if (addedPackages.add(packageName)) {
-                add(OneTapRefreshMusicApp(packageName, displayName))
-            }
-        }
-
-        addKnownApp(OfficialProviderCatalog.APPLE_MUSIC_PACKAGE_NAME, "Apple Music")
+    private val knownMusicPackages = buildSet {
+        add(OfficialProviderCatalog.APPLE_MUSIC_PACKAGE_NAME)
         OfficialProviderCatalog.definitions.forEach { definition ->
-            definition.targetPackages.forEach { packageName ->
-                addKnownApp(packageName, definition.displayNameForPackage(packageName))
-            }
+            addAll(definition.targetPackages)
         }
     }
 
     fun installedMusicApps(packageManager: PackageManager): List<OneTapRefreshMusicApp> =
-        installedMusicApps(
-            knownMusicApps.mapNotNullTo(linkedSetOf()) { app ->
-                runCatching {
-                    packageManager.getApplicationInfo(
-                        app.packageName,
-                        PackageManager.ApplicationInfoFlags.of(0L),
-                    )
-                    app.packageName
-                }.getOrNull()
-            },
-        )
+        installedMusicApps { packageName ->
+            val info = runCatching {
+                packageManager.getApplicationInfo(
+                    packageName,
+                    PackageManager.ApplicationInfoFlags.of(0L),
+                )
+            }.getOrNull() ?: return@installedMusicApps null
+            runCatching { info.loadLabel(packageManager).toString() }.getOrDefault(packageName)
+        }
 
     internal fun installedMusicApps(
-        installedPackages: Set<String>,
-    ): List<OneTapRefreshMusicApp> = knownMusicApps.filter { app ->
-        app.packageName in installedPackages
+        installedLabel: (String) -> String?,
+    ): List<OneTapRefreshMusicApp> = knownMusicPackages.mapNotNull { packageName ->
+        val label = installedLabel(packageName) ?: return@mapNotNull null
+        OneTapRefreshMusicApp(packageName, label.ifBlank { packageName })
     }
 
     /**
@@ -125,6 +115,17 @@ internal object OneTapRefreshSelectionPolicy {
     const val SYSTEM_UI_ID = "__system_ui__"
     const val ALL_MUSIC_APPS_ID = "__all_music_apps__"
     const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+
+    /** 打开面板时默认勾选系统界面与全部音乐App；无聚合项时逐个勾选列出的音乐App。 */
+    fun defaultSelection(targets: OneTapRefreshTargets): Set<String> = buildSet {
+        add(SYSTEM_UI_ID)
+        if (targets.musicApps.isEmpty()) return@buildSet
+        if (targets.showAllMusicAppsOption) {
+            add(ALL_MUSIC_APPS_ID)
+        } else {
+            targets.musicApps.mapTo(this, OneTapRefreshMusicApp::packageName)
+        }
+    }
 
     fun toggle(
         selectedIds: Set<String>,
@@ -182,7 +183,7 @@ internal fun OneTapRefreshDialog(
     onDismissFinished: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    WindowDialog(
+    AppWindowDialog(
         title = stringResource(R.string.title_one_tap_refresh),
         // 仅在确认无 root 时提示；null 表示检查进行中，保持上一次结果避免副标题闪现
         summary = if (hasRootAccess == false) {
@@ -301,11 +302,11 @@ internal class OneTapRefreshController(
      * [appleMusicOnly] 为 true 时只保留系统界面与 Apple Music 两个选项。
      */
     fun open(appleMusicOnly: Boolean = false) {
-        selectedIds = emptySet()
         targets = OneTapRefreshCatalog.refreshTargets(
-            packageManager = context.packageManager,
+            packageManager = LocaleUtils.systemLanguageContext(context).packageManager,
             appleMusicOnly = appleMusicOnly,
         )
+        selectedIds = OneTapRefreshSelectionPolicy.defaultSelection(targets)
         showDialog = true
         rootCheckSequence += 1L
         val checkSequence = rootCheckSequence

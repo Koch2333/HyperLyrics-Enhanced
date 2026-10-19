@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.juren233.hyperlyricsenhanced.R
@@ -40,7 +41,7 @@ import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.TabRow
+import top.yukonga.miuix.kmp.basic.TabRowWithContour
 import top.yukonga.miuix.kmp.basic.TabRowDefaults
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -60,7 +61,7 @@ fun HelpPage() {
     val pagerState = rememberPagerState { tabs.size }
     val coroutineScope = rememberCoroutineScope()
 
-    val superIslandListState = rememberLazyListState()
+    val hyperIslandListState = rememberLazyListState()
     val dynamicIslandListState = rememberLazyListState()
 
     Scaffold(
@@ -76,7 +77,8 @@ fun HelpPage() {
                         }
                     },
                     bottomContent = {
-                        TabRow(
+                        // Same segmented style as the HyperIsland touch side switcher.
+                        TabRowWithContour(
                             tabs = tabs,
                             selectedTabIndex = pagerState.currentPage,
                             onTabSelected = { index ->
@@ -86,7 +88,12 @@ fun HelpPage() {
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp)
                                 .padding(bottom = 8.dp),
-                            colors = TabRowDefaults.tabRowColors(backgroundColor = Color.Transparent)
+                            colors = TabRowDefaults.tabRowColors(
+                                backgroundColor = MiuixTheme.colorScheme.surfaceContainer,
+                                selectedBackgroundColor = MiuixTheme.colorScheme.primary,
+                                selectedContentColor = MiuixTheme.colorScheme.onPrimary,
+                            ),
+                            maxWidth = Dp.Infinity,
                         )
                     }
                 )
@@ -95,7 +102,7 @@ fun HelpPage() {
     ) { innerPadding ->
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             HorizontalPager(state = pagerState, verticalAlignment = Alignment.Top, beyondViewportPageCount = 1) { page ->
-                val listState = if (page == 0) superIslandListState else dynamicIslandListState
+                val listState = if (page == 0) hyperIslandListState else dynamicIslandListState
                 val topPadding = innerPadding.calculateTopPadding()
                 val bottomPadding = innerPadding.calculateBottomPadding()
                 val contentPadding = remember(topPadding, bottomPadding) {
@@ -116,7 +123,7 @@ fun HelpPage() {
                     contentPadding = contentPadding,
                 ) {
                     when (page) {
-                        0 -> superIslandHelpSections(
+                        0 -> hyperIslandHelpSections(
                             onOpenLyriconConfig = {
                                 navigator.navigate(Route.LyricProvider)
                             }
@@ -130,7 +137,7 @@ fun HelpPage() {
 }
 
 @OptIn(ExperimentalLayoutApi::class)
-private fun LazyListScope.superIslandHelpSections(
+private fun LazyListScope.hyperIslandHelpSections(
     onOpenLyriconConfig: () -> Unit,
 ) {
     // 1. 配置流程

@@ -45,8 +45,16 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
 
     override val textPaint: TextPaint = TextPaintX().apply { textSize = 24f.sp }
 
-    val model: LyricModel get() = _model
+    /** Compatibility escape hatch: exposing writable words/arrays disables this bind's reuse. */
+    val model: LyricModel
+        get() {
+            geometryReuse.revoke()
+            return _model
+        }
     private var _model: LyricModel = emptyLyricModel()
+    private val geometryReuse = BoundGeometryReuse<LyricModel, WordGeometryMetrics>().apply { bind(_model) }
+    internal val boundText: String get() = _model.text
+    internal val drawnText: String get() = if (_model.isPlainText) _model.text else _model.wordText
 
     private val interludeDotsRenderer = InterludeDotsRenderer()
 
@@ -256,13 +264,18 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     fun setTextSize(size: Float) {
-        val needsUpdate = textPaint.textSize != size || syncRenderer.bgPaint.textSize != size
-        if (!needsUpdate) return
-        textPaint.textSize = size
-        syncRenderer.setTextSize(size)
-        refreshSizes()
+        if (!applyTextSizeToPaints(size)) return
+        refreshSizes(GeometryReason.TEXT_SIZE)
         syncRenderer.updateLayout(_model, lineState, scrollWidth, measuredHeight)
         invalidate()
+    }
+
+    /** Paint 部分；调用方负责随后刷新几何与渲染器布局。返回字号是否实际改变。 */
+    private fun applyTextSizeToPaints(size: Float): Boolean {
+        if (textPaint.textSize == size && syncRenderer.bgPaint.textSize == size) return false
+        textPaint.textSize = size
+        syncRenderer.setTextSize(size)
+        return true
     }
 
     private fun applyCurrentTypeface() {
@@ -274,6 +287,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
 
     fun setLyric(rawLine: LyricLine?) {
         val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
+        val previousModel = _model
 
         traceSwitch("before_bind", dumpHistory = true)
         reset()
@@ -281,9 +295,12 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         scrollStarted = false
 
         _model = line?.normalize()?.createModel() ?: emptyLyricModel()
+        geometryReuse.bind(_model)
+        // 设置刷新等同句重绑不是换句落地，保留原有直接同步，不从头重扫高亮。
+        if (SwitchProgressCatchUp.isSameLine(previousModel, _model)) syncRenderer.cancelSwitchCatchUp()
         applyCurrentTypeface()
         activeRenderer = if (_model.isPlainText) scrollRenderer else syncRenderer
-        refreshSizes()
+        refreshSizes(GeometryReason.BIND)
         updateColorsIfReady()
         traceSwitch("after_bind")
         invalidate()
@@ -295,7 +312,8 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     ) {
         this.centerIfPossible = center
         updateColor(text.color, highlight.background, highlight.foreground)
-        setTextSize(text.size)
+        // 字号、字体、混排配置全部就绪后只刷新一次几何，避免先按旧字体测一遍。
+        val textSizeChanged = applyTextSizeToPaints(text.size)
         baseTypeface = text.typeface
         narrowTypeface = text.narrowTypeface
         applyCurrentTypeface()
@@ -319,7 +337,8 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
             isHorizontalFadingEdgeEnabled = true
         }
 
-        refreshSizes()
+        refreshSizes(GeometryReason.CONFIGURE)
+        if (textSizeChanged) syncRenderer.updateLayout(_model, lineState, scrollWidth, measuredHeight)
         animator.stop()
         if (!isStaticPreview && playbackActive) animator.startIfNeeded()
         invalidate()
@@ -394,6 +413,11 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         }
     }
 
+    /** 宿主形变期间只推进逐字高亮；纯文本滚动与间奏指示仍随稳定后的延后批次开始。 */
+    fun updateWordProgress(posMs: Long) {
+        if (isWordSync && !isInterludeIndicator) updatePosition(posMs)
+    }
+
     fun updatePosition(posMs: Long) {
         if (contentSwitchPaused || layoutRolePaused || isStaticPreview) return
         if (isInterludeIndicator) {
@@ -454,8 +478,21 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         }
     }
 
-    fun refreshSizes() {
-        _model.updateSizes(textPaint, currentTypefaceSelector)
+    fun refreshSizes() = refreshSizes(GeometryReason.OTHER)
+
+    private fun refreshSizes(reason: Int, allowResizeReuse: Boolean = false) {
+        val model = _model
+        val paint = textPaint
+        val base = baseTypeface
+        val narrow = narrowTypeface
+        val preparedWidth = incomingWidth.preparedTextWidth(model.text, paint, base, narrow)
+        if (model.words.isEmpty()) {
+            // Independent plain rows have no word geometry or seam descriptor to retain.
+            model.updateSizesDiagnosed(paint, MixedTypefaceText.typefaceSelector(base, narrow), preparedWidth, reason)
+        } else {
+            model.updateOwnedSizes(paint, base, narrow, preparedWidth,
+                reason, geometryReuse, allowResizeReuse)
+        }
     }
 
     fun relayout() {
@@ -482,9 +519,10 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
         syncRenderer.reset(lineState)
         lineShadowRenderer.clear()
         _model = emptyLyricModel()
+        geometryReuse.bind(_model)
         activeRenderer = scrollRenderer
         lastWidthOverflow = null
-        refreshSizes()
+        refreshSizes(GeometryReason.RESET)
         invalidate()
     }
 
@@ -496,7 +534,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w > 0 && h > 0) {
-            refreshSizes()
+            refreshSizes(GeometryReason.RESIZE, allowResizeReuse = true)
             updateColorsIfReady()
         }
         if (w != oldw && w > 0) {
@@ -637,7 +675,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     /** Independent-row endpoint for the same glyph morph renderer used by the full island. */
     internal fun layoutRoleSnapshot(incoming: LyricLine? = null): SpaceGatePromotionSnapshot? {
         val model = incoming?.normalize()?.createModel()?.apply {
-            updateSizes(textPaint, currentTypefaceSelector)
+            updateSizesDiagnosed(textPaint, currentTypefaceSelector, diagnosticReason = GeometryReason.ROLE_SNAPSHOT)
         } ?: _model
         if (interludeDotsRenderer.isIndicator(model)) return null
         val text = if (model.isPlainText) model.text else model.wordText
@@ -763,23 +801,15 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
      * 与 [setLyric] 后的 [lineWidth] 实测走同一条管线，用于动态长度在
      * 预览提升动画期间同步预判内容落地后的岛宽。
      */
-    fun measureIncomingHugWidth(rawLine: LyricLine?): Int {
-        val line = if (rawLine?.text.isNullOrBlank()) null else rawLine
-        val model = line?.normalize()?.createModel() ?: return 0
-        val width = if (interludeDotsRenderer.isIndicator(model)) {
-            interludeDotsRenderer.width(textPaint.textSize)
-        } else {
-            model.updateSizes(textPaint, currentTypefaceSelector)
-            model.width
-        }
-        val shadowRadius = textPaint.getShadowLayerRadius()
-        val shadowPad = if (shadowRadius > 0f) {
-            ceil(shadowRadius + abs(textPaint.getShadowLayerDx())).toInt()
-        } else {
-            0
-        }
-        return ceil(width).toInt() + shadowPad
+    private val incomingWidth = IncomingLyricWidth()
+
+    internal fun prepareIncomingWidths(lyrics: List<com.juren233.hyperlyricsenhanced.lyric.model.RichLyricLine>?, gate: WidthPreparationGate) {
+        incomingWidth.prepare(lyrics, gate, textPaint, baseTypeface, narrowTypeface)
     }
+
+    fun measureIncomingHugWidth(rawLine: LyricLine?): Int = incomingWidth.measure(
+        rawLine, textPaint, baseTypeface, narrowTypeface, interludeDotsRenderer.width(textPaint.textSize),
+    )
 
     override fun onVisibilityAggregated(isVisible: Boolean) {
         super.onVisibilityAggregated(isVisible)
@@ -801,6 +831,7 @@ open class LyricLineView(context: Context, attrs: AttributeSet? = null) :
     }
 
     override fun onDetachedFromWindow() {
+        incomingWidth.clear()
         PositionUpdateDemand.active.detach(this)
         super.onDetachedFromWindow()
         MarqueeDiag.i(this, "detached") {

@@ -5,7 +5,7 @@
     <string name="debug_build_notice">This is a debug build. For everyday use, download and install a release build instead.</string>
     <string name="module_update_available_version">New version: %1$s</string>
     <string name="apple_music_provider_description">Built-in Apple Music word-synced lyrics provider</string>
-    <string name="app_description">Lyrics on HyperOS 3 HyperIsland and Xiaomi AOD, plus Apple Music enhancements</string>
+    <string name="app_description">Lyrics on HyperOS 3&amp;4 HyperIsland and Xiaomi AOD, plus Apple Music enhancements</string>
     <string name="label_lyric_listener_service">Media Information Access</string>
     <string name="label_lyric_enable_service">HyperLyrics Enhanced Media Monitor</string>
     <string name="provider_release_home">https://github.com/juren233/HLE-Providers</string>
@@ -214,7 +214,7 @@
     <string name="title_hyper_island">HyperIsland</string>
     <string name="subtitle_hyper_island">Takes effect after playback is paused or the track changes</string>
     <string name="title_media_cards">Media Notification Card</string>
-    <string name="summary_media_cards">Requires restarting SystemUI after an update</string>
+    <string name="summary_media_cards">Settings apply live; restart SystemUI manually after updating the module</string>
     <string name="title_notification_center_media_card">Notification Center Media Card</string>
     <string name="title_media_card_background_theme">Card Background Color</string>
     <string name="option_media_card_theme_follow_system">Follow system</string>
@@ -571,7 +571,7 @@
     <string name="module_tag_translation">Translation</string>
     <string name="module_tag_bluetooth">In-Car Bluetooth Lyrics</string>
 
-    <!-- ———————————————————————— SuperIslandSettingsPage ———————————————————————— -->
+    <!-- ———————————————————————— HyperIslandSettingsPage ———————————————————————— -->
     <string name="title_layout">Layout</string>
     <string name="title_content">Content</string>
     <string name="title_island_dynamic_limit">Dynamic Width Limit</string>
@@ -810,4 +810,63 @@
     <string name="setup_completion_apple_music_only">Apple Music works immediately with no extra module setup.</string>
     <string name="no_lyric_data">No Lyrics Available</string>
     <string name="title_apple_music_force_cellular_data_entry">Always Show Cellular Data on Tablets</string>
+
+    <!-- HyperIsland touch controls -->
+    <string name="title_island_touch_config">HyperIsland touch controls</string>
+    <string name="island_touch_enable">Enable custom touch controls</string>
+    <string name="island_touch_description">For the music island only</string>
+    <string name="island_touch_double_disabled">Disabled</string>
+    <string name="island_touch_haptic">Haptic feedback</string>
+    <string name="island_touch_haptic_description">Vibrate lightly after a gesture is recognized</string>
+    <string name="island_touch_double_interval">Double-tap interval</string>
+    <string name="island_touch_milliseconds_value">%1$d ms</string>
+    <string name="island_touch_double_interval_range">150–500 ms</string>
+    <string name="island_touch_long_press_time">Long-press time</string>
+    <string name="island_touch_long_press_range">200–1500 ms</string>
+    <string name="island_touch_unified_sides">Use the same settings on both sides</string>
+    <string name="island_touch_unified_sides_description">Use the same gestures across the whole island</string>
+    <string name="island_touch_help">How it works</string>
+    <string name="island_touch_help_expand">Expand</string>
+    <string name="island_touch_help_collapse">Collapse</string>
+    <string name="island_touch_help_area_title">Touch areas</string>
+    <string name="island_touch_help_area_body">HyperIsland touch controls apply only to the music island and do not affect other HyperIsland content. The camera splits the HyperIsland into a left area and a right area, each with its own actions; with “Use the same settings on both sides” on, both areas share one set. An expanded HyperIsland keeps system controls.</string>
+    <string name="island_touch_help_swipe_title">Swipes</string>
+    <string name="island_touch_help_swipe_body">Directions without an action stay with the system; once assigned, a swipe in that direction runs only the chosen action, however far it goes.</string>
+    <string name="island_touch_help_tap_title">Taps</string>
+    <string name="island_touch_help_tap_body">With double tap on, a single tap waits one double-tap interval before it runs; with it off, rapid taps all count as single taps.</string>
+    <string name="island_touch_help_actions_title">Action notes</string>
+    <string name="island_touch_help_actions_body">Seeking needs player support, continuous volume works only with left and right swipes, and mute affects local media audio only.</string>
+    <string name="island_touch_left">Left area</string>
+    <string name="island_touch_right">Right area</string>
+    <string name="island_touch_tap">Single tap</string>
+    <string name="island_touch_double_tap">Double tap</string>
+    <string name="island_touch_long_press">Long press</string>
+    <string name="island_touch_swipe_left">Swipe left</string>
+    <string name="island_touch_swipe_right">Swipe right</string>
+    <string name="island_touch_swipe_up">Swipe up</string>
+    <string name="island_touch_swipe_down">Swipe down</string>
+    <string name="island_touch_none">System default</string>
+    <string name="island_touch_play_pause">Play / pause</string>
+    <string name="island_touch_previous">Previous track</string>
+    <string name="island_touch_next">Next track</string>
+    <string name="island_touch_forward">Seek forward</string>
+    <string name="island_touch_backward">Seek backward</string>
+    <string name="island_touch_restart">Play from start</string>
+    <string name="island_touch_toggle_mute">Toggle mute</string>
+    <string name="island_touch_toggle_mute_summary">Media volume only</string>
+    <string name="island_touch_volume_up">Volume up</string>
+    <string name="island_touch_volume_down">Volume down</string>
+    <string name="island_touch_volume_continuous">Continuous volume</string>
+    <string name="island_touch_volume_continuous_summary">Swipe back before releasing to reverse</string>
+    <string name="island_touch_open_app">Open app</string>
+    <string name="island_touch_open_app_freeform">Open app in floating window</string>
+    <string name="island_touch_expand">Expand HyperIsland</string>
+    <!-- User-confirmed feature name; retain it until an official English name is verified. -->
+    <string name="island_touch_media_output">音乐流转</string>
+    <string name="island_touch_copy_current_lyric">Copy current lyrics</string>
+    <string name="island_touch_seek_seconds">Seek interval</string>
+    <string name="island_touch_seek_edit_hint">Tap here to change the duration</string>
+    <string name="island_touch_forward_value">Seek forward %1$d s</string>
+    <string name="island_touch_backward_value">Seek backward %1$d s</string>
+    <string name="island_touch_seconds_range">1–300 seconds</string>
 </resources>
