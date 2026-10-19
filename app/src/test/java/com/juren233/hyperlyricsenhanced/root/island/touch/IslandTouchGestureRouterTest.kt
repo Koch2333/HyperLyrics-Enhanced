@@ -123,6 +123,32 @@ class IslandTouchGestureRouterTest {
         assertEquals(listOf("cancel native", "custom left SWIPE_LEFT"), actions)
     }
 
+    @Test fun `custom vertical swipes are captured per direction`() {
+        custom += SWIPE_UP
+        down()
+        assertTrue(router.move(2f, -12f))
+        assertTrue(router.up(4f, -90f, 200))
+        assertEquals(listOf("cancel native", "custom left SWIPE_UP"), actions)
+        actions.clear()
+        down(300)
+        assertFalse(router.move(2f, 30f))
+        assertFalse(router.up(4f, 90f, 500))
+        assertTrue(actions.isEmpty())
+    }
+
+    @Test fun `custom down swipe leaves horizontal drags to native`() {
+        custom += SWIPE_DOWN
+        down()
+        assertTrue(router.move(2f, 12f))
+        assertTrue(router.up(4f, 90f, 200))
+        assertEquals(listOf("cancel native", "custom left SWIPE_DOWN"), actions)
+        actions.clear()
+        down(300)
+        assertFalse(router.move(30f, 2f))
+        assertFalse(router.up(90f, 4f, 500))
+        assertTrue(actions.isEmpty())
+    }
+
     @Test fun `vertical gestures hand back to native without custom tap or long press`() {
         custom += setOf(TAP, LONG_PRESS, SWIPE_LEFT, SWIPE_RIGHT)
         down()

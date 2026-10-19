@@ -74,10 +74,27 @@ class IslandTouchGestureDetectorTest {
         detector.up(100f, 0f, 100)
         assertEquals(listOf("left" to SWIPE_RIGHT), events)
     }
-    @Test fun `vertical motion never clicks or swipes`() {
+    @Test fun `up swipe retains down region`() {
         detector.down("left", 0f, 0f, 0, true)
-        detector.move(20f, 50f)
-        detector.up(40f, 100f, 300)
+        detector.move(4f, -20f)
+        detector.up(10f, -100f, 150)
+        detector.advance(1000)
+        assertEquals(listOf("left" to SWIPE_UP), events)
+    }
+    @Test fun `down swipe cancels long press and tap`() {
+        detector.down("right", 0f, 0f, 0, true)
+        detector.move(2f, 30f)
+        detector.advance(600)
+        detector.up(4f, 100f, 700)
+        detector.advance(1200)
+        assertEquals(listOf("right" to SWIPE_DOWN), events)
+    }
+    @Test fun `short vertical drag and diagonal motion never click or swipe`() {
+        detector.down("left", 0f, 0f, 0, true)
+        detector.up(0f, -20f, 100)
+        detector.down("left", 0f, 0f, 200, true)
+        detector.move(40f, 50f)
+        detector.up(80f, 100f, 400)
         detector.advance(1000)
         assertTrue(events.isEmpty())
     }

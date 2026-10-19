@@ -828,9 +828,14 @@
     <string name="island_touch_help">How it works</string>
     <string name="island_touch_help_expand">Expand</string>
     <string name="island_touch_help_collapse">Collapse</string>
-    <string name="island_touch_help_area">With separate settings, the starting position determines the side. When both sides share settings, the whole music island uses the same actions. Expanded cards keep system controls.</string>
-    <string name="island_touch_help_default">Unassigned gestures keep system controls. With double tap disabled, each tap acts as a single tap. A shorter double-tap interval reduces the wait for single taps, but requires faster double taps.</string>
-    <string name="island_touch_help_player">Open app follows the media notification. Seeking and some other actions require player support.</string>
+    <string name="island_touch_help_area_title">Touch areas</string>
+    <string name="island_touch_help_area_body">HyperIsland touch controls apply only to the music island and do not affect other HyperIsland content. The camera splits the HyperIsland into a left area and a right area, each with its own actions; with “Use the same settings on both sides” on, both areas share one set. An expanded HyperIsland keeps system controls.</string>
+    <string name="island_touch_help_swipe_title">Swipes</string>
+    <string name="island_touch_help_swipe_body">Directions without an action stay with the system; once assigned, a swipe in that direction runs only the chosen action, however far it goes.</string>
+    <string name="island_touch_help_tap_title">Taps</string>
+    <string name="island_touch_help_tap_body">With double tap on, a single tap waits one double-tap interval before it runs; with it off, rapid taps all count as single taps.</string>
+    <string name="island_touch_help_actions_title">Action notes</string>
+    <string name="island_touch_help_actions_body">Seeking needs player support, continuous volume works only with left and right swipes, and mute affects local media audio only.</string>
     <string name="island_touch_left">Left area</string>
     <string name="island_touch_right">Right area</string>
     <string name="island_touch_tap">Single tap</string>
@@ -838,6 +843,8 @@
     <string name="island_touch_long_press">Long press</string>
     <string name="island_touch_swipe_left">Swipe left</string>
     <string name="island_touch_swipe_right">Swipe right</string>
+    <string name="island_touch_swipe_up">Swipe up</string>
+    <string name="island_touch_swipe_down">Swipe down</string>
     <string name="island_touch_none">System default</string>
     <string name="island_touch_play_pause">Play / pause</string>
     <string name="island_touch_previous">Previous track</string>
@@ -857,8 +864,9 @@
     <!-- User-confirmed feature name; retain it until an official English name is verified. -->
     <string name="island_touch_media_output">音乐流转</string>
     <string name="island_touch_copy_current_lyric">Copy current lyrics</string>
-    <string name="island_touch_help_mute_copy">Toggle mute controls local media audio, not remote playback. Copy current lyrics includes any available translation and leaves the clipboard unchanged when no current lyrics are available.</string>
     <string name="island_touch_seek_seconds">Seek interval</string>
-    <string name="island_touch_seconds_value">%1$d seconds</string>
+    <string name="island_touch_seek_edit_hint">Tap here to change the duration</string>
+    <string name="island_touch_forward_value">Seek forward %1$d s</string>
+    <string name="island_touch_backward_value">Seek backward %1$d s</string>
     <string name="island_touch_seconds_range">1–300 seconds</string>
 </resources>

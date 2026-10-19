@@ -5,14 +5,15 @@ package com.juren233.hyperlyricsenhanced.common
 enum class IslandTouchSide(val key: String) { LEFT("left"), RIGHT("right") }
 enum class IslandTouchGesture(val key: String) {
     TAP("tap"), DOUBLE_TAP("double_tap"), LONG_PRESS("long_press"),
-    SWIPE_LEFT("swipe_left"), SWIPE_RIGHT("swipe_right")
+    SWIPE_LEFT("swipe_left"), SWIPE_RIGHT("swipe_right"),
+    SWIPE_UP("swipe_up"), SWIPE_DOWN("swipe_down")
 }
 enum class IslandTouchAction(val id: Int) {
     NONE(0), PLAY_PAUSE(1), PREVIOUS(2), NEXT(3), FORWARD(4), BACKWARD(5),
     RESTART(6), TOGGLE_MUTE(12), VOLUME_UP(7), VOLUME_DOWN(8), VOLUME_CONTINUOUS(15), OPEN_APP(9),
     OPEN_APP_FREEFORM(11), EXPAND_ISLAND(10), OPEN_MEDIA_OUTPUT(14), COPY_CURRENT_LYRIC(13);
 
-    /** Continuous volume follows a live horizontal drag, so only swipe gestures can carry it. */
+    /** Continuous volume follows a live horizontal drag, so only left/right swipes can carry it. */
     fun availableFor(gesture: IslandTouchGesture): Boolean = this != VOLUME_CONTINUOUS ||
         gesture == IslandTouchGesture.SWIPE_LEFT || gesture == IslandTouchGesture.SWIPE_RIGHT
 

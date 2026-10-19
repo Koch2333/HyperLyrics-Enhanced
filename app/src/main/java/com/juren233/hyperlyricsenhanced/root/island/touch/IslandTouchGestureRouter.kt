@@ -77,8 +77,10 @@ internal class IslandTouchGestureRouter<T>(
         if (drag == null && dx * dx + dy * dy > slop * slop) {
             val direction = if (abs(dx) > abs(dy)) {
                 if (dx < 0) SWIPE_LEFT else SWIPE_RIGHT
-            } else null
-            if (direction == null || !isCustom(target, direction)) {
+            } else {
+                if (dy < 0) SWIPE_UP else SWIPE_DOWN
+            }
+            if (!isCustom(target, direction)) {
                 detector.cancel()
                 nativeOwnsContact = true
                 return false

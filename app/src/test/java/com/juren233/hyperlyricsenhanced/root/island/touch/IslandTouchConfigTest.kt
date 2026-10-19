@@ -33,7 +33,7 @@ class IslandTouchConfigTest {
         assertEquals(250, config.doubleTapMs)
         assertEquals(500, config.longPressMs)
         assertFalse(config.unifiedSides)
-        assertEquals(10, config.bindings.size)
+        assertEquals(14, config.bindings.size)
         for (side in IslandTouchSide.entries) assertFalse(config.handles(side))
     }
     @Test fun `binding one side never takes over the other side`() {
@@ -54,9 +54,23 @@ class IslandTouchConfigTest {
         assertTrue(maximum.bindings.values.all { it.seconds == 300 })
     }
     @Test fun `each gesture has independent persistent keys and broadcasts`() {
-        assertEquals(35, IslandTouchConfig.preferenceKeys.size)
+        assertEquals(47, IslandTouchConfig.preferenceKeys.size)
         IslandTouchConfig.preferenceKeys.forEach { assertTrue(LivePreferenceRefreshPolicy.contains(it)) }
         assertFalse(LivePreferenceRefreshPolicy.contains("hook_island_touch_unrecognized"))
+    }
+    @Test fun `vertical swipes use stable keys and exclude continuous volume`() {
+        assertEquals("hook_island_touch_left_swipe_up_action",
+            IslandTouchConfig.actionKey(IslandTouchSide.LEFT, IslandTouchGesture.SWIPE_UP))
+        assertEquals("hook_island_touch_unified_swipe_down_seconds",
+            IslandTouchConfig.unifiedSecondsKey(IslandTouchGesture.SWIPE_DOWN))
+        val config = IslandTouchConfig.read({ _, fallback -> fallback }, { key, fallback ->
+            if (key == IslandTouchConfig.actionKey(IslandTouchSide.RIGHT, IslandTouchGesture.SWIPE_UP))
+                IslandTouchAction.VOLUME_CONTINUOUS.id else if (key ==
+                IslandTouchConfig.actionKey(IslandTouchSide.RIGHT, IslandTouchGesture.SWIPE_DOWN))
+                IslandTouchAction.NEXT.id else fallback
+        })
+        assertEquals(IslandTouchAction.NONE, config.binding(IslandTouchSide.RIGHT, IslandTouchGesture.SWIPE_UP).action)
+        assertEquals(IslandTouchAction.NEXT, config.binding(IslandTouchSide.RIGHT, IslandTouchGesture.SWIPE_DOWN).action)
     }
     @Test fun `broadcast overrides immediately replace remote values and clear falls back`() {
         val key = IslandTouchConfig.actionKey(IslandTouchSide.RIGHT, IslandTouchGesture.SWIPE_LEFT)

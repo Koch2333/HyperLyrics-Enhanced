@@ -9,6 +9,22 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.font.FontWeight
+import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
+import top.yukonga.miuix.kmp.basic.DropdownArrowEndAction
+import top.yukonga.miuix.kmp.basic.DropdownDefaults
+import top.yukonga.miuix.kmp.popup.OverlayDropdownPopup
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,7 +32,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -26,7 +41,6 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.juren233.hyperlyricsenhanced.R
@@ -36,6 +50,7 @@ import com.juren233.hyperlyricsenhanced.common.IslandTouchConfig
 import com.juren233.hyperlyricsenhanced.common.IslandTouchGesture
 import com.juren233.hyperlyricsenhanced.common.IslandTouchSide
 import com.juren233.hyperlyricsenhanced.ui.component.NumberInputDialog
+import com.juren233.hyperlyricsenhanced.ui.component.SwipeableSegmentedTabs
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.XposedLyricSettingPage
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookConfigSaver
 import com.juren233.hyperlyricsenhanced.ui.page.hooksettings.lyrics.common.rememberHookPrefs
@@ -44,8 +59,6 @@ import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.DropdownEntry
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.TabRowWithContour
-import top.yukonga.miuix.kmp.basic.TabRowDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.ChevronBackward
@@ -62,12 +75,58 @@ fun HyperIslandTouchSettingsPage() {
     var editingSeconds by remember { mutableStateOf<Pair<IslandTouchSide, IslandTouchGesture>?>(null) }
     var editingDoubleTap by remember { mutableStateOf(false) }
     var editingLongPress by remember { mutableStateOf(false) }
-    var selectedSide by rememberSaveable { mutableIntStateOf(0) }
+    // Unified mode has a single shared card, so there is nothing to swipe between.
+    val pagerState = rememberPagerState { if (config.unifiedSides) 1 else IslandTouchSide.entries.size }
     var showHelp by rememberSaveable { mutableStateOf(false) }
     val actions = IslandTouchAction.entries
 
     fun update(side: IslandTouchSide, gesture: IslandTouchGesture, binding: IslandTouchBinding) {
         config = config.withBinding(side, gesture, binding)
+    }
+
+    @Composable
+    fun GestureCard(side: IslandTouchSide) {
+    Card(modifier = Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
+        Column {
+            for (gesture in IslandTouchGesture.entries) {
+                val binding = config.binding(side, gesture)
+                val items = actions.filter { it.availableFor(gesture) }.map { action ->
+                    DropdownItem(
+                        text = stringResource(if (action == IslandTouchAction.NONE &&
+                            gesture == IslandTouchGesture.DOUBLE_TAP)
+                            R.string.island_touch_double_disabled else actionLabel(action)),
+                        selected = action == binding.action,
+                        summary = actionSummary(action)?.let { stringResource(it) },
+                        onClick = {
+                            update(side, gesture, binding.copy(action = action))
+                            save(config.bindingActionKey(side, gesture), action.id)
+                        },
+                    )
+                }
+                if (binding.action == IslandTouchAction.FORWARD ||
+                    binding.action == IslandTouchAction.BACKWARD) {
+                    // The left side edits the duration; only the right-side value opens the action list.
+                    SeekActionPreference(
+                        entry = DropdownEntry(items),
+                        title = stringResource(gestureLabel(gesture)),
+                        summary = stringResource(R.string.island_touch_seek_edit_hint),
+                        value = stringResource(
+                            if (binding.action == IslandTouchAction.FORWARD)
+                                R.string.island_touch_forward_value
+                            else R.string.island_touch_backward_value,
+                            binding.seconds,
+                        ),
+                        onEditSeconds = { editingSeconds = side to gesture },
+                    )
+                } else {
+                    OverlayDropdownPreference(
+                        entry = DropdownEntry(items),
+                        title = stringResource(gestureLabel(gesture)),
+                    )
+                }
+            }
+        }
+    }
     }
 
     XposedLyricSettingPage(title = stringResource(R.string.title_island_touch_config)) {
@@ -153,58 +212,20 @@ fun HyperIslandTouchSettingsPage() {
                         enter = fadeIn() + expandVertically(expandFrom = Alignment.Top),
                         exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top),
                     ) {
-                        // Segmented track matches the cards; the sliding primary thumb marks the edited side.
-                        TabRowWithContour(
-                            tabs = listOf(stringResource(R.string.island_touch_left),
+                        // The thumb follows the pager and can itself be dragged; tapping a segment also switches sides.
+                        SwipeableSegmentedTabs(
+                            labels = listOf(stringResource(R.string.island_touch_left),
                                 stringResource(R.string.island_touch_right)),
-                            selectedTabIndex = selectedSide,
-                            onTabSelected = { selectedSide = it },
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 12.dp),
-                            colors = TabRowDefaults.tabRowColors(
-                                backgroundColor = MiuixTheme.colorScheme.surfaceContainer,
-                                selectedBackgroundColor = MiuixTheme.colorScheme.primary,
-                                selectedContentColor = MiuixTheme.colorScheme.onPrimary,
-                            ),
-                            maxWidth = Dp.Infinity,
+                            pagerState = pagerState,
+                            modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp),
                         )
                     }
-                    val side = IslandTouchSide.entries[selectedSide]
-                    Card(modifier = Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
-                        Column {
-                            for (gesture in IslandTouchGesture.entries) {
-                                val binding = config.binding(side, gesture)
-                                val items = actions.filter { it.availableFor(gesture) }.map { action ->
-                                    DropdownItem(
-                                        text = stringResource(if (action == IslandTouchAction.NONE &&
-                                            gesture == IslandTouchGesture.DOUBLE_TAP)
-                                            R.string.island_touch_double_disabled else actionLabel(action)),
-                                        selected = action == binding.action,
-                                        summary = actionSummary(action)?.let { stringResource(it) },
-                                        onClick = {
-                                            update(side, gesture, binding.copy(action = action))
-                                            save(config.bindingActionKey(side, gesture), action.id)
-                                        },
-                                    )
-                                }
-                                OverlayDropdownPreference(
-                                    entry = DropdownEntry(items),
-                                    title = stringResource(gestureLabel(gesture)),
-                                )
-                                AnimatedVisibility(
-                                    visible = binding.action == IslandTouchAction.FORWARD ||
-                                        binding.action == IslandTouchAction.BACKWARD,
-                                    enter = fadeIn() + expandVertically(expandFrom = Alignment.Top),
-                                    exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top),
-                                ) {
-                                    ArrowPreference(
-                                        title = stringResource(R.string.island_touch_seek_seconds),
-                                        summary = stringResource(R.string.island_touch_seconds_value, binding.seconds),
-                                        onClick = { editingSeconds = side to gesture },
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top,
+                        beyondViewportPageCount = 1,
+                    ) { page -> GestureCard(IslandTouchSide.entries[page]) }
                 }
             }
         }
@@ -232,15 +253,25 @@ fun HyperIslandTouchSettingsPage() {
                         enter = fadeIn() + expandVertically(expandFrom = Alignment.Top),
                         exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top),
                     ) {
+                        // Same horizontal inset as the card's own title row.
+                        val helpInset = BasicComponentDefaults.InsideMargin
+                            .calculateStartPadding(LocalLayoutDirection.current)
                         Column(
-                            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(horizontal = helpInset).padding(bottom = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
-                            for (text in listOf(R.string.island_touch_help_area,
-                                R.string.island_touch_help_default, R.string.island_touch_help_player,
-                                R.string.island_touch_help_mute_copy)) {
-                                Text(stringResource(text), fontSize = 14.sp, lineHeight = 21.sp,
-                                    color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                            for ((title, body) in listOf(
+                                R.string.island_touch_help_area_title to R.string.island_touch_help_area_body,
+                                R.string.island_touch_help_swipe_title to R.string.island_touch_help_swipe_body,
+                                R.string.island_touch_help_tap_title to R.string.island_touch_help_tap_body,
+                                R.string.island_touch_help_actions_title to R.string.island_touch_help_actions_body,
+                            )) {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(stringResource(title), fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                                        color = MiuixTheme.colorScheme.onSurface)
+                                    Text(stringResource(body), fontSize = 14.sp, lineHeight = 21.sp,
+                                        color = MiuixTheme.colorScheme.onSurfaceVariantActions)
+                                }
                             }
                         }
                     }
@@ -293,12 +324,71 @@ fun HyperIslandTouchSettingsPage() {
     )
 }
 
+/**
+ * Mirrors miuix's OverlayDropdownPreference, but the row body edits the seek duration and the
+ * action list is opened only from the value on the right.
+ */
+@Composable
+private fun SeekActionPreference(
+    entry: DropdownEntry,
+    title: String,
+    summary: String,
+    value: String,
+    onEditSeconds: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
+    val actionColor = MiuixTheme.colorScheme.onSurfaceVariantActions
+    BasicComponent(
+        title = title,
+        summary = summary,
+        onClick = onEditSeconds,
+        endActions = {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.CenterVertically)
+                    .weight(1f, fill = false)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        role = Role.DropdownList,
+                    ) {
+                        expanded = !expanded
+                        if (expanded) haptic.performHapticFeedback(HapticFeedbackType.ContextClick)
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = value,
+                    modifier = Modifier.padding(start = 16.dp, end = 8.dp).weight(1f, fill = false),
+                    fontSize = MiuixTheme.textStyles.body2.fontSize,
+                    color = actionColor,
+                    textAlign = TextAlign.End,
+                )
+                DropdownArrowEndAction(actionColor = actionColor)
+            }
+            OverlayDropdownPopup(
+                entry = entry,
+                show = expanded,
+                onDismiss = { expanded = false },
+                onDismissFinished = {},
+                maxHeight = null,
+                dropdownColors = DropdownDefaults.dropdownColors(),
+                renderInRootScaffold = true,
+                collapseOnSelection = true,
+            )
+        },
+    )
+}
+
 private fun gestureLabel(gesture: IslandTouchGesture): Int = when (gesture) {
     IslandTouchGesture.TAP -> R.string.island_touch_tap
     IslandTouchGesture.DOUBLE_TAP -> R.string.island_touch_double_tap
     IslandTouchGesture.LONG_PRESS -> R.string.island_touch_long_press
     IslandTouchGesture.SWIPE_LEFT -> R.string.island_touch_swipe_left
     IslandTouchGesture.SWIPE_RIGHT -> R.string.island_touch_swipe_right
+    IslandTouchGesture.SWIPE_UP -> R.string.island_touch_swipe_up
+    IslandTouchGesture.SWIPE_DOWN -> R.string.island_touch_swipe_down
 }
 
 private fun actionLabel(action: IslandTouchAction): Int = when (action) {

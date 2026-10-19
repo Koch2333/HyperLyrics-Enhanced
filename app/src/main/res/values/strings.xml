@@ -831,9 +831,14 @@
     <string name="island_touch_help">使用说明</string>
     <string name="island_touch_help_expand">展开</string>
     <string name="island_touch_help_collapse">收起</string>
-    <string name="island_touch_help_area">分侧设置时，以手指按下位置决定左右区域；开启“两侧统一设置”后，整个音乐岛使用同一套动作。展开后使用系统触控。</string>
-    <string name="island_touch_help_default">未自定义的手势保留系统原操作。双击不启用时，连续点击按单击处理。双击间隔越短，单击等待越短，但双击也需更快。</string>
-    <string name="island_touch_help_player">跳转 App 等同于点击媒体通知；快进、倒退等操作需播放器支持。</string>
+    <string name="island_touch_help_area_title">触发区域</string>
+    <string name="island_touch_help_area_body">超级岛触控只作用于音乐岛，不会影响其他岛。超级岛以摄像头为界，分为左侧区域和右侧区域，可分别设置动作；开启“两侧统一设置”后，左右两侧共用同一套。岛展开时使用系统触控。</string>
+    <string name="island_touch_help_swipe_title">滑动</string>
+    <string name="island_touch_help_swipe_body">没有绑定动作的方向仍由系统处理；绑定后，该方向滑多远都只执行所选动作。</string>
+    <string name="island_touch_help_tap_title">单击与双击</string>
+    <string name="island_touch_help_tap_body">启用双击后，单击需等待一个双击间隔才执行；不启用时，连点都按单击处理。</string>
+    <string name="island_touch_help_actions_title">动作说明</string>
+    <string name="island_touch_help_actions_body">快进、倒退需要播放器支持；音量无级调节仅限左右滑；静音切换只作用于本机媒体音。</string>
     <string name="island_touch_left">左侧区域</string>
     <string name="island_touch_right">右侧区域</string>
     <string name="island_touch_tap">单击</string>
@@ -841,6 +846,8 @@
     <string name="island_touch_long_press">长按</string>
     <string name="island_touch_swipe_left">向左滑</string>
     <string name="island_touch_swipe_right">向右滑</string>
+    <string name="island_touch_swipe_up">向上滑</string>
+    <string name="island_touch_swipe_down">向下滑</string>
     <string name="island_touch_none">系统原操作</string>
     <string name="island_touch_play_pause">播放 / 暂停</string>
     <string name="island_touch_previous">上一首</string>
@@ -859,8 +866,9 @@
     <string name="island_touch_expand">展开超级岛</string>
     <string name="island_touch_media_output">音乐流转</string>
     <string name="island_touch_copy_current_lyric">复制当前歌词</string>
-    <string name="island_touch_help_mute_copy">静音切换控制本机媒体音量，不控制远程投放。复制当前歌词会包含已有翻译，没有当前歌词时保留剪贴板内容。</string>
     <string name="island_touch_seek_seconds">跳转秒数</string>
-    <string name="island_touch_seconds_value">%1$d 秒</string>
+    <string name="island_touch_seek_edit_hint">点击此处修改时长</string>
+    <string name="island_touch_forward_value">快进 %1$d 秒</string>
+    <string name="island_touch_backward_value">倒退 %1$d 秒</string>
     <string name="island_touch_seconds_range">1–300 秒</string>
 </resources>

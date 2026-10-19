@@ -56,7 +56,9 @@ internal class IslandTouchGestureDetector<T>(
         when {
             abs(dx) >= swipeDistance && abs(dx) > abs(dy) * 1.25f -> emit(current.target,
                 if (dx < 0) IslandTouchGesture.SWIPE_LEFT else IslandTouchGesture.SWIPE_RIGHT)
-            current.moved -> Unit // Vertical/diagonal movement is never a click.
+            abs(dy) >= swipeDistance && abs(dy) > abs(dx) * 1.25f -> emit(current.target,
+                if (dy < 0) IslandTouchGesture.SWIPE_UP else IslandTouchGesture.SWIPE_DOWN)
+            current.moved -> Unit // Short or diagonal movement is never a click.
             current.secondTap -> emit(current.target, IslandTouchGesture.DOUBLE_TAP)
             current.doubleEnabled -> pending = Tap(current.target, x, y, time + current.doubleTapTimeoutMs)
             else -> emit(current.target, IslandTouchGesture.TAP)
