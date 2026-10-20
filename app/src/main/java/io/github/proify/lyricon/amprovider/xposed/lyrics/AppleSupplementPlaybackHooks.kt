@@ -261,12 +261,14 @@ internal fun AppleLyricsSupplementHooks.hookLyricBuildMethod() {
                     requestSource == APPLE_LYRICS_REQUEST_SOURCE_APPLE &&
                         it == resolvedSongId
                 }
-            mainHandler.post {
+            postWhenMainIdle(mainHandler, LYRICS_PARSE_IDLE_MAX_DELAY_MS) { waitedMs, viaIdle ->
+                logLyricsParseDeferred("build", resolvedSongId, waitedMs, viaIdle)
                 PlaybackManager.onLyricsBuilt(
                     nativeSongObj = songNative,
                     source = contentSource,
                     visibleSongId = visibleSongId,
                     playbackSongId = currentPlaybackQueueMediaId(),
+                    trigger = "build",
                 )
                 if (
                     requestSource == APPLE_LYRICS_REQUEST_SOURCE_APPLE &&
@@ -442,15 +444,27 @@ internal fun AppleLyricsSupplementHooks.hookAppleNativeLyricsPresentation() {
                 scheduleSupplementActiveLineUpdate()
             }
             onAppleLyricsPresentationCompleted(fragment, songId)
-            mainHandler.post {
+            postWhenMainIdle(mainHandler, LYRICS_PARSE_IDLE_MAX_DELAY_MS) { waitedMs, viaIdle ->
+                logLyricsParseDeferred("presentation", songId, waitedMs, viaIdle)
                 PlaybackManager.onLyricsBuilt(
                     nativeSongObj = songNative,
                     source = "apple",
                     visibleSongId = songId,
                     playbackSongId = currentPlaybackQueueMediaId(),
+                    trigger = "presentation",
                 )
             }
         },
     )
     ProviderLogger.debug("Apple Music 原生歌词呈现 Hook 已安装")
+}
+
+/** 原生歌词解析让出主线程的最长等待；超过后不再等空闲，避免状态栏歌词迟迟不更新。 */
+private const val LYRICS_PARSE_IDLE_MAX_DELAY_MS = 300L
+
+private fun logLyricsParseDeferred(trigger: String, songId: String?, waitedMs: Long, viaIdle: Boolean) {
+    if (!BuildConfig.DEBUG) return
+    ProviderLogger.diagnostic(
+        "[LyricsParseDefer] trigger=$trigger, id=$songId, waitedMs=$waitedMs, viaIdle=$viaIdle"
+    )
 }

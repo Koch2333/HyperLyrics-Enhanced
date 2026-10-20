@@ -23,12 +23,37 @@ class AppleMusic7001611ProfileRegressionTest {
         assertEquals("am-7.0.0-beta-1609", AppleMusicHookProfiles.profileFor(previous)?.id)
         assertNull(AppleMusicHookProfiles.profileFor(AppleMusicVersion("7.0.0-beta", 1610L)))
         AppleMusicHookPoint.entries.forEach { point ->
-            assertEquals(
-                "Lost targets: $point",
-                AppleMusicHookProfiles.exactTargets(previous, point).size,
-                AppleMusicHookProfiles.exactTargets(version, point).size,
-            )
+            val previousTargets = AppleMusicHookProfiles.exactTargets(previous, point)
+            val currentTargets = AppleMusicHookProfiles.exactTargets(version, point)
+            if (point == AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES) {
+                assertEquals(
+                    "Lost targets: $point",
+                    previousTargets.map { it.className },
+                    currentTargets.take(previousTargets.size).map { it.className },
+                )
+            } else {
+                assertEquals("Lost targets: $point", previousTargets.size, currentTargets.size)
+            }
         }
+    }
+
+    @Test
+    fun `1611 preinstalls content item subclasses that were hooked late on the main thread`() {
+        val classNames = AppleMusicHookProfiles.exactTargets(
+            version,
+            AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES,
+        ).map { it.className }
+        listOf(
+            "RadioStation",
+            "PlaylistCollectionItem",
+            "Playlist",
+            "Editor",
+            "CommonHeaderCollectionItem",
+        ).forEach { simpleName ->
+            assertTrue(simpleName, "com.apple.android.music.model.$simpleName" in classNames)
+        }
+        assertEquals(11, classNames.size)
+        assertEquals(classNames.size, classNames.toSet().size)
     }
 
     @Test

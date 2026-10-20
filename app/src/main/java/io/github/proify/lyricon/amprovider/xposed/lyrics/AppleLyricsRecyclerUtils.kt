@@ -51,7 +51,6 @@ import android.widget.LinearLayout
 import android.widget.ImageView
 import android.widget.PopupWindow
 import android.widget.TextView
-import androidx.recyclerview.widget.RecyclerView
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.UIConstants
 import com.juren233.hyperlyricsenhanced.common.RootConstants
@@ -348,6 +347,62 @@ internal fun AppleLyricsBlurHooks.findAppleLyricsChildAdapterPositionMethod(claz
                 method.parameterTypes.contentEquals(arrayOf(View::class.java))
         }
         ?.apply { isAccessible = true }
+
+internal fun AppleLyricsBlurHooks.appleLyricsChildViewHolder(recyclerView: Any, child: View): Any? {
+    val named = runCatching {
+        AppleReflection.call(recyclerView, "getChildViewHolder", child)
+    }.getOrNull()
+    if (named != null) return named
+
+    val recyclerViewAsView = recyclerView as? View ?: return null
+    val methods = blurState.childViewHolderMethods(recyclerViewAsView.javaClass)
+        ?: findAppleLyricsChildViewHolderMethods(recyclerViewAsView.javaClass).also {
+            blurState.rememberChildViewHolderMethods(recyclerViewAsView.javaClass, it)
+        }
+    for (method in methods) {
+        val holder = runCatching { method.invoke(recyclerView, child) }.getOrNull()
+        if (holder != null) return holder
+    }
+    return null
+}
+
+internal fun AppleLyricsBlurHooks.findAppleLyricsChildViewHolderMethods(clazz: Class<*>): List<Method> =
+    generateSequence(clazz) { it.superclass }
+        .flatMap { it.declaredMethods.asSequence() }
+        .filter { method ->
+            !Modifier.isStatic(method.modifiers) &&
+                method.parameterTypes.contentEquals(arrayOf(View::class.java)) &&
+                // The host bundles an obfuscated androidx whose ViewHolder is RecyclerView$<x>;
+                // class identity against our own androidx copy is not usable here.
+                method.returnType.name.startsWith(clazz.name + "$")
+        }
+        .map { it.apply { isAccessible = true } }
+        .toList()
+
+/**
+ * Apple 的歌词 holder 用 String 字段缓存上一轮绑定文本；缓存命中时 `onBindViewHolder`
+ * 会整段跳过翻译/发音行的可见性更新。清空这些缓存可强制下一轮重绑重新判断。
+ */
+internal fun clearAppleLyricsHolderTextCaches(holder: Any): Int {
+    var cleared = 0
+    generateSequence(holder.javaClass) { it.superclass }
+        .takeWhile { it != Any::class.java }
+        .forEach { clazz ->
+            clazz.declaredFields.forEach { field ->
+                if (
+                    field.type == String::class.java &&
+                    !Modifier.isStatic(field.modifiers)
+                ) {
+                    runCatching {
+                        field.isAccessible = true
+                        field.set(holder, null)
+                        cleared++
+                    }
+                }
+            }
+        }
+    return cleared
+}
 
 internal fun AppleLyricsBlurHooks.logAppleLyricsBlurDiagnostic(
     recyclerView: View,

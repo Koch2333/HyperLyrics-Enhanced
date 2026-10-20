@@ -54,9 +54,45 @@ object SongRepository {
         nativeSongObj: Any,
         parserAccess: AppleLyricsParserAccess,
         source: String,
+        trigger: String = "",
     ): Song? {
-        val song = AppleLyricTextTransform.withRawReads {
+        val parseStartNs = if (BuildConfig.DEBUG) System.nanoTime() else 0L
+        // 仅用于 Debug 诊断；缓存键已改用内容指纹。
+        val nativeAddress = if (BuildConfig.DEBUG) {
+            parserAccess.call(
+                nativeSongObj,
+                AppleMusicRuntimeMember.LYRICS_NATIVE_POINTER_ADDRESS_METHOD,
+            ) as? Long
+        } else {
+            null
+        }
+        val parseCacheKey = AppleNativeLyricsParseCache.keyFor(
+            songId = parserAccess.call(
+                nativeSongObj,
+                AppleMusicRuntimeMember.LYRICS_SONG_ADAM_ID_METHOD,
+            )?.toString(),
+            contentProbe = AppleLyricTextTransform.withRawReads {
+                AppleSongParser.contentProbe(nativeSongObj, parserAccess)
+            },
+            textTransformEnabled = AppleLyricTextTransform.isTransformEnabled(),
+        )
+        val cachedSong = parseCacheKey?.let(AppleNativeLyricsParseCache::get)
+        val song = cachedSong ?: AppleLyricTextTransform.withRawReads {
             AppleSongParser.parser(nativeSongObj, parserAccess)
+        }.also { parsed ->
+            if (parseCacheKey != null && !parsed.adamId.isNullOrBlank()) {
+                AppleNativeLyricsParseCache.put(parseCacheKey, parsed)
+            }
+        }
+        if (BuildConfig.DEBUG) {
+            ProviderLogger.diagnostic(
+                "[LyricsParseCost] id=${song.adamId}, source=$source, trigger=$trigger, " +
+                    "cacheHit=${cachedSong != null}, cacheable=${parseCacheKey != null}, " +
+                    "contentHash=${listOf(song.lyrics, song.agents, song.pronunciationLanguages, song.duration).hashCode()}, " +
+                    "parseMs=${(System.nanoTime() - parseStartNs) / 1_000_000.0}, " +
+                    "lines=${song.lyrics.size}, address=$nativeAddress, " +
+                    "thread=${Thread.currentThread().name}"
+            )
         }
         if (song.adamId.isNullOrBlank()) {
             return null
@@ -82,7 +118,7 @@ object SongRepository {
             )
             return mapped
         }
-        DiskSongManager.save(songWithMetadata)
+        DiskSongManager.saveIfChanged(songWithMetadata)
         return mapped
     }
 

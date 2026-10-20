@@ -538,6 +538,7 @@ internal class AppleLyricsSupplementHooks(
         fragment: Any,
         expectedSongId: String?,
         expectedRevision: Long?,
+        syncDisplayFlags: Boolean = false,
     ) {
         if (BuildConfig.DEBUG) {
             ProviderLogger.debug(
@@ -589,6 +590,10 @@ internal class AppleLyricsSupplementHooks(
             val adapter = appleRecyclerAdapter(recyclerView) ?: return
             val itemCount = appleRecyclerAdapterItemCount(adapter)
             if (itemCount <= 0) return
+            if (syncDisplayFlags) {
+                syncAppleLyricsAdapterDisplayFlags(adapter)
+                invalidateAppleLyricsVisibleHolderTextCaches(recyclerView)
+            }
             if (BuildConfig.DEBUG) {
                 ProviderLogger.debug(
                     "[LyricsScrollDiag] rebindAllRows: stage=$stage, expectedSongId=$expectedSongId, itemCount=$itemCount"
@@ -618,6 +623,74 @@ internal class AppleLyricsSupplementHooks(
         // sending the partial translation payload or directly binding foreign-ClassLoader holders.
         recyclerViewAsView.postOnAnimation {
             rebindAllRows("next_frame")
+        }
+    }
+
+    /**
+     * Apple 的适配器显示开关由 ViewModel LiveData 驱动，偏好刚切换时会滞后数秒。
+     * 本轮重绑若继续按旧开关执行，adapter 会整段跳过翻译/发音子行的渲染。
+     */
+    internal fun syncAppleLyricsAdapterDisplayFlags(adapter: Any) {
+        syncAppleLyricsAdapterBooleanFlag(
+            adapter = adapter,
+            member = AppleMusicRuntimeMember.LYRICS_ADAPTER_TRANSLATION_SELECTED_FIELD,
+            selected = PreferencesMonitor.isTranslationSelected(),
+            label = "translation",
+        )
+        syncAppleLyricsAdapterBooleanFlag(
+            adapter = adapter,
+            member = AppleMusicRuntimeMember.LYRICS_ADAPTER_PRONUNCIATION_SELECTED_FIELD,
+            selected = PreferencesMonitor.isPronunciationSelected(),
+            label = "pronunciation",
+        )
+    }
+
+    private fun syncAppleLyricsAdapterBooleanFlag(
+        adapter: Any,
+        member: AppleMusicRuntimeMember,
+        selected: Boolean,
+        label: String,
+    ) {
+        runCatching {
+            val name = blurHooks.lyricsAdapterMember(adapter, member)
+            val previous = AppleReflection.field(adapter, name) as? Boolean
+            if (previous != selected) {
+                AppleReflection.setField(adapter, name, selected)
+                if (BuildConfig.DEBUG) {
+                    ProviderLogger.diagnostic(
+                        "[LyricsToggleDiag] adapter_$label synced: $previous->$selected, " +
+                            "adapter=${adapter.javaClass.name}"
+                    )
+                }
+            }
+        }.onFailure {
+            ProviderLogger.debug("Apple Music 歌词适配器 $label 显示开关同步失败: $it")
+        }
+    }
+
+    private fun invalidateAppleLyricsVisibleHolderTextCaches(recyclerView: Any) {
+        val group = recyclerView as? ViewGroup ?: return
+        var holders = 0
+        var fields = 0
+        for (index in 0 until group.childCount) {
+            val child = group.getChildAt(index) ?: continue
+            val holder = blurHooks.appleLyricsChildViewHolder(recyclerView, child) ?: continue
+            holders++
+            fields += clearAppleLyricsHolderTextCaches(holder)
+        }
+        if (BuildConfig.DEBUG) {
+            val candidates = if (holders == 0) {
+                runCatching {
+                    blurHooks.findAppleLyricsChildViewHolderMethods(recyclerView.javaClass)
+                        .joinToString(",") { "${it.name}(${it.parameterTypes.singleOrNull()?.name})" }
+                }.getOrNull().orEmpty().ifBlank { "none" }
+            } else {
+                "-"
+            }
+            ProviderLogger.diagnostic(
+                "[LyricsToggleDiag] holder_text_cache_cleared: " +
+                    "holders=$holders, fields=$fields, candidates=$candidates"
+            )
         }
     }
 

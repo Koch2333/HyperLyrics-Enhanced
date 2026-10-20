@@ -403,8 +403,8 @@ internal fun AppleListenNowHooks.installDebugArtworkLifecycleHooks() {
 }
 
 internal fun AppleListenNowHooks.fieldValueByType(instance: Any, fieldType: Class<*>): Any? =
-    generateSequence(instance.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
+    AppleReflection.hierarchyFields(instance.javaClass)
+        .asSequence()
         .filter { field -> fieldType.isAssignableFrom(field.type) }
         .firstNotNullOfOrNull { field ->
             runCatching {

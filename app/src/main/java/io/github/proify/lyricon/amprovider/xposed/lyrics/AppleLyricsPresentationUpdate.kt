@@ -9,6 +9,7 @@ package io.github.proify.lyricon.amprovider.xposed
 internal data class AppleLyricsPresentationUpdate(
     val songId: String?,
     val revision: Long?,
+    val syncDisplayFlags: Boolean = false,
 )
 
 /**
@@ -23,7 +24,11 @@ internal class AppleLyricsDeferredPresentation {
     /** Latest arrival wins, matching the original single-slot queue. */
     @Synchronized
     fun offer(update: AppleLyricsPresentationUpdate): Boolean {
-        pending = update
+        // A preference-driven refresh may be superseded by a content refresh while the menu is
+        // open; the flag sync must survive because it targets adapter state, not song content.
+        pending = pending?.let { current ->
+            update.copy(syncDisplayFlags = current.syncDisplayFlags || update.syncDisplayFlags)
+        } ?: update
         if (scheduled) return false
         scheduled = true
         return true

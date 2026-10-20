@@ -73,10 +73,12 @@ internal class AppleMedia3MetadataCoordinator(
 
     fun logIdentity(
         event: String,
-        identity: ActivePlaybackMediaIdentity = activePlaybackIdentity(),
+        identity: ActivePlaybackMediaIdentity? = null,
         details: String,
     ) {
         if (!BuildConfig.DEBUG) return
+        @Suppress("NAME_SHADOWING")
+        val identity = identity ?: activePlaybackIdentity()
         val sequence = traceSequence.incrementAndGet()
         val alias = identity.mediaId?.let(resolutionCoordinator::effectiveAlias)
         ProviderLogger.info(

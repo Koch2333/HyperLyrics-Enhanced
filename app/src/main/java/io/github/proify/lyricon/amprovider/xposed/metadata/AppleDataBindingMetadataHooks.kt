@@ -13,6 +13,7 @@ import android.widget.TextView
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalStack
 import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
+import io.github.proify.lyricon.amprovider.xposed.internal.WeakReferenceBuckets
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -37,9 +38,8 @@ internal class AppleDataBindingMetadataHooks(
         else runtime.hookResolver.resolveMethod(point).method
     }
 
-    private val bindingRefs =
-        ConcurrentHashMap<String, ConcurrentLinkedQueue<WeakReference<Any>>>()
-    private val bindingInstances = ConcurrentLinkedQueue<WeakReference<Any>>()
+    private val bindingRefs = WeakReferenceBuckets<String, Any>()
+    private val bindingInstances = WeakIdentityMap<Any, Unit>()
     internal val bindingMediaIds =
         Collections.synchronizedMap(WeakHashMap<Any, String>())
     internal val bindingRootViews =
@@ -270,13 +270,23 @@ internal class AppleDataBindingMetadataHooks(
                             )
                         ) return@postOnAnimation
                         recyclerRootVisibleResolutionIds[root] = mediaIds
-                        captureBoundRoot(root, visible = true)
-                        host.enrichEntitiesForResolution(mediaIds)
-                        host.markMetadataVisible(mediaIds)
-                        host.scheduleMetadataResolution(
-                            mediaIds,
-                            RequestPriority.VISIBLE,
-                        )
+                        // 整行的 ID 已包含 DataBinding 自身的 ID：先统一补全与标记可见，
+                        // DataBinding 的可见解析不再对同一 ID 重复补全、重复同步请求范围。
+                        AppleMainThreadCost.section("recycler_visible_enrich") {
+                            host.enrichEntitiesForResolution(mediaIds)
+                        }
+                        AppleMainThreadCost.section("recycler_visible_mark") {
+                            host.markMetadataVisible(mediaIds)
+                        }
+                        AppleMainThreadCost.section("recycler_visible_capture") {
+                            captureBoundRoot(root, visible = true, alreadyMarkedVisible = true)
+                        }
+                        AppleMainThreadCost.section("recycler_visible_schedule") {
+                            host.scheduleMetadataResolution(
+                                mediaIds,
+                                RequestPriority.VISIBLE,
+                            )
+                        }
                         if (BuildConfig.DEBUG) {
                             ProviderLogger.info(
                                 "Apple Music 元数据链路: " +
@@ -304,8 +314,8 @@ internal class AppleDataBindingMetadataHooks(
     fun bindingFromHolder(holder: Any?): Any? {
         holder ?: return null
         val bindingClass = bindingBaseClass ?: return null
-        return generateSequence(holder.javaClass) { it.superclass }
-            .flatMap { it.declaredFields.asSequence() }
+        return AppleReflection.hierarchyFields(holder.javaClass)
+            .asSequence()
             .firstOrNull { field -> bindingClass.isAssignableFrom(field.type) }
             ?.let { field ->
                 runCatching {
@@ -323,14 +333,7 @@ internal class AppleDataBindingMetadataHooks(
             bindingRootViews[binding] = WeakReference(root)
             bindingsByRoot[root] = WeakReference(binding)
         }
-        var registered = false
-        bindingInstances.forEach { ref ->
-            val target = ref.get()
-            if (target == null) bindingInstances.remove(ref) else if (target === binding) {
-                registered = true
-            }
-        }
-        if (!registered) bindingInstances.add(WeakReference(binding))
+        bindingInstances.putIfAbsent(binding, Unit)
     }
 
     fun beginModelBind(binding: Any) {
@@ -359,13 +362,7 @@ internal class AppleDataBindingMetadataHooks(
         val previousMediaId = bindingMediaIds[binding]
         host.onBindingMediaIdChanged(binding, previousMediaId, mediaId)
         bindingMediaIds[binding] = mediaId
-        val refs = bindingRefs.computeIfAbsent(mediaId) { ConcurrentLinkedQueue() }
-        var registered = false
-        refs.forEach { ref ->
-            val target = ref.get()
-            if (target == null) refs.remove(ref) else if (target === binding) registered = true
-        }
-        if (!registered) refs.add(WeakReference(binding))
+        bindingRefs.add(mediaId, binding)
         val root = bindingRootViews[binding]?.get()
         if (root != null && isRootVisible(root)) {
             postVisibleResolution(binding, mediaId, originalResolutionMode)
@@ -469,7 +466,12 @@ internal class AppleDataBindingMetadataHooks(
         val invalidateAll = invalidateAllMethod ?: return 0
         val executePending = executePendingBindingsMethod
         val appliedAlias = alias?.let { AppliedMetadataAlias(mediaId, it) }
-        val defaultValues = alias?.let { host.aliasValues(mediaId, it, null) }
+        // 默认展示值只用于下面的 debug 日志。
+        val defaultValues = if (BuildConfig.DEBUG) {
+            alias?.let { host.aliasValues(mediaId, it, null) }
+        } else {
+            null
+        }
         val bindingCandidates = host.boundModelCandidates(mediaId)
         val targets = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
         bindingRefs[mediaId]?.forEach { ref ->
@@ -491,11 +493,9 @@ internal class AppleDataBindingMetadataHooks(
             }
         }
         if (bindingCandidates.isNotEmpty()) {
-            bindingInstances.forEach { ref ->
-                val binding = ref.get()
-                if (binding == null) {
-                    bindingInstances.remove(ref)
-                } else if (bindingReferencesAny(binding, bindingCandidates)) {
+            val candidateSet = identityCandidateSet(bindingCandidates)
+            bindingInstances.keys().forEach { binding ->
+                if (bindingReferencesAny(binding, candidateSet)) {
                     bindingMediaIds[binding] = mediaId
                     if (
                         shouldRefreshExactBoundTarget(
@@ -566,8 +566,10 @@ internal class AppleDataBindingMetadataHooks(
                 }
                 val previousAppliedAlias = appliedAliases[binding]
                 val root = bindingRootViews[binding]?.get()
-                val values = alias?.let { host.aliasValues(mediaId, it, binding) }
-                if (BuildConfig.DEBUG) {
+                val values = AppleMainThreadCost.section("db_refresh_values") {
+                    alias?.let { host.aliasValues(mediaId, it, binding) }
+                }
+                if (BuildConfig.DEBUG) AppleMainThreadCost.section("db_refresh_debug") {
                     ProviderLogger.info(
                         "Apple Music 元数据链路: seq=${host.nextMetadataTraceSequence()}, " +
                             "event=data_binding_apply_before, contentId=$mediaId, " +
@@ -578,24 +580,48 @@ internal class AppleDataBindingMetadataHooks(
                 }
                 var refreshStrategy = DataBindingRefreshStrategy.FULL_INVALIDATE
                 runCatching {
-                    val variableResults = values?.let { applyAliasVariables(binding, it) }
+                    val variableResults = AppleMainThreadCost.section("db_refresh_variables") {
+                        values?.let { applyAliasVariables(binding, it) }
+                    }
                     refreshStrategy = dataBindingRefreshStrategy(
                         expectedTitle = values?.title,
                         expectedSubtitle = values?.subtitle,
                         titleApplied = variableResults?.titleApplied == true,
                         subtitleApplied = variableResults?.subtitleApplied == true,
                     )
-                    if (refreshStrategy == DataBindingRefreshStrategy.FULL_INVALIDATE) {
-                        invalidateAll.invoke(binding)
+                    if (
+                        refreshStrategy == DataBindingRefreshStrategy.FULL_INVALIDATE &&
+                        root != null &&
+                        AppleMainThreadCost.section("db_refresh_rendered_check") {
+                            dataBindingAlreadyRendered(
+                                expectedTitle = values?.title,
+                                expectedSubtitle = values?.subtitle,
+                                renderedTexts = dataBindingRenderedTexts(root),
+                            )
+                        }
+                    ) {
+                        refreshStrategy = DataBindingRefreshStrategy.ALREADY_RENDERED
                     }
-                    executePending?.invoke(binding)
+                    // 宿主自身的重绑定耗时，按策略分开记录。
+                    AppleMainThreadCost.section(
+                        if (refreshStrategy == DataBindingRefreshStrategy.FULL_INVALIDATE) {
+                            "db_refresh_execute_full"
+                        } else {
+                            "db_refresh_execute_pending"
+                        },
+                    ) {
+                        if (refreshStrategy == DataBindingRefreshStrategy.FULL_INVALIDATE) {
+                            invalidateAll.invoke(binding)
+                        }
+                        executePending?.invoke(binding)
+                    }
                     variableResults
                 }.onSuccess { variableResults ->
                     if (bindingMediaIds[binding] == mediaId && generation(binding) == bindGeneration) {
                         appliedAlias?.let { appliedAliases[binding] = it }
                     }
                     abandon()
-                    if (BuildConfig.DEBUG) {
+                    if (BuildConfig.DEBUG) AppleMainThreadCost.section("db_refresh_debug") {
                         ProviderLogger.info(
                             "Apple Music 元数据链路: seq=${host.nextMetadataTraceSequence()}, " +
                                 "event=data_binding_rebind, contentId=$mediaId, " +

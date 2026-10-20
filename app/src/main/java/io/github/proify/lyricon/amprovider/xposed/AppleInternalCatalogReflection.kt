@@ -198,7 +198,7 @@ internal fun AppleInternalCatalogResolver.parseCatalogEntities(
     response: Any,
     language: String,
     entityType: LocalizedEntityType,
-): List<CatalogSong> =
+): List<CatalogSong> = AppleMainThreadCost.section("catalog_parse") {
     collectionValues(
         AppleReflection.call(
             response,
@@ -207,6 +207,7 @@ internal fun AppleInternalCatalogResolver.parseCatalogEntities(
     ).mapNotNull { entity ->
         parseCatalogEntity(entity, language, entityType)
     }
+}
 
 internal fun AppleInternalCatalogResolver.parseCatalogEntity(
     entity: Any,

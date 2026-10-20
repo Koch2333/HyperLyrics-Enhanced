@@ -233,29 +233,33 @@ internal class AppleLyricsBlurHooks(
         delayMs: Long = 0L,
     ) {
         val recyclerViewAsView = recyclerView as? View ?: return
-        val viewRef = WeakReference(recyclerViewAsView)
-        lateinit var applyBlur: Runnable
-        applyBlur = Runnable {
-            val target = viewRef.get() ?: return@Runnable
-            val isCurrent = blurState.withRuntimeState(target) { state ->
-                if (state.pendingApplyBlur !== applyBlur) {
-                    false
-                } else {
-                    state.pendingApplyBlur = null
-                    true
-                }
-            }
-            if (!isCurrent) return@Runnable
-            applyAppleLyricsBlur(target)
+        // 歌词自动滚动时 onScrolled/onLayout 几乎每帧触发：每个 RecyclerView 复用同一个
+        // Runnable，先撤回已排队的再重新投递，不再每帧新建 Runnable 与 WeakReference。
+        val applyBlur = blurState.withRuntimeState(recyclerViewAsView) { state ->
+            state.pendingApplyBlur
+                ?: createAppleLyricsBlurRunnable(recyclerViewAsView)
+                    .also { state.pendingApplyBlur = it }
         }
-        val previous = blurState.withRuntimeState(recyclerViewAsView) { state ->
-            state.pendingApplyBlur.also { state.pendingApplyBlur = applyBlur }
-        }
-        previous?.let(recyclerViewAsView::removeCallbacks)
+        recyclerViewAsView.removeCallbacks(applyBlur)
         if (delayMs > 0L) {
             recyclerViewAsView.postDelayed(applyBlur, delayMs)
         } else {
             recyclerViewAsView.postOnAnimation(applyBlur)
+        }
+    }
+
+    /** 只在仍是该视图当前登记的 Runnable 时执行；状态被重置后旧 Runnable 自动失效。 */
+    private fun createAppleLyricsBlurRunnable(recyclerView: View): Runnable {
+        val viewRef = WeakReference(recyclerView)
+        return object : Runnable {
+            override fun run() {
+                val target = viewRef.get() ?: return
+                val isCurrent = blurState.withExistingRuntimeState(target) { state ->
+                    state.pendingApplyBlur === this
+                } == true
+                if (!isCurrent) return
+                applyAppleLyricsBlur(target)
+            }
         }
     }
 

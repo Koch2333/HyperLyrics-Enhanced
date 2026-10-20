@@ -98,6 +98,91 @@ internal class AppleInternalCatalogDispatch {
             catalogIdentityInFlight.remove(mediaId).orEmpty()
         }
 
+    // ---- catalog identity base-query batching ----
+
+    private val identityBaseQueryPending =
+        LinkedHashMap<String, MutableList<(CatalogSong?) -> Unit>>()
+    private var identityBaseQueryScheduled = false
+
+    /** Queues one song's base identity lookup; true means the caller must schedule a flush. */
+    fun submitIdentityBaseQuery(mediaId: String, onResult: (CatalogSong?) -> Unit): Boolean =
+        synchronized(identityBaseQueryPending) {
+            identityBaseQueryPending.getOrPut(mediaId) { mutableListOf() } += onResult
+            if (identityBaseQueryScheduled) {
+                false
+            } else {
+                identityBaseQueryScheduled = true
+                true
+            }
+        }
+
+    /**
+     * Takes the first [batchSize] queued lookups in submit order. The second value is true when
+     * lookups remain; the caller then owns scheduling the next batch, so the scheduled flag stays set.
+     */
+    fun takeIdentityBaseQueryBatch(
+        batchSize: Int,
+    ): Pair<Map<String, List<(CatalogSong?) -> Unit>>, Boolean> =
+        synchronized(identityBaseQueryPending) {
+            val batch = LinkedHashMap<String, List<(CatalogSong?) -> Unit>>()
+            val iterator = identityBaseQueryPending.entries.iterator()
+            while (iterator.hasNext() && batch.size < batchSize) {
+                val entry = iterator.next()
+                batch[entry.key] = entry.value.toList()
+                iterator.remove()
+            }
+            val hasMore = identityBaseQueryPending.isNotEmpty()
+            identityBaseQueryScheduled = hasMore
+            batch to hasMore
+        }
+
+    // ---- ISRC query batching (grouped by language) ----
+
+    private val isrcQueryPending =
+        LinkedHashMap<String, LinkedHashMap<String, MutableList<(CatalogSong?) -> Unit>>>()
+    private var isrcQueryScheduled = false
+
+    /** Queues one ISRC lookup for [language]; true means the caller must schedule a batch. */
+    fun submitIsrcQuery(
+        language: String,
+        isrc: String,
+        onResult: (CatalogSong?) -> Unit,
+    ): Boolean = synchronized(isrcQueryPending) {
+        isrcQueryPending.getOrPut(language) { LinkedHashMap() }
+            .getOrPut(isrc) { mutableListOf() } += onResult
+        if (isrcQueryScheduled) {
+            false
+        } else {
+            isrcQueryScheduled = true
+            true
+        }
+    }
+
+    /**
+     * Takes up to [batchSize] ISRCs of the oldest language group. The third value is true when
+     * lookups remain; the caller then owns scheduling the next batch.
+     */
+    fun takeIsrcQueryBatch(
+        batchSize: Int,
+    ): Triple<String?, Map<String, List<(CatalogSong?) -> Unit>>, Boolean> =
+        synchronized(isrcQueryPending) {
+            val language = isrcQueryPending.keys.firstOrNull()
+            val batch = LinkedHashMap<String, List<(CatalogSong?) -> Unit>>()
+            if (language != null) {
+                val group = isrcQueryPending.getValue(language)
+                val iterator = group.entries.iterator()
+                while (iterator.hasNext() && batch.size < batchSize) {
+                    val entry = iterator.next()
+                    batch[entry.key] = entry.value.toList()
+                    iterator.remove()
+                }
+                if (group.isEmpty()) isrcQueryPending.remove(language)
+            }
+            val hasMore = isrcQueryPending.isNotEmpty()
+            isrcQueryScheduled = hasMore
+            Triple(language, batch, hasMore)
+        }
+
     /**
      * Merges into an existing localized lane or opens a new one.
      *
@@ -292,9 +377,11 @@ internal class AppleInternalCatalogDispatch {
             ]
             val selected = mutableListOf<LocalizedRequest>()
             val selectedIds = linkedSetOf<String>()
-            localizedPending.values.forEach { request ->
+            // 同地区、语言、实体类型的低优先级请求补进剩余名额：同一个请求多带几个 ID 不增加
+            // 串行通道上的请求数。按优先级从高到低装入，名额不足时高优先级先占；批次的槽位
+            // 仍按首个（最高）优先级计算。
+            pendingValues.sortedByDescending { request -> request.priority.ordinal }.forEach { request ->
                 if (
-                    request.priority == first.priority &&
                     request.storefront == first.storefront &&
                     request.language == first.language &&
                     request.entityType == first.entityType

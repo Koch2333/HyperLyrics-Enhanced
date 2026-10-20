@@ -30,10 +30,16 @@ internal fun AppleDataBindingMetadataHooks.clearPendingRefresh(binding: Any, exp
     }
 }
 
-internal fun AppleDataBindingMetadataHooks.captureBoundRoot(root: View, visible: Boolean = false): String? {
+internal fun AppleDataBindingMetadataHooks.captureBoundRoot(
+    root: View,
+    visible: Boolean = false,
+    alreadyMarkedVisible: Boolean = false,
+): String? {
     val binding = bindingsByRoot[root]?.get() ?: return null
     val mediaId = resolvedMediaId(binding) ?: return null
-    if (visible && isRootVisible(root)) resolveVisible(binding, mediaId)
+    if (visible && isRootVisible(root)) {
+        resolveVisible(binding, mediaId, alreadyMarkedVisible = alreadyMarkedVisible)
+    }
     return mediaId
 }
 
@@ -94,9 +100,12 @@ internal fun AppleDataBindingMetadataHooks.resolveVisible(
     binding: Any,
     mediaId: String,
     originalResolutionMode: InAppOriginalResolutionMode = host.originalResolutionMode(binding),
+    alreadyMarkedVisible: Boolean = false,
 ) {
-    host.enrichEntitiesForResolution(listOf(mediaId))
-    host.markMetadataVisible(listOf(mediaId))
+    if (!alreadyMarkedVisible) {
+        host.enrichEntitiesForResolution(listOf(mediaId))
+        host.markMetadataVisible(listOf(mediaId))
+    }
     host.effectiveAlias(mediaId)?.let { refreshDataBindings(mediaId, it) }
     host.scheduleMetadataResolution(
         listOf(mediaId),
@@ -193,22 +202,41 @@ internal fun AppleDataBindingMetadataHooks.registerGenericRecyclerBinding(captur
 internal fun AppleDataBindingMetadataHooks.boundRootContainsMediaId(root: View, mediaId: String): Boolean =
     mediaId in recyclerRootMediaIds[root].orEmpty()
 
-internal fun AppleDataBindingMetadataHooks.recyclerViewHolderItemView(holder: Any): View? =
-    generateSequence(holder.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
-        .firstOrNull { field -> View::class.java.isAssignableFrom(field.type) }
-        ?.let { field ->
-            runCatching {
-                field.isAccessible = true
-                field.get(holder) as? View
-            }.getOrNull()
-        }
+/**
+ * 取 ViewHolder 的 itemView。宿主 R8 混淆后字段名不可用：1611 的 Epoxy holder `J` 自身带一个
+ * 常为空的 `ViewGroup` 字段，基类 `RecyclerView$D` 另有指向所属 RecyclerView 的字段，
+ * 只有 itemView 的声明类型恰好是 `View`（221024 `[PlaylistRowDiag]` 实测）。
+ */
+internal fun AppleDataBindingMetadataHooks.recyclerViewHolderItemView(holder: Any): View? {
+    val candidates = holderItemViewFieldCandidates(
+        AppleReflection.hierarchyFields(holder.javaClass),
+        View::class.java,
+    )
+    return candidates.firstNotNullOfOrNull { field ->
+        runCatching {
+            field.isAccessible = true
+            field.get(holder) as? View
+        }.getOrNull()
+    }
+}
+
+/**
+ * 声明类型恰为 [viewType] 的字段优先；没有时沿用原先“第一个子类字段”的行为。不能退到其他
+ * 非空子类字段，否则会把所属 RecyclerView 当成行视图。
+ */
+internal fun holderItemViewFieldCandidates(
+    fields: List<java.lang.reflect.Field>,
+    viewType: Class<*>,
+): List<java.lang.reflect.Field> {
+    val viewFields = fields.filter { field -> viewType.isAssignableFrom(field.type) }
+    return viewFields.filter { it.type == viewType }.ifEmpty { viewFields.take(1) }
+}
 
 internal fun AppleDataBindingMetadataHooks.recyclerViewFromRecycler(recycler: Any?): Any? {
     recycler ?: return null
     val recyclerClass = recyclerViewClass ?: return null
-    return generateSequence(recycler.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
+    return AppleReflection.hierarchyFields(recycler.javaClass)
+        .asSequence()
         .firstOrNull { field -> recyclerClass.isAssignableFrom(field.type) }
         ?.let { field ->
             runCatching {
@@ -218,9 +246,10 @@ internal fun AppleDataBindingMetadataHooks.recyclerViewFromRecycler(recycler: An
         }
 }
 
-internal fun AppleDataBindingMetadataHooks.bindingReferencesAny(binding: Any, candidates: List<Any>): Boolean {
-    val candidateSet = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
-    candidateSet.addAll(candidates)
+internal fun identityCandidateSet(candidates: List<Any>): Set<Any> =
+    Collections.newSetFromMap(IdentityHashMap<Any, Boolean>()).apply { addAll(candidates) }
+
+internal fun AppleDataBindingMetadataHooks.bindingReferencesAny(binding: Any, candidateSet: Set<Any>): Boolean {
     val fields = bindingContentFields.computeIfAbsent(binding.javaClass) {
         discoverBindingContentFields(it)
     }

@@ -109,6 +109,21 @@ internal fun shouldScheduleDataBindingAliasRefresh(
 ): Boolean = requestedAlias == null ||
     (appliedAlias != requestedAlias && pendingAlias != requestedAlias)
 
+/**
+ * 整体重绑前先看行上已显示的文字：标题（以及非空的副标题）都已是别名时，整体失效重绑不会
+ * 改变显示，只是让 Apple 重新执行整套绑定。221038 队列与首页共 633 次重绑中 373 次属于这种
+ * 情况（同一艺人的歌每解析一首，其余同艺人歌曲都会被强制刷新一次，PERF-MAIN-THREAD-001）。
+ */
+internal fun dataBindingAlreadyRendered(
+    expectedTitle: String?,
+    expectedSubtitle: String?,
+    renderedTexts: List<String>,
+): Boolean {
+    if (expectedTitle.isNullOrBlank()) return false
+    if (expectedTitle.trim() !in renderedTexts) return false
+    return expectedSubtitle.isNullOrBlank() || expectedSubtitle.trim() in renderedTexts
+}
+
 internal fun dataBindingRefreshStrategy(
     expectedTitle: String?,
     expectedSubtitle: String?,

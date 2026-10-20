@@ -10,6 +10,7 @@ import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalReentryGua
 import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 import java.lang.reflect.Executable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 internal interface AppleContentItemMetadataHost {
     fun containerNavigationBinding(contentItem: Any): InAppContainerNavigationRef?
@@ -61,8 +62,27 @@ internal class AppleContentItemMetadataHooks(
     private val host: AppleContentItemMetadataHost,
 ) {
     private val hookedMethods = ConcurrentHashMap.newKeySet<Executable>()
+    /** 构造 Hook 每次实例化都会调用 [ensureHooks]；同一具体类只需处理一次。 */
+    private val processedClasses = ConcurrentHashMap.newKeySet<Class<*>>()
     private val mediaIds = WeakIdentityMap<Any, String>()
     private val getterGuard = ThreadLocalReentryGuard()
+
+    private class GetterItemState(val mediaId: String) {
+        @Volatile var analyzed = false
+        @Volatile var appliedAlias: Alias? = null
+    }
+
+    /** getter 每次调用都会走登记与套用别名；按对象记住已做过的部分，避免每帧重复。 */
+    private val getterItemStates = WeakIdentityMap<Any, GetterItemState>()
+
+    /**
+     * 档案外的子类在首个实例构造时补装 getter Hook，放到后台线程执行：安装 Hook 需进入
+     * GC 临界区，在主线程上遇到宿主后台 GC 会整段阻塞（PERF-LAZY-HOOK-GC-001）。代价是该子类
+     * 在 Hook 装好之前读取的 getter 返回原值；常见子类已在版本档案里启动预装。
+     */
+    private val lateHookExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "HLE-ContentItemHook").apply { isDaemon = true }
+    }
     private val baseContentItemRuntimeTarget by lazy {
         runtime.hookResolver.resolveClasses(AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES)
             .first { resolved ->
@@ -80,7 +100,13 @@ internal class AppleContentItemMetadataHooks(
             baseContentItemClass.declaredConstructors.forEach { constructor ->
                 constructor.isAccessible = true
                 runtime.hookRegistrar.installHook(constructor, after = { chain, _ ->
-                    chain.thisObject?.javaClass?.let(::ensureHooks)
+                    val contentItemClass = chain.thisObject?.javaClass ?: return@installHook
+                    if (contentItemClass in processedClasses) return@installHook
+                    lateHookExecutor.execute {
+                        runCatching { ensureHooks(contentItemClass) }.onFailure {
+                            ProviderLogger.error("Apple Music 内容项 getter Hook 补装失败", it)
+                        }
+                    }
                 })
             }
             resolvedClasses.forEach { resolved -> ensureHooks(resolved.clazz) }
@@ -93,6 +119,7 @@ internal class AppleContentItemMetadataHooks(
     }
 
     fun ensureHooks(contentItemClass: Class<*>) {
+        if (!processedClasses.add(contentItemClass)) return
         listOf(
             AppleContentItemGetter.TITLE to AppleMusicRuntimeMember.CONTENT_ITEM_TITLE_GETTER,
             AppleContentItemGetter.NOW_PLAYING_TITLE to
@@ -116,7 +143,9 @@ internal class AppleContentItemMetadataHooks(
                     return@installResultOverrideHook original
                 }
                 val contentItem = chain.thisObject ?: return@installResultOverrideHook original
-                val containerBinding = host.containerNavigationBinding(contentItem)
+                val containerBinding = AppleMainThreadCost.section("getter_container") {
+                    host.containerNavigationBinding(contentItem)
+                }
                 if (containerBinding != null) {
                     val mediaId = containerBinding.mediaId
                     val containerKind = containerBinding.kind
@@ -132,40 +161,62 @@ internal class AppleContentItemMetadataHooks(
                             alias.album.takeIf(String::isNotBlank) ?: original
                     }
                 }
-                val entityType = host.localizedEntityType(contentItem)
-                    ?: return@installResultOverrideHook original
-                val mediaId = runCatching { mediaId(contentItem) }.getOrNull()
-                    ?: return@installResultOverrideHook original
-                host.recordComposeMediaId(mediaId)
-                host.recordCurrentRecyclerMediaId(mediaId)
-                val requestPriority = host.requestPriority(mediaId)
-                val surfaceRelevant = host.shouldResolveFromGetter(requestPriority)
-                val resolvedAlias = host.effectiveAlias(mediaId)
-                host.registerPlaybackItem(
-                    mediaId = mediaId,
-                    playbackItem = contentItem,
-                    notifyChange = false,
-                    analyzeMetadata = surfaceRelevant && (
-                        resolvedAlias == null || host.shouldRequestOverride(mediaId)
-                        ),
-                )
-                if (resolvedAlias != null) {
-                    host.applyAliasToPlaybackItem(
-                        playbackItem = contentItem,
-                        alias = resolvedAlias,
-                        notifyChange = false,
+                val entityType = AppleMainThreadCost.section("getter_entity_type") {
+                    host.localizedEntityType(contentItem)
+                } ?: return@installResultOverrideHook original
+                val mediaId = AppleMainThreadCost.section("getter_media_id") {
+                    runCatching { mediaId(contentItem) }.getOrNull()
+                } ?: return@installResultOverrideHook original
+                AppleMainThreadCost.section("getter_record") {
+                    host.recordComposeMediaId(mediaId)
+                    host.recordCurrentRecyclerMediaId(mediaId)
+                }
+                val surfaceRelevant = AppleMainThreadCost.section("getter_priority") {
+                    host.shouldResolveFromGetter(host.requestPriority(mediaId))
+                }
+                val resolvedAlias = AppleMainThreadCost.section("getter_alias") {
+                    host.effectiveAlias(mediaId)
+                }
+                val itemState = getterItemState(contentItem, mediaId)
+                // 完整分析只读取对象自身字段并合并键，不发请求；同一对象分析过一次后结果不变，
+                // 而套用别名后再分析还会把写入的本地化名当成原名读取。
+                val analyzeMetadata = !itemState.analyzed && surfaceRelevant && (
+                    resolvedAlias == null || host.shouldRequestOverride(mediaId)
                     )
+                if (analyzeMetadata) itemState.analyzed = true
+                AppleMainThreadCost.section(
+                    if (analyzeMetadata) "getter_register_analyze" else "getter_register",
+                ) {
+                    host.registerPlaybackItem(
+                        mediaId = mediaId,
+                        playbackItem = contentItem,
+                        notifyChange = false,
+                        analyzeMetadata = analyzeMetadata,
+                    )
+                }
+                // 同一对象已写入相同别名时不再逐字段反射比对；getter 返回值仍按别名覆盖。
+                if (resolvedAlias != null && resolvedAlias != itemState.appliedAlias) {
+                    AppleMainThreadCost.section("getter_apply_alias") {
+                        host.applyAliasToPlaybackItem(
+                            playbackItem = contentItem,
+                            alias = resolvedAlias,
+                            notifyChange = false,
+                        )
+                    }
+                    itemState.appliedAlias = resolvedAlias
                 }
                 val alias = resolvedAlias ?: host.effectiveAlias(mediaId)
                 if (alias == null) {
                     original
                 } else {
-                    host.metadataOverride(
-                        entityType = entityType,
-                        getter = getter,
-                        alias = alias,
-                        original = original as? String,
-                    ) ?: original
+                    AppleMainThreadCost.section("getter_override") {
+                        host.metadataOverride(
+                            entityType = entityType,
+                            getter = getter,
+                            alias = alias,
+                            original = original as? String,
+                        )
+                    } ?: original
                 }
             }
             ProviderLogger.info(
@@ -174,6 +225,13 @@ internal class AppleContentItemMetadataHooks(
             )
         }
     }
+
+    /** 对象换了 mediaId（宿主复用对象）时重新开始记录。 */
+    private fun getterItemState(contentItem: Any, mediaId: String): GetterItemState =
+        synchronized(getterItemStates) {
+            getterItemStates[contentItem]?.takeIf { it.mediaId == mediaId }
+                ?: GetterItemState(mediaId).also { getterItemStates[contentItem] = it }
+        }
 
     fun mediaId(contentItem: Any, refresh: Boolean = false): String? {
         if (!refresh) {

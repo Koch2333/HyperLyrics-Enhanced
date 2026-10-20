@@ -93,6 +93,20 @@ class AppleLyricsPresentationUpdateTest {
         assertTrue(pending.offer(AppleLyricsPresentationUpdate("c", 3)))
     }
 
+    @Test fun `deferred preference flag sync survives a newer content refresh`() {
+        val pending = AppleLyricsDeferredPresentation()
+        assertTrue(
+            pending.offer(
+                AppleLyricsPresentationUpdate("a", 1, syncDisplayFlags = true),
+            )
+        )
+        assertFalse(pending.offer(AppleLyricsPresentationUpdate("b", 2)))
+        assertEquals(
+            AppleLyricsPresentationUpdate("b", 2, syncDisplayFlags = true),
+            pending.take(),
+        )
+    }
+
     @Test fun `menu still showing can reschedule same update including unversioned refresh`() {
         val pending = AppleLyricsDeferredPresentation()
         val update = AppleLyricsPresentationUpdate("a", null)

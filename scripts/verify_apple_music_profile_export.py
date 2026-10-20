@@ -451,6 +451,16 @@ def verify_profile(ctx, profile):
     names = queue['runtimeMemberNames']
     method(queue['className'], names['QUEUE_ADAPTER_DISPLAYED_ENTRY_METHOD'], ['int'])
     field(queue['className'], names['QUEUE_ADAPTER_SUBMITTED_ENTRIES_FIELD'], 'java.util.ArrayList')
+    # The queue refresh calls the host Adapter's getItemCount; its R8 name lives on the
+    # notify target. The queue adapter must inherit that Adapter class.
+    notify = one('RECYCLER_NOTIFY_ITEM_CHANGED')
+    item_count = notify['runtimeMemberNames'].get('RECYCLER_ADAPTER_ITEM_COUNT_METHOD')
+    if item_count:
+        method(notify['className'], item_count, [], 'int', False)
+        supers = [binary_name(c.superclass_descriptor)
+                  for c in lineage(ctx, queue['className']) if c.superclass_descriptor]
+        require(notify['className'] in supers,
+                f"{queue['className']}: does not extend {notify['className']}")
     for key, expected in [('MEDIA3_METADATA_BUNDLE_FIELD', 'android.os.Bundle'),
                           ('MEDIA3_METADATA_TITLE_FIELD', 'java.lang.CharSequence'),
                           ('MEDIA3_METADATA_ARTIST_FIELD', 'java.lang.CharSequence')]:

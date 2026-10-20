@@ -314,6 +314,7 @@ internal enum class AppleMusicRuntimeMember {
     LYRICS_GRADIENT_MASK_END_CHILD_FIELD,
     LYRICS_GRADIENT_MASK_POSITIONS_FIELD,
     LYRICS_GRADIENT_MASK_FRACTION_FIELD,
+    RECYCLER_ADAPTER_ITEM_COUNT_METHOD,
     QUEUE_ADAPTER_DISPLAYED_ENTRY_METHOD,
     QUEUE_ADAPTER_SUBMITTED_ENTRIES_FIELD,
     QUEUE_ENTRY_ITEM_FIELD,
@@ -497,6 +498,13 @@ internal data class AppleMusicHookProfile(
  * 实际业务结构、现有契约无法唯一识别时，才需要新增或调整人工档案。
  */
 internal object AppleMusicHookProfiles {
+    /**
+     * 1611 起专辑比较器参数为宿主的 `kotlin.Pair(root, tracks)`。该类由 Apple Music 自带的
+     * Kotlin 标准库加载，与模块的 `kotlin.Pair` 不是同一个类，只能按名称反射读取首元素。
+     * 原包 1611 DEX 核对：`Lkotlin/Pair;->getFirst()Ljava/lang/Object;`。
+     */
+    const val HOST_PAIR_FIRST_GETTER = "getFirst"
+
     private val APPLE_MUSIC_6_5_0 = AppleMusicHookProfile(
         id = "am-6.5.0-1580",
         versionName = "6.5.0",
@@ -1983,6 +1991,22 @@ internal object AppleMusicHookProfiles {
             .filterValues { it.isNotEmpty() }
         fun target(point: AppleMusicHookPoint, index: Int = 0) = inherited.getValue(point)[index]
         return inherited + mapOf(
+            // 以下子类原先在首个实例构造时于主线程补装 getter Hook；补装需进入 GC 临界区，
+            // 遇上宿主后台 GC 会阻塞主线程（221036：三次共约 880 ms，掉 195 帧，
+            // PERF-LAZY-HOOK-GC-001）。改为启动时预装；未知版本按类名兼容加载同样预装。
+            // 1611 原始 DEX 核实各类自身声明的 `()Ljava/lang/String;` getter：RadioStation 声明
+            // getArtistName/getCollectionName/getNowPlayingSubtitle/getNowPlayingTitle/getSubTitle；
+            // Playlist 声明 getTitle；PlaylistCollectionItem 声明 getSubTitle；Editor 与
+            // CommonHeaderCollectionItem 声明 getTitle/getSubTitle。所选类为 221011–221036
+            // 日志中实际补装过的子类。
+            AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES to
+                inherited.getValue(AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES) + listOf(
+                    AppleMusicHookTarget("com.apple.android.music.model.RadioStation"),
+                    AppleMusicHookTarget("com.apple.android.music.model.PlaylistCollectionItem"),
+                    AppleMusicHookTarget("com.apple.android.music.model.Playlist"),
+                    AppleMusicHookTarget("com.apple.android.music.model.Editor"),
+                    AppleMusicHookTarget("com.apple.android.music.model.CommonHeaderCollectionItem"),
+                ),
             AppleMusicHookPoint.ACTIVITY_THEME_CREATE to listOf(
                 target(AppleMusicHookPoint.ACTIVITY_THEME_CREATE).copy(
                     runtimeMemberNames = target(AppleMusicHookPoint.ACTIVITY_THEME_CREATE).runtimeMemberNames + mapOf(
@@ -2084,6 +2108,17 @@ internal object AppleMusicHookProfiles {
             AppleMusicHookPoint.SEARCH_RESULTS_MODEL_BOUND to listOf(
                 target(AppleMusicHookPoint.SEARCH_RESULTS_MODEL_BOUND).copy(
                     parameterTypeNames = listOf("com.airbnb.epoxy.J", "com.airbnb.epoxy.w", "int", "com.airbnb.epoxy.w"),
+                ),
+            ),
+            // Original 1611 DEX: RecyclerView$f is the host Adapter; its only abstract ()I method
+            // d is getItemCount (alongside abstract k(RecyclerView$D,I)V and
+            // m(ViewGroup,I)RecyclerView$D). androidx.recyclerview.widget.v (ListAdapter, ea.a's
+            // superclass) overrides d()I.
+            AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED to listOf(
+                target(AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED).copy(
+                    runtimeMemberNames = target(AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED).runtimeMemberNames + mapOf(
+                        AppleMusicRuntimeMember.RECYCLER_ADAPTER_ITEM_COUNT_METHOD to "d",
+                    ),
                 ),
             ),
             AppleMusicHookPoint.BROWSE_COMPOSE_ITEM to listOf(
@@ -4291,9 +4326,14 @@ internal data class ResolvedAppleMusicHookMethod(
 /** 统一负责按 Apple Music 版本加载并校验混淆 Hook 目标。 */
 internal class AppleMusicHookResolver(
     val version: AppleMusicVersion,
-    private val classLookup: (String) -> Class<*>,
+    classLookup: (String) -> Class<*>,
     private val dexKitResolver: AppleMusicDexKitResolver? = null,
 ) {
+    // 初始化器里的 classLookup 指构造参数；类体其余位置使用这个计时包装后的属性。
+    private val classLookup: (String) -> Class<*> = { name ->
+        AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.CLASS_LOOKUP) { classLookup(name) }
+    }
+
     constructor(version: AppleMusicVersion, classLoader: ClassLoader) : this(
         version = version,
         classLookup = classLoader::loadClass,
@@ -4314,6 +4354,20 @@ internal class AppleMusicHookResolver(
     )
 
     val profile: AppleMusicHookProfile? = AppleMusicHookProfiles.profileFor(version)
+
+    /**
+     * 类解析结果缓存：运行期回调（Epoxy 绑定、控制器判断等）反复解析同一 Hook 点，
+     * 每次都会重做类加载、契约校验与基线记录。拒绝 DexKit 结果时整体失效。
+     */
+    private val resolvedClassesCache =
+        java.util.concurrent.ConcurrentHashMap<AppleMusicHookPoint, List<ResolvedAppleMusicHookClass>>()
+    private val resolvedClassCache =
+        java.util.concurrent.ConcurrentHashMap<AppleMusicHookPoint, ResolvedAppleMusicHookClass>()
+
+    private fun invalidateResolvedClasses() {
+        resolvedClassesCache.clear()
+        resolvedClassCache.clear()
+    }
 
     @Volatile
     var lyricsPreferenceBindings: AppleLyricsPreferenceBindings? = null
@@ -4359,6 +4413,13 @@ internal class AppleMusicHookResolver(
      * 避免在已知版本里同时 Hook 旧版本碰巧仍存在、但语义已经变化的类。
      */
     fun resolveClasses(hookPoint: AppleMusicHookPoint): List<ResolvedAppleMusicHookClass> {
+        resolvedClassesCache[hookPoint]?.let { return it }
+        return resolveClassesUncached(hookPoint).also { resolved ->
+            if (resolved.isNotEmpty()) resolvedClassesCache[hookPoint] = resolved
+        }
+    }
+
+    private fun resolveClassesUncached(hookPoint: AppleMusicHookPoint): List<ResolvedAppleMusicHookClass> {
         val exactTargets = AppleMusicHookProfiles.exactTargets(version, hookPoint)
         val exactClasses = exactTargets.mapNotNull { target ->
             loadClass(hookPoint, target, compatibilityFallback = false)
@@ -4420,7 +4481,11 @@ internal class AppleMusicHookResolver(
     }
 
     /** 解析单个类；精确档案缺失时才尝试已知版本候选。通过语义契约校验才允许返回。 */
-    fun resolveClass(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass {
+    fun resolveClass(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass =
+        resolvedClassCache[hookPoint]
+            ?: resolveClassUncached(hookPoint).also { resolvedClassCache[hookPoint] = it }
+
+    private fun resolveClassUncached(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass {
         val exactTargets = AppleMusicHookProfiles.exactTargets(version, hookPoint).toSet()
         val failures = mutableListOf<String>()
         AppleMusicHookProfiles.candidates(version, hookPoint).forEach { target ->
@@ -4488,12 +4553,16 @@ internal class AppleMusicHookResolver(
                     failures += "${target.className}:class:${throwable.javaClass.simpleName}"
                     return@forEach
                 }
-            val matchingMethods = allDeclaredMethods(
-                clazz = clazz,
-                includeSynthetic = target.includeSynthetic,
-            )
-                .filter { method -> methodMatches(hookPoint, target, method) }
-                .toList()
+            val matchingMethods = AppleStartupResolveCost.time(
+                AppleStartupResolveCost.Kind.METHOD_SCAN,
+            ) {
+                allDeclaredMethods(
+                    clazz = clazz,
+                    includeSynthetic = target.includeSynthetic,
+                )
+                    .filter { method -> methodMatches(hookPoint, target, method) }
+                    .toList()
+            }
             if (matchingMethods.size == 1 || target.allowFirstMatch && matchingMethods.isNotEmpty()) {
                 val method = matchingMethods.first().apply { isAccessible = true }
                 val contractResult = AppleMusicHookContracts.validate(
@@ -4604,7 +4673,7 @@ internal class AppleMusicHookResolver(
                     templateClassName = resolved.baselineClassName,
                     method = resolved.method,
                     reason = reason,
-                )
+                ).also { invalidateResolvedClasses() }
             },
             retry = {
                 resolveDexKitMethod(hookPoint)?.method
@@ -4626,6 +4695,7 @@ internal class AppleMusicHookResolver(
             actualClassName = resolved.clazz.name,
             reason = reason,
         )
+        invalidateResolvedClasses()
         return true
     }
 
@@ -4925,10 +4995,34 @@ internal class AppleMusicHookResolver(
         }
     }
 
+    /**
+     * 冷启动时同一个类会被多个 Hook 点反复扫描（221031：124 次扫描合计 52 ms，`declaredMethods`
+     * 每次都为整条继承链新建 Method 对象）。启动期间按类缓存去重后的结果，
+     * [releaseStartupCaches] 后恢复为每次现扫，不长期持有这些对象。
+     */
+    @Volatile
+    private var declaredMethodsCache: java.util.concurrent.ConcurrentHashMap<Pair<Class<*>, Boolean>, List<Method>>? =
+        java.util.concurrent.ConcurrentHashMap()
+
+    fun releaseStartupCaches() {
+        declaredMethodsCache = null
+    }
+
     private fun allDeclaredMethods(
         clazz: Class<*>,
         includeSynthetic: Boolean,
-    ): Sequence<Method> =
+    ): Sequence<Method> {
+        val cache = declaredMethodsCache
+            ?: return scanDeclaredMethods(clazz, includeSynthetic).asSequence()
+        return cache.computeIfAbsent(clazz to includeSynthetic) {
+            scanDeclaredMethods(clazz, includeSynthetic)
+        }.asSequence()
+    }
+
+    private fun scanDeclaredMethods(
+        clazz: Class<*>,
+        includeSynthetic: Boolean,
+    ): List<Method> =
         generateSequence(clazz) { current -> current.superclass }
             .flatMap { current -> current.declaredMethods.asSequence() }
             .filter { method ->
@@ -4937,4 +5031,5 @@ internal class AppleMusicHookResolver(
             .distinctBy { method ->
                 method.name to method.parameterTypes.joinToString(separator = ",") { it.name }
             }
+            .toList()
 }

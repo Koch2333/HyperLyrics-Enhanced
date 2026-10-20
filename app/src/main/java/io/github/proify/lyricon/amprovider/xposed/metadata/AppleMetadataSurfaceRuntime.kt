@@ -7,9 +7,9 @@
 package io.github.proify.lyricon.amprovider.xposed
 
 import android.app.Activity
+import android.os.Looper
 import android.os.SystemClock
 import android.view.View
-import androidx.recyclerview.widget.RecyclerView
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicLong
@@ -18,6 +18,9 @@ internal interface AppleMetadataSurfaceHost {
     fun catalogResolver(): AppleInternalCatalogResolver?
 
     fun associatedArtistIds(mediaId: String): Collection<String>
+
+    /** 关联艺人 ID 的变更计数；返回 null 表示无法判断，每次都重新展开请求范围。 */
+    fun associatedArtistIdsRevision(): Long? = null
 
     fun hasVisibleExactConsumer(mediaId: String): Boolean
 
@@ -43,9 +46,14 @@ internal class AppleMetadataSurfaceRuntime(
     private val syncLock = Any()
     private val dispatchRevision = AtomicLong(0L)
     private var lastSyncedSignature: MetadataSurfaceSignature? = null
+    private var lastSyncedScopeRevision = -1L
+    private var lastSyncedArtistRevision: Long? = null
 
     @Volatile
     private var activePageOwner = WeakReference<Any>(null)
+
+    /** 只在主线程读写。 */
+    private var visibleScopeSyncScheduled = false
 
     fun installLifecycleHooks() {
         val activityInstalled = runCatching {
@@ -93,7 +101,7 @@ internal class AppleMetadataSurfaceRuntime(
 
     fun activePageOwner(): Any? = activePageOwner.get()
 
-    fun onPageAttached(owner: Any, recycler: RecyclerView) {
+    fun onPageAttached(owner: Any, recycler: View) {
         activePageOwner = WeakReference(owner)
         onSurfaceResumed(owner)
         if (BuildConfig.DEBUG) {
@@ -121,11 +129,31 @@ internal class AppleMetadataSurfaceRuntime(
     fun markVisible(
         mediaIds: Collection<String>,
     ): AppleMetadataSurfaceCoordinator.SurfaceSnapshot {
-        visibleResolutionLeases.mark(mediaIds)
-        coordinator.markCurrentPage(mediaIds)
-        val snapshot = coordinator.markVisible(mediaIds)
-        syncRequestScope(snapshot)
+        val snapshot = AppleMainThreadCost.section("scope_mark") {
+            visibleResolutionLeases.mark(mediaIds)
+            coordinator.markCurrentPage(mediaIds)
+            coordinator.markVisible(mediaIds)
+        }
+        scheduleVisibleScopeSync(snapshot)
         return snapshot
+    }
+
+    /**
+     * 列表一帧内会逐行绑定、逐行标记可见；每行都把请求范围整体展开并重排待发请求。
+     * 优先级判断直接读协调器，已即时生效；目录请求范围只用于重排待发请求，主线程上合并到
+     * 下一条消息同步一次。其他线程照旧当场同步。
+     */
+    private fun scheduleVisibleScopeSync(snapshot: AppleMetadataSurfaceCoordinator.SurfaceSnapshot) {
+        if (Looper.myLooper() !== Looper.getMainLooper()) {
+            syncRequestScope(snapshot)
+            return
+        }
+        if (visibleScopeSyncScheduled) return
+        visibleScopeSyncScheduled = true
+        runtime.mainHandler.post {
+            visibleScopeSyncScheduled = false
+            AppleMainThreadCost.section("scope_sync") { syncRequestScope() }
+        }
     }
 
     fun setPlaybackMediaId(
@@ -171,6 +199,18 @@ internal class AppleMetadataSurfaceRuntime(
         snapshot: AppleMetadataSurfaceCoordinator.SurfaceSnapshot = coordinator.snapshot(),
     ) {
         val resolver = host.catalogResolver() ?: return
+        // 展开请求范围要把每个可见 ID 的关联艺人逐个并入；行绑定时反复标记已可见的 ID，
+        // 范围与关联艺人都没变时结果必然相同，直接跳过。
+        val artistRevision = host.associatedArtistIdsRevision()
+        if (artistRevision != null) {
+            synchronized(syncLock) {
+                if (
+                    lastSyncedSignature != null &&
+                    snapshot.scopeRevision == lastSyncedScopeRevision &&
+                    artistRevision == lastSyncedArtistRevision
+                ) return
+            }
+        }
         val visible = expandScopeIds(snapshot.visibleMediaIds)
         val activePage = expandScopeIds(snapshot.activePageMediaIds) - visible
         val signature = MetadataSurfaceSignature(
@@ -179,6 +219,8 @@ internal class AppleMetadataSurfaceRuntime(
             activePageMediaIds = activePage,
         )
         val revision = synchronized(syncLock) {
+            lastSyncedScopeRevision = snapshot.scopeRevision
+            lastSyncedArtistRevision = artistRevision
             if (signature == lastSyncedSignature) return
             lastSyncedSignature = signature
             dispatchRevision.incrementAndGet()
@@ -212,6 +254,9 @@ internal class DefaultAppleMetadataSurfaceHost(
 
     override fun associatedArtistIds(mediaId: String): Collection<String> =
         overrideStore.associatedArtistIds(mediaId).orEmpty()
+
+    override fun associatedArtistIdsRevision(): Long =
+        overrideStore.associatedArtistIdsRevision()
 
     override fun hasVisibleExactConsumer(mediaId: String): Boolean =
         hasVisibleExactConsumerFn(mediaId)

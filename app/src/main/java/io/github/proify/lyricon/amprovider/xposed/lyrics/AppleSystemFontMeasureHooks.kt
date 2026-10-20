@@ -140,6 +140,7 @@ internal fun AppleSystemFontHooks.hookAppleLyricsWordFontMeasurement(
                 hookRegistrar.installScopedHook(
                     executable = method,
                     enter = enter@{ chain ->
+                        if (isAppleLyricsWordMeasurementDormant()) return@enter false
                         val measurementText = nativeRawWordVectorText(
                             chain.args.firstOrNull()
                         )?.takeIf(
@@ -369,6 +370,21 @@ internal fun AppleSystemFontHooks.hookAppleLyricsGradientDiagnostics(
     }
 }
 
+/**
+ * 两项字体设置都关闭、从未生成替换字体、也没有被跟踪的 TextView 时，模板 View 同步必然全部
+ * 命中 [AppleSystemFontHooks.skipDormantAppleSystemFontView]；逐字渲染无需再逐字读取原生文本。
+ */
+private fun AppleSystemFontHooks.isAppleLyricsWordMeasurementDormant(): Boolean {
+    if (isFollowSystemFontEnabled() || isFollowSystemFontWeightEnabled()) return false
+    if (synchronized(appleSystemFontOriginalTypefacesByReplacement) {
+            appleSystemFontOriginalTypefacesByReplacement.isNotEmpty()
+        }
+    ) {
+        return false
+    }
+    return synchronized(appleSystemFontTrackedTextViews) { appleSystemFontTrackedTextViews.isEmpty() }
+}
+
 internal fun AppleSystemFontHooks.applyAppleLyricsTemplateFontsForMeasurement(
     adapter: Any?,
     sampleText: String,
@@ -427,11 +443,33 @@ internal fun AppleSystemFontHooks.resolveAppleLyricsTemplateFieldPaths(
         .toList()
 }
 
+/**
+ * 两项字体设置都关闭时，只有本模块生成的替换字体需要还原；画笔与各 span 都不是替换字体时
+ * 排版输入必然不变，跳过复制 [TextPaint] 与重建文本。
+ */
+private fun AppleSystemFontHooks.isAppleSystemFontLayoutDormant(
+    text: CharSequence,
+    paint: TextPaint,
+): Boolean {
+    if (isFollowSystemFontEnabled() || isFollowSystemFontWeightEnabled()) return false
+    val replacements = appleSystemFontOriginalTypefacesByReplacement
+    if (replacements.isEmpty()) return true
+    paint.typeface?.let { typeface ->
+        if (synchronized(replacements) { replacements.containsKey(typeface) }) return false
+    }
+    if (text !is Spanned) return true
+    return text.getSpans(0, text.length, MetricAffectingSpan::class.java).none { span ->
+        val typeface = metricSpanTypeface(span) ?: return@none false
+        synchronized(replacements) { replacements.containsKey(typeface) }
+    }
+}
+
 internal fun AppleSystemFontHooks.rewriteAppleSystemFontLayoutInput(
     text: CharSequence,
     paint: TextPaint,
 ): AppleSystemFontLayoutInput? {
     if (!AppleSystemFontWeightPolicy.shouldReplaceTextContent(text)) return null
+    if (isAppleSystemFontLayoutDormant(text, paint)) return null
 
     val rewrittenPaint = TextPaint(paint)
     var paintChanged = false

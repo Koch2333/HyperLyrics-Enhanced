@@ -241,4 +241,16 @@ class AppleDataBindingMetadataHooksTest {
             ),
         )
     }
+
+    @Test
+    fun `already rendered requires title and non-blank subtitle on screen`() {
+        val rendered = listOf("D.D. (Original)", "Abel Tesfaye")
+        assertTrue(dataBindingAlreadyRendered("D.D. (Original)", "Abel Tesfaye", rendered))
+        assertTrue(dataBindingAlreadyRendered(" D.D. (Original) ", null, rendered))
+        assertTrue(dataBindingAlreadyRendered("D.D. (Original)", "", rendered))
+        assertFalse(dataBindingAlreadyRendered("D.D. (Original)", "The Weeknd", rendered))
+        assertFalse(dataBindingAlreadyRendered("Six Feet Under", "Abel Tesfaye", rendered))
+        assertFalse(dataBindingAlreadyRendered(null, "Abel Tesfaye", rendered))
+        assertFalse(dataBindingAlreadyRendered("D.D. (Original)", "Abel Tesfaye", emptyList()))
+    }
 }

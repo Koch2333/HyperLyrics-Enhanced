@@ -9,7 +9,6 @@ package io.github.proify.lyricon.amprovider.xposed
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import androidx.recyclerview.widget.RecyclerView
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalStack
 import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
@@ -69,7 +68,7 @@ internal interface AppleCollectionSurfaceHost {
 
     fun sharedAssociatedArtistId(mediaId: String): String?
 
-    fun onMetadataPageAttached(owner: Any, recycler: RecyclerView)
+    fun onMetadataPageAttached(owner: Any, recycler: View)
 
     fun onMetadataPageDetached(owner: Any)
 
@@ -525,7 +524,8 @@ internal class AppleCollectionSurfaceHooks(
             runtime.hookRegistrar.installHook(attachedMethod, after = { chain, _ ->
                 val owner = chain.thisObject ?: return@installHook
                 if (pageControllerClasses.none { it.isInstance(owner) }) return@installHook
-                val recycler = chain.args.firstOrNull() as? RecyclerView ?: return@installHook
+                // 宿主的 RecyclerView 与模块自带的不是同一个类，只能按框架 View 判断。
+                val recycler = chain.args.firstOrNull() as? View ?: return@installHook
                 host.onMetadataPageAttached(owner, recycler)
             })
         }
@@ -575,7 +575,11 @@ internal class AppleCollectionSurfaceHooks(
         playlistRowTarget: AppleMusicHookTarget,
         mediaEntityTarget: AppleMusicHookTarget,
     ) {
-        val root = dataBindingHooks.itemViewFromHolder(finalHolder) ?: return
+        val root = dataBindingHooks.itemViewFromHolder(finalHolder)
+        if (root == null) {
+            if (BuildConfig.DEBUG) logPlaylistRowRootMissing(mediaId, finalHolder)
+            return
+        }
         val attributes = host.mediaApiEntityAttributes(entity)
         val modelTitle = reflectiveStringField(
             model,
@@ -628,6 +632,31 @@ internal class AppleCollectionSurfaceHooks(
             )
         }
     }
+
+    /** 诊断：歌单行直接刷新从未生效（221023 无 `playlist_row_direct_bound`），记录 holder 的 View 字段。 */
+    private fun logPlaylistRowRootMissing(mediaId: String, finalHolder: Any?) {
+        if (!playlistRowRootMissingLogged.add(finalHolder?.javaClass?.name ?: "null")) return
+        val viewFields = finalHolder?.let { holder ->
+            AppleReflection.hierarchyFields(holder.javaClass)
+                .filter { View::class.java.isAssignableFrom(it.type) }
+                .joinToString(",") { field ->
+                    val value = runCatching {
+                        field.isAccessible = true
+                        field.get(holder)
+                    }.getOrNull()
+                    "${field.declaringClass.name}.${field.name}:${field.type.name}=${value != null}"
+                }
+        }
+        ProviderLogger.diagnostic(
+            "[PlaylistRowDiag] root_missing: contentId=$mediaId, " +
+                "holder=${finalHolder?.javaClass?.name}, " +
+                "superclasses=${finalHolder?.javaClass?.let { c -> generateSequence(c.superclass) { it.superclass }.joinToString(">") { it.name } }}, " +
+                "viewFields=[${viewFields.orEmpty()}]"
+        )
+    }
+
+    private val playlistRowRootMissingLogged =
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     private fun applyAliasToPlaylistRow(
         mediaId: String,
@@ -852,8 +881,8 @@ internal class AppleCollectionSurfaceHooks(
 }
 
 internal fun collectionPageRowEntity(model: Any, mediaEntityClass: Class<*>): Any? =
-    generateSequence(model.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
+    AppleReflection.hierarchyFields(model.javaClass)
+        .asSequence()
         .firstOrNull { field -> mediaEntityClass.isAssignableFrom(field.type) }
         ?.let { field ->
             runCatching {
@@ -907,7 +936,7 @@ internal class DefaultAppleCollectionSurfaceHost(
     ) -> Unit,
     private val dataBindingAliasValuesFn: (String, Alias, Any?) -> DataBindingAliasValues,
     private val sharedAssociatedArtistIdFn: (String) -> String?,
-    private val onMetadataPageAttachedFn: (Any, RecyclerView) -> Unit,
+    private val onMetadataPageAttachedFn: (Any, View) -> Unit,
     private val onMetadataPageDetachedFn: (Any) -> Unit,
     private val handleArtistFinalBindingFn: (Any, Any?, Int?) -> Unit,
     private val logMetadataIdentityFn: (String, String) -> Unit,
@@ -976,7 +1005,7 @@ internal class DefaultAppleCollectionSurfaceHost(
     override fun sharedAssociatedArtistId(mediaId: String): String? =
         sharedAssociatedArtistIdFn(mediaId)
 
-    override fun onMetadataPageAttached(owner: Any, recycler: RecyclerView) {
+    override fun onMetadataPageAttached(owner: Any, recycler: View) {
         onMetadataPageAttachedFn(owner, recycler)
     }
 

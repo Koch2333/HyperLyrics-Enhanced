@@ -36,6 +36,7 @@ internal class AppleLibrarySurfaceHooks(
     private val entityEnrichedIds = WeakIdentityMap<Any, String>()
     private val mediaApiAttributeBindings =
         WeakIdentityMap<Any, InAppMediaApiAttributeBinding>()
+    private val mediaApiAttributeProcessedClasses = ConcurrentHashMap.newKeySet<Class<*>>()
     private val mediaApiAttributeHookedMethods =
         ConcurrentHashMap.newKeySet<java.lang.reflect.Executable>()
     private val mediaApiSongIds =
@@ -397,10 +398,13 @@ internal class AppleLibrarySurfaceHooks(
         kind: InAppLibraryEntityKind,
     ) {
         mediaApiAttributeBindings[attributes] = InAppMediaApiAttributeBinding(mediaId, kind)
+        // getter Hook 按具体类安装；每个实体都重新查一遍方法没有意义。
+        val attributesClass = attributes.javaClass
+        if (attributesClass in mediaApiAttributeProcessedClasses) return
         AppleMediaApiTextAttribute.entries.forEach { attribute ->
             val getter = catalogMember(attribute.getterRuntimeMember)
             val method = runCatching {
-                AppleReflection.findMethod(attributes.javaClass, getter, parameterCount = 0)
+                AppleReflection.findMethod(attributesClass, getter, parameterCount = 0)
             }.getOrNull() ?: return@forEach
             if (
                 method.returnType != String::class.java ||
@@ -421,6 +425,7 @@ internal class AppleLibrarySurfaceHooks(
                     "class=${method.declaringClass.name}, method=$getter"
             )
         }
+        mediaApiAttributeProcessedClasses.add(attributesClass)
     }
 
     private fun mediaApiAttributeOverride(

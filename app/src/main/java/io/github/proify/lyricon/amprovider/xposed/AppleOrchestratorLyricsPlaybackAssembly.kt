@@ -143,11 +143,11 @@ internal class AppleOrchestratorLyricsPlaybackAssembly(
         PreferencesMonitor.listener = object : PreferencesMonitor.Listener {
             override fun onTranslationSelectedChanged(selected: Boolean) {
                 playbackHooks.setDisplayTranslation(selected)
-                lyricsHooks.refreshAppleLyricsSupplementPresentation()
+                lyricsHooks.refreshAppleLyricsSupplementPresentation(syncDisplayFlags = true)
             }
 
             override fun onPronunciationSelectedChanged(selected: Boolean) {
-                lyricsHooks.refreshAppleLyricsSupplementPresentation()
+                lyricsHooks.refreshAppleLyricsSupplementPresentation(syncDisplayFlags = true)
             }
         }
         playbackMetadataCoordinator = ApplePlaybackMetadataCoordinator(

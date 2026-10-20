@@ -121,9 +121,11 @@ internal class AppleListenNowHooks(
             runtime.hookRegistrar.installHook(
                 builderMethod,
                 before = { chain ->
-                    chain.args.getOrNull(3)
-                        ?.takeIf(mediaEntityClass::isInstance)
-                        ?.let(::primeInAppListenNowMetadata)
+                    AppleMainThreadCost.section("listen_now_prime") {
+                        chain.args.getOrNull(3)
+                            ?.takeIf(mediaEntityClass::isInstance)
+                            ?.let(::primeInAppListenNowMetadata)
+                    }
                 },
                 after = { chain, result ->
                     val model = result?.takeIf(modelClass::isInstance) ?: return@installHook
@@ -153,7 +155,7 @@ internal class AppleListenNowHooks(
                                 nowMs = SystemClock.uptimeMillis(),
                             )
                         ) {
-                            host.logMetadataIdentity(
+                            if (BuildConfig.DEBUG) host.logMetadataIdentity(
                                 event = event,
                                 details = "moduleVersion=${BuildConfig.VERSION_CODE}, " +
                                     "liveData=${objectIdentity(liveData)}, " +
@@ -176,11 +178,14 @@ internal class AppleListenNowHooks(
                         }
                         return@installHook
                     }
-                    val cacheProbe = synchronized(inAppListenNowArtworkContinuityCache) {
+                    val cacheProbe = AppleMainThreadCost.section("listen_now_artwork_probe") {
+                        synchronized(inAppListenNowArtworkContinuityCache) {
                         InAppListenNowArtworkCacheProbe(
                             exact = inAppListenNowArtworkContinuityCache[key],
                             cacheSize = inAppListenNowArtworkContinuityCache.size,
-                            sameBaseArtworkHashes = inAppListenNowArtworkContinuityCache.keys
+                            // 同基础封面哈希只用于 debug 日志；release 不扫描整个缓存。
+                            sameBaseArtworkHashes = if (!BuildConfig.DEBUG) emptyList() else
+                                inAppListenNowArtworkContinuityCache.keys
                                 .asSequence()
                                 .filter { candidate ->
                                     candidate.id == key.id &&
@@ -191,6 +196,7 @@ internal class AppleListenNowHooks(
                                 .distinct()
                                 .toList(),
                         )
+                        }
                     }
                     if (BuildConfig.DEBUG) {
                         host.logMetadataIdentity(
@@ -285,10 +291,31 @@ internal class AppleListenNowHooks(
      * Listen Now 的原 builder 会把 MediaEntity 当前文本复制到 Epoxy model。
      * 因此必须在原方法运行前登记类型并消费已预热缓存，且不改动封面 LiveData。
      */
+    /**
+     * 已就绪的首页卡片实体：上次预处理时既不缺本地化结果、也不需要再查原名缓存。首页每次重建
+     * 都会对全部卡片（221039 约 190 张，一次冷启动重建 4–5 次）重新执行预处理，每张约 2 ms；
+     * 同一实体对象、同一 ID、生效别名与“恢复原名”开关都未变时，重做不会产生新的结果。
+     */
+    private class PrimedListenNowEntity(
+        val mediaId: String,
+        val alias: Alias?,
+        val restoreOriginal: Boolean,
+    )
+
+    private val primedListenNowEntities = WeakIdentityMap<Any, PrimedListenNowEntity>()
+
+    private fun isListenNowEntitySettled(entity: Any, resolvedCatalogId: String?): Boolean {
+        val primed = primedListenNowEntities[entity] ?: return false
+        return (resolvedCatalogId == null || resolvedCatalogId.trim() == primed.mediaId) &&
+            primed.restoreOriginal == host.isRestoreOriginalMetadataEnabled() &&
+            primed.alias == host.effectiveAlias(primed.mediaId)
+    }
+
     private fun primeInAppListenNowMetadata(
         entity: Any,
         resolvedCatalogId: String? = null,
     ) {
+        if (isListenNowEntitySettled(entity, resolvedCatalogId)) return
         val kind = inAppLibraryEntityKindForProfileClasses(
             entity = entity,
             resolvedClasses = libraryEntityRuntimeClasses,
@@ -349,6 +376,15 @@ internal class AppleListenNowHooks(
             host.applyAliasToLibraryEntity(entity, kind, it)
         } == true
         val cacheMiss = host.shouldRequestOverride(mediaId)
+        if (cacheMiss || originalCacheProbeDue && originalCacheHit == null) {
+            primedListenNowEntities.remove(entity)
+        } else {
+            primedListenNowEntities[entity] = PrimedListenNowEntity(
+                mediaId = mediaId,
+                alias = host.effectiveAlias(mediaId),
+                restoreOriginal = host.isRestoreOriginalMetadataEnabled(),
+            )
+        }
         if (cacheMiss) {
             // 主页先覆盖设定地区，原地区结果随后按优先级补回，避免空缓存阻塞首屏。
             host.markMetadataVisible(listOf(mediaId))

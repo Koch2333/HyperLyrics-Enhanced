@@ -348,8 +348,8 @@ internal fun AppleOnlineSourceMenuHooks.resolveFragment(clickListener: Any): Any
     val fragmentClassName = sourceMenuTarget.runtimeMemberName(
         AppleMusicRuntimeMember.LYRICS_SOURCE_MENU_FRAGMENT_CLASS
     )
-    return generateSequence(clickListener.javaClass) { it.superclass }
-        .flatMap { clazz -> clazz.declaredFields.asSequence() }
+    return AppleReflection.hierarchyFields(clickListener.javaClass)
+        .asSequence()
         .filter { field -> field.type.name == fragmentClassName }
         .firstNotNullOfOrNull { field ->
             runCatching {
@@ -360,8 +360,8 @@ internal fun AppleOnlineSourceMenuHooks.resolveFragment(clickListener: Any): Any
 }
 
 internal fun AppleOnlineSourceMenuHooks.resolvePopup(fragment: Any): PopupWindow? =
-    generateSequence(fragment.javaClass) { it.superclass }
-        .flatMap { clazz -> clazz.declaredFields.asSequence() }
+    AppleReflection.hierarchyFields(fragment.javaClass)
+        .asSequence()
         .filter { field -> PopupWindow::class.java.isAssignableFrom(field.type) }
         .firstNotNullOfOrNull { field ->
             runCatching {
@@ -477,8 +477,8 @@ internal fun AppleOnlineSourceMenuHooks.debugSourceMenuFields(instance: Any?): S
     val fragmentClassName = sourceMenuTarget.runtimeMemberName(
         AppleMusicRuntimeMember.LYRICS_SOURCE_MENU_FRAGMENT_CLASS
     )
-    return generateSequence(instance.javaClass) { it.superclass }
-        .flatMap { clazz -> clazz.declaredFields.asSequence() }
+    return AppleReflection.hierarchyFields(instance.javaClass)
+        .asSequence()
         .filter { field ->
             field.type.name == fragmentClassName ||
                 PopupWindow::class.java.isAssignableFrom(field.type)

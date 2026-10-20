@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.amprovider.xposed.internal
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,5 +45,24 @@ class WeakIdentityMapTest {
 
         map.clear()
         assertNull(map[second])
+    }
+
+    @Test
+    fun `overwrite putIfAbsent and keys keep identity semantics`() {
+        val map = WeakIdentityMap<Any, String>()
+        val first: Any = String(charArrayOf('k'))
+        val second: Any = String(charArrayOf('k'))
+
+        assertTrue(map.putIfAbsent(first, "first"))
+        assertFalse(map.putIfAbsent(first, "ignored"))
+        assertTrue(map.putIfAbsent(second, "second"))
+        map[first] = "updated"
+
+        assertEquals("updated", map[first])
+        assertEquals("second", map[second])
+        assertEquals(2, map.keys().size)
+        assertTrue(map.keys()[0] === first)
+        assertTrue(map.keys()[1] === second)
+        assertNull(map[Any()])
     }
 }
