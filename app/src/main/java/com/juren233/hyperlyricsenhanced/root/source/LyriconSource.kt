@@ -229,7 +229,14 @@ class LyriconSource : LyricSource {
         directBridge?.start()
         diagnostic("stage=direct_bridge_started")
         if (centralSubscriptionEnabled) {
-            initializeSubscriber(application)
+            try {
+                initializeSubscriber(application)
+            } catch (failure: Throwable) {
+                diagnostic(
+                    "stage=subscriber_initialize_failed, error=${failure.javaClass.name}:${failure.message}",
+                )
+                throw failure
+            }
         } else {
             diagnostic("stage=subscriber_skipped, reason=apple_direct_only")
         }

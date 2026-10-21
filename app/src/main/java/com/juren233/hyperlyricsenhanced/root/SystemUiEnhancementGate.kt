@@ -1,6 +1,7 @@
 package com.juren233.hyperlyricsenhanced.root
 
 import com.juren233.hyperlyricsenhanced.common.RootConstants
+import com.juren233.hyperlyricsenhanced.root.utils.LyricRuntimeDiagnostics
 
 internal object SystemUiEnhancementGate {
     fun isEnabled(): Boolean {
@@ -16,7 +17,10 @@ internal object SystemUiEnhancementGate {
     fun isLyricRuntimeEnabled(): Boolean = lyricRuntimeMode() != SystemUiLyricRuntimeMode.DISABLED
 
     fun lyricRuntimeMode(): SystemUiLyricRuntimeMode {
-        val entry = HookEntry.instance ?: return SystemUiLyricRuntimeMode.DISABLED
+        val entry = HookEntry.instance ?: run {
+            LyricRuntimeDiagnostics.record("runtime_mode_resolved") { "mode=DISABLED reason=no_hook_entry_instance" }
+            return SystemUiLyricRuntimeMode.DISABLED
+        }
         return runCatching {
             SystemUiLyricRuntimeMode.resolve(
                 hyperIsland = isEnabled(),
@@ -41,6 +45,16 @@ internal object SystemUiEnhancementGate {
                     RootConstants.DEFAULT_HOOK_APPLE_MUSIC_LUNABEAT_WORD_LYRICS,
                 ),
             )
+        }.onSuccess { mode ->
+            LyricRuntimeDiagnostics.record("runtime_mode_resolved") {
+                "mode=$mode hyperIsland=${isEnabled()} " +
+                    "aod=${entry.prefs.getBoolean(RootConstants.KEY_HOOK_ENABLE_AOD_LYRICS, RootConstants.DEFAULT_HOOK_ENABLE_AOD_LYRICS)} " +
+                    "dynamicIsland=${entry.prefs.getBoolean(RootConstants.KEY_HOOK_ENABLE_DYNAMIC_ISLAND, RootConstants.DEFAULT_HOOK_ENABLE_DYNAMIC_ISLAND)}"
+            }
+        }.onFailure { error ->
+            LyricRuntimeDiagnostics.record("runtime_mode_resolved") {
+                "mode=DISABLED reason=resolve_failed error=${error.javaClass.name}:${error.message}"
+            }
         }.getOrDefault(SystemUiLyricRuntimeMode.DISABLED)
     }
 }

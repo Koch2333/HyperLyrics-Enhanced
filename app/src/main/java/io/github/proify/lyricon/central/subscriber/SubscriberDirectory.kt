@@ -6,6 +6,7 @@
 
 package io.github.proify.lyricon.central.subscriber
 
+import com.juren233.hyperlyricsenhanced.root.utils.LyricRuntimeDiagnostics
 import io.github.proify.lyricon.central.connection.ConnectionRegistry
 import io.github.proify.lyricon.subscriber.ISubscriberBinder
 import io.github.proify.lyricon.subscriber.SubscriberInfo
@@ -15,6 +16,9 @@ internal class SubscriberDirectory {
 
     fun getOrCreate(binder: ISubscriberBinder, info: SubscriberInfo): SubscriberConnection {
         val existing = registry.get(info)
+        LyricRuntimeDiagnostics.record("central_subscriber_directory") {
+            "reuseExisting=${existing != null} subscriber=$info"
+        }
         if (existing != null) return existing
         return registry.register(SubscriberConnection(binder, info))
     }

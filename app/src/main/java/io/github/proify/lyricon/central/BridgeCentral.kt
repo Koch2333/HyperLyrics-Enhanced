@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
+import com.juren233.hyperlyricsenhanced.root.utils.LyricRuntimeDiagnostics
 import com.juren233.hyperlyricsenhanced.root.utils.RuntimeResourceCleanup
 import com.juren233.hyperlyricsenhanced.root.utils.RuntimeResourceCleanupException
 import io.github.proify.lyricon.central.provider.player.SystemActiveAudioPlaybackMonitor
@@ -116,6 +117,10 @@ object BridgeCentral {
                 )
             }
         }
+        LyricRuntimeDiagnostics.record("central_bridge_initialized") {
+            "startActive=$startActive receiverRegistered=$receiverRegistered active=${active.get()} " +
+                "retired=$retired pending=${pendingRegistrations.size}"
+        }
         if (startActive) activate()
     }
 
@@ -126,12 +131,19 @@ object BridgeCentral {
             if (!active.compareAndSet(false, true)) return
             pendingRegistrations.values.toList().also { pendingRegistrations.clear() }
         }
+        LyricRuntimeDiagnostics.record("central_bridge_activated") {
+            "replayPending=${pending.size} actions=${pending.map { it.action?.substringAfterLast('.') }}"
+        }
         pending.forEach(CentralRuntime.registration::handle)
     }
 
     internal fun handleRegistration(intent: Intent) {
         var dispatchImmediately = false
         synchronized(this) {
+            LyricRuntimeDiagnostics.record("central_bridge_handle_registration") {
+                "action=${intent.action?.substringAfterLast('.')} active=${active.get()} " +
+                    "retired=$retired receiverRegistered=$receiverRegistered pending=${pendingRegistrations.size}"
+            }
             if (retired || !receiverRegistered) return
             if (active.get()) {
                 dispatchImmediately = true
@@ -147,7 +159,12 @@ object BridgeCentral {
     }
 
     internal fun discardPendingRegistrations() {
-        synchronized(this) { pendingRegistrations.clear() }
+        synchronized(this) {
+            LyricRuntimeDiagnostics.record("central_bridge_pending_discarded") {
+                "dropped=${pendingRegistrations.size} actions=${pendingRegistrations.values.map { it.action?.substringAfterLast('.') }}"
+            }
+            pendingRegistrations.clear()
+        }
     }
 
     /**

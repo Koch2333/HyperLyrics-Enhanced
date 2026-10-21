@@ -184,7 +184,13 @@ internal class AppleMusicDirectBridge(
 
     private val requestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!isCurrentConnection() || intent.action != AppleDirectBridgeContract.ACTION_REQUEST) return
+            if (!isCurrentConnection() || intent.action != AppleDirectBridgeContract.ACTION_REQUEST) {
+                bridgeDiagnostic(
+                    "stage=direct_bridge_request_dropped, currentConnection=${isCurrentConnection()}, " +
+                        "action=${intent.action}",
+                )
+                return
+            }
             LyricRuntimeDiagnostics.record("direct_request_received") {
                 val senderUid = if (Build.VERSION.SDK_INT >= 34) sentFromUid else -1
                 "senderUid=$senderUid package=${app.packageName}"

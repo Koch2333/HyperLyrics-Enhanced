@@ -55,12 +55,29 @@ internal class ActivePlayerCoordinator(
     }
 
     fun addListener(listener: ActivePlayerListener) {
-        if (listeners.add(listener)) {
+        val added = listeners.add(listener)
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                "ActivePlayerCoordinator",
+                "[debug] stage=listener_added, added=$added, listeners=${listeners.size}, " +
+                    "hasActiveRecorder=${activeRecorder != null}",
+            )
+        }
+        if (added) {
             syncLatestState(listener)
         }
     }
 
-    fun removeListener(listener: ActivePlayerListener) = listeners.remove(listener)
+    fun removeListener(listener: ActivePlayerListener): Boolean {
+        val removed = listeners.remove(listener)
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                "ActivePlayerCoordinator",
+                "[debug] stage=listener_removed, removed=$removed, listeners=${listeners.size}",
+            )
+        }
+        return removed
+    }
 
     fun syncLatestState(listener: ActivePlayerListener) {
         val snapshot = lock.read {

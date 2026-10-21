@@ -34,7 +34,9 @@ internal object IslandTouchMediaActions {
         if (binding.action == IslandTouchAction.NONE || binding.action == IslandTouchAction.EXPAND_ISLAND ||
             binding.action == IslandTouchAction.OPEN_APP_FREEFORM ||
             binding.action == IslandTouchAction.VOLUME_CONTINUOUS) return false
-        return runCatching {
+        var threw = false
+        if (BuildConfig.DEBUG) logDispatchStart(packageName, controller, binding)
+        val dispatched = runCatching {
             when (binding.action) {
                 IslandTouchAction.NONE, IslandTouchAction.EXPAND_ISLAND, IslandTouchAction.OPEN_APP_FREEFORM,
                 IslandTouchAction.VOLUME_CONTINUOUS -> Unit
@@ -102,8 +104,31 @@ internal object IslandTouchMediaActions {
             true
         }.getOrElse {
             HookLogger.w(TAG, "媒体触控操作失败: ${it.javaClass.simpleName}")
+            threw = true
+            if (BuildConfig.DEBUG) logFailureDiagnostics(packageName, controller, binding, it)
             false
         }
+        if (BuildConfig.DEBUG && !dispatched && !threw) {
+            HookLogger.d(TAG, "动作未派发(无异常): action=${binding.action} controller=${controller != null}")
+        }
+        return dispatched
+    }
+
+    private fun logDispatchStart(packageName: String, controller: MediaController?, binding: IslandTouchBinding) {
+        val state = runCatching { controller?.playbackState }.getOrNull()
+        HookLogger.d(TAG, "派发动作: action=${binding.action} pkg=$packageName controller=${controller != null} " +
+            "state=${state?.state} actions=0x${java.lang.Long.toHexString(state?.actions ?: 0L)}")
+    }
+
+    // Debug-only: the release log keeps just the exception class, which cannot tell actions apart.
+    private fun logFailureDiagnostics(packageName: String, controller: MediaController?,
+        binding: IslandTouchBinding, error: Throwable) {
+        val state = runCatching { controller?.playbackState }.getOrNull()
+        val playbackType = runCatching { controller?.playbackInfo?.playbackType }.getOrNull()
+        HookLogger.w(TAG, "媒体触控失败诊断: action=${binding.action} seconds=${binding.seconds} " +
+            "pkg=$packageName controller=${controller != null} state=${state?.state} " +
+            "actions=0x${java.lang.Long.toHexString(state?.actions ?: 0L)} playbackType=$playbackType " +
+            "message=${error.message}", error)
     }
 
     private fun mediaKey(controller: MediaController, key: Int) {

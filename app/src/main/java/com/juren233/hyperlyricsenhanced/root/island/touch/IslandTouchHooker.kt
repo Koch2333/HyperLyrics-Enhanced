@@ -286,14 +286,31 @@ internal object IslandTouchHooker {
             router.nextDeadline?.let { handler.postAtTime(timer, it) }
         }
 
+        private var lastResolveNote: String? = null
+
+        // Debug-only: record why a press was not claimed, once per distinct reason, so a silent
+        // "touch does nothing" can be told apart from a failed action.
+        private fun resolveNote(note: String) {
+            if (!BuildConfig.DEBUG || note == lastResolveNote) return
+            lastResolveNote = note
+            HookLogger.d(TAG, "触控未接管: $note")
+        }
+
         private fun resolve(host: ViewGroup, event: MotionEvent): Target? {
-            if (!IslandProbeUtils.isHyperIslandEnabled()) return null
-            val config = config()?.takeIf { it.enabled } ?: return null
+            if (!IslandProbeUtils.isHyperIslandEnabled()) { resolveNote("HyperIsland 未启用"); return null }
+            val rawConfig = config()
+            if (rawConfig == null) { resolveNote("偏好不可用"); return null }
+            val config = rawConfig.takeIf { it.enabled }
+            if (config == null) { resolveNote("触控总开关关闭"); return null }
+            var candidates = 0
+            var mediaCandidates = 0
             for (root in IslandViewRegistry.snapshotCandidates().asReversed()) {
+                candidates++
                 if (!click.declaringClass.isInstance(root) || !belongsTo(root, host) ||
                     !root.isShown || root.alpha <= 0f || expanded.invoke(root) != false) continue
                 val data = IslandProbeUtils.getCurrentIslandData(root)
                 val info = IslandProbeUtils.extractMediaIslandInfo(data) ?: continue
+                mediaCandidates++
                 val pill = IslandViewHelper.findViewByName(root, "big_island_view") ?: continue
                 if (!contains(pill, event.rawX, event.rawY)) continue
                 if (config.unifiedSides) {
@@ -313,6 +330,8 @@ internal object IslandTouchHooker {
                     }
                 }
             }
+            resolveNote("无命中目标 candidates=$candidates mediaCandidates=$mediaCandidates " +
+                "unified=${config.unifiedSides}")
             return null
         }
 
@@ -360,8 +379,15 @@ internal object IslandTouchHooker {
             // This also runs from the long-press/single-tap timer, outside the hook's try/catch.
             runCatching {
                 val host = window.get() ?: return
-                if (!valid(host, target)) return
+                if (!valid(host, target)) {
+                    if (BuildConfig.DEBUG) HookLogger.d(TAG, "触控目标已失效: gesture=$gesture side=${target.side}")
+                    return
+                }
                 val binding = target.config.binding(target.side, gesture)
+                if (BuildConfig.DEBUG) {
+                    HookLogger.d(TAG, "触控手势: gesture=$gesture side=${target.side} action=${binding.action} " +
+                        "seconds=${binding.seconds} pkg=${target.packageName} controller=${target.controller != null}")
+                }
                 if (binding.action == IslandTouchAction.NONE) {
                     if (gesture == IslandTouchGesture.TAP) {
                         target.root.get()?.let { click.invoke(it) }
@@ -372,7 +398,13 @@ internal object IslandTouchHooker {
                 val isExpansion = binding.action == IslandTouchAction.EXPAND_ISLAND
                 val current = if (isExpansion) null
                     else IslandTouchMediaActions.controller(host.context, target.packageName)
-                if (!isExpansion && current?.sessionToken != target.controller?.sessionToken) return
+                if (!isExpansion && current?.sessionToken != target.controller?.sessionToken) {
+                    if (BuildConfig.DEBUG) {
+                        HookLogger.d(TAG, "会话已变化，动作未派发: action=${binding.action} " +
+                            "current=${current != null} resolved=${target.controller != null}")
+                    }
+                    return
+                }
                 haptic(host, target, gesture)
                 if (isExpansion) {
                     target.root.get()?.let { expansionApi?.expand(it) }

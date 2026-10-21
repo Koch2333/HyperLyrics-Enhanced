@@ -931,8 +931,25 @@ class HookEntry : XposedModule() {
             RootConstants.KEY_HOOK_LYRIC_SOURCE,
             RootConstants.DEFAULT_HOOK_LYRIC_SOURCE,
         ) ?: RootConstants.DEFAULT_HOOK_LYRIC_SOURCE
+        LyricRuntimeDiagnostics.record("runtime_source_selection") {
+            "mode=$mode selectedPref=$selected resolved=${mode.sourceId(selected)} " +
+                "active=${manager.getActiveSource()?.id} " +
+                "prefsHasSourceKey=${prefs.contains(RootConstants.KEY_HOOK_LYRIC_SOURCE)}"
+        }
         mode.sourceId(selected)?.let { sourceId ->
-            if (manager.getActiveSource()?.id != sourceId) manager.switchSource(sourceId)
+            if (manager.getActiveSource()?.id != sourceId) {
+                try {
+                    manager.switchSource(sourceId)
+                } catch (failure: Throwable) {
+                    LyricRuntimeDiagnostics.record("runtime_source_switch_failed") {
+                        "source=$sourceId error=${failure.javaClass.name}:${failure.message}"
+                    }
+                    throw failure
+                }
+                LyricRuntimeDiagnostics.record("runtime_source_switched") {
+                    "source=$sourceId active=${manager.getActiveSource()?.id}"
+                }
+            }
         }
     }
 
