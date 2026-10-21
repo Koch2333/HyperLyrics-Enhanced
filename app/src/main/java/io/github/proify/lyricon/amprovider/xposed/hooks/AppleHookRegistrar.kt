@@ -12,6 +12,7 @@ import io.github.libxposed.api.XposedInterface.Hooker
 import io.github.libxposed.api.XposedModule
 import io.github.proify.lyricon.amprovider.xposed.ProviderLogger
 import io.github.proify.lyricon.amprovider.xposed.AppleMusicDexKitWatchdog
+import io.github.proify.lyricon.amprovider.xposed.AppleMainThreadCost
 import io.github.proify.lyricon.amprovider.xposed.internal.ArgumentRewriteHook
 import io.github.proify.lyricon.amprovider.xposed.internal.CallbackHook
 import io.github.proify.lyricon.amprovider.xposed.internal.ConditionalSkipHook
@@ -27,6 +28,9 @@ internal class AppleHookRegistrar(
     private val module: XposedModule,
 ) {
     private val activeModuleId = ThreadLocal<String?>()
+
+    /** debug 包专用：按模块累计 `hook()` 本身与安装日志的耗时，用于拆分冷启动开销。 */
+    val installCost = AppleHookInstallCost()
     private val callbackTracer = AppleHookCallbackTracer(
         withModule = { moduleId, block -> withModule(moduleId, block) },
         onFirstCallback = { moduleId, executable ->
@@ -95,7 +99,10 @@ internal class AppleHookRegistrar(
         var retried = false
         while (true) {
             try {
-                runCatching { module.deoptimize(current) }
+                // 不对 Hook 目标本身 deoptimize：LSPlant 会把其备份（原方法体）固定为解释执行，
+                // 却挡不住目标被内联进调用方。内联绕过 Hook 时应像 AppleMediaLaunchHooks 那样
+                // 只对已核实的调用方 deoptimize。
+                val hookStartNs = if (BuildConfig.DEBUG) System.nanoTime() else 0L
                 module.hook(current).intercept(
                     if (BuildConfig.DEBUG) {
                         callbackTracer.wrap(moduleId, current, effectiveHooker)
@@ -105,8 +112,14 @@ internal class AppleHookRegistrar(
                 )
                 AppleMusicDexKitWatchdog.hookInstalled(current)
                 if (BuildConfig.DEBUG) {
+                    val logStartNs = System.nanoTime()
                     ProviderLogger.diagnostic(
                         "Apple Music Hook 已安装: module=$moduleId, target=$current"
+                    )
+                    installCost.record(
+                        moduleId,
+                        hookNs = logStartNs - hookStartNs,
+                        logNs = System.nanoTime() - logStartNs,
                     )
                 }
                 return
@@ -128,6 +141,49 @@ internal class AppleHookRegistrar(
     }
 }
 
+internal class AppleHookInstallCost {
+    class Entry(var hookNs: Long = 0L, var logNs: Long = 0L, var hooks: Int = 0)
+
+    private val entries = LinkedHashMap<String, Entry>()
+
+    @Synchronized
+    fun record(moduleId: String, hookNs: Long, logNs: Long) {
+        val entry = entries.getOrPut(moduleId) { Entry() }
+        entry.hookNs += hookNs
+        entry.logNs += logNs
+        entry.hooks += 1
+    }
+
+    @Synchronized
+    fun snapshot(moduleId: String): Entry =
+        entries[moduleId]?.let { Entry(it.hookNs, it.logNs, it.hooks) } ?: Entry()
+}
+
+/** 记录 `proceed` 执行原方法的耗时，供 [AppleMainThreadCost] 扣除。 */
+private class TimedChain(
+    private val delegate: Chain,
+    private val token: Any,
+) : Chain by delegate {
+    override fun proceed(): Any? = timed { delegate.proceed() }
+
+    override fun proceed(args: Array<out Any?>): Any? = timed { delegate.proceed(args) }
+
+    override fun proceedWith(thisObject: Any): Any? = timed { delegate.proceedWith(thisObject) }
+
+    override fun proceedWith(thisObject: Any, args: Array<out Any?>): Any? =
+        timed { delegate.proceedWith(thisObject, args) }
+
+    private inline fun timed(block: () -> Any?): Any? {
+        AppleMainThreadCost.proceedStarted(token)
+        val startNs = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            AppleMainThreadCost.proceedFinished(token, System.nanoTime() - startNs)
+        }
+    }
+}
+
 internal class AppleHookCallbackTracer(
     private val withModule: (String, () -> Any?) -> Any?,
     private val onFirstCallback: (String, Executable) -> Unit,
@@ -144,7 +200,19 @@ internal class AppleHookCallbackTracer(
             if (firstCallbackTargets.add(moduleId to executable)) {
                 onFirstCallback(moduleId, executable)
             }
-            runCatching { delegate.intercept(chain) }
+            val costToken = AppleMainThreadCost.enterHook()
+            val startNs = if (costToken != null) System.nanoTime() else 0L
+            val timedChain = if (costToken != null) TimedChain(chain, costToken) else chain
+            runCatching { delegate.intercept(timedChain) }
+                .also {
+                    if (costToken != null) {
+                        AppleMainThreadCost.exitHook(
+                            costToken,
+                            "$moduleId#${executable.declaringClass.simpleName}.${executable.name}",
+                            System.nanoTime() - startNs,
+                        )
+                    }
+                }
                 .onSuccess {
                     AppleMusicDexKitWatchdog.validation(
                         executable = executable,

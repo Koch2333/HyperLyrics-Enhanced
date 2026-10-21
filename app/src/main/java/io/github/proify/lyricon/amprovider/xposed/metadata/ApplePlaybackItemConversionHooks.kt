@@ -6,6 +6,8 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
+import com.juren233.hyperlyricsenhanced.BuildConfig
+
 internal interface ApplePlaybackItemConversionHost {
     fun containerKind(containerItem: Any): InAppContainerKind?
 
@@ -84,11 +86,10 @@ internal class ApplePlaybackItemConversionHooks(
                 val kind = host.containerKind(containerItem)
                     ?: return@installResultOverrideHook original
                 val metadataId = host.metadataId(metadata, null)
-                val identity = host.activePlaybackIdentity()
                 val mediaId = metadataId
-                host.logMetadataIdentity(
+                if (BuildConfig.DEBUG) host.logMetadataIdentity(
                     event = "container_conversion",
-                    identity = identity,
+                    identity = host.activePlaybackIdentity(),
                     details = "metadataId=$metadataId, resolvedId=$mediaId, kind=$kind, " +
                         "class=${containerItem.javaClass.name}, ${host.metadataDetails(metadata)}",
                 )

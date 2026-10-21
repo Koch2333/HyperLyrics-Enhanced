@@ -74,49 +74,87 @@ internal class AppleInAppMetadataApplier(
         notifyModelChange: Boolean = true,
     ) {
         var metadataApplied = 0
-        registry.liveMetadataRefs(mediaId).forEach { ref ->
-            ref.metadata.get()?.let { metadata ->
-                applyAliasToMetadata(metadata, alias)
-                metadataApplied += 1
-            }
-        }
         var playbackItemApplied = 0
-        registry.livePlaybackItemRefs(mediaId).forEach { ref ->
-            ref.playbackItem.get()?.let { playbackItem ->
-                applyAliasToPlaybackItem(playbackItem, alias, notifyModelChange)
-                playbackItemApplied += 1
-            }
-        }
         var containerItemApplied = 0
-        registry.liveContainerItemRefs(mediaId).forEach { ref ->
-            ref.containerItem.get()?.let { containerItem ->
-                applyAliasToContainerItem(containerItem, ref.kind, alias, notifyModelChange)
-                containerItemApplied += 1
+        AppleMainThreadCost.section("refs_models") {
+            registry.liveMetadataRefs(mediaId).forEach { ref ->
+                ref.metadata.get()?.let { metadata ->
+                    applyAliasToMetadata(metadata, alias)
+                    metadataApplied += 1
+                }
+            }
+            registry.livePlaybackItemRefs(mediaId).forEach { ref ->
+                ref.playbackItem.get()?.let { playbackItem ->
+                    applyAliasToPlaybackItem(playbackItem, alias, notifyModelChange)
+                    playbackItemApplied += 1
+                }
+            }
+            registry.liveContainerItemRefs(mediaId).forEach { ref ->
+                ref.containerItem.get()?.let { containerItem ->
+                    applyAliasToContainerItem(containerItem, ref.kind, alias, notifyModelChange)
+                    containerItemApplied += 1
+                }
             }
         }
-        val libraryEntitiesApplied = librarySurfaceHooks.applyAliasToEntityRefs(mediaId, alias)
-        val playlistRowsApplied =
-            if (forceRebind) collectionSurfaceHooks.refreshPlaylistRowRefs(mediaId, alias) else 0
-        val libraryControllers = if (forceRebind) {
-            librarySurfaceHooks.refreshControllers(
-                mediaId = mediaId,
-                alias = alias,
-                hasDirectPlaylistRow = playlistRowsApplied > 0,
-            )
+        val libraryEntitiesApplied = AppleMainThreadCost.section("refs_library_entities") {
+            librarySurfaceHooks.applyAliasToEntityRefs(mediaId, alias)
+        }
+        val playlistRowsApplied = if (forceRebind) {
+            AppleMainThreadCost.section("refs_playlist_rows") {
+                collectionSurfaceHooks.refreshPlaylistRowRefs(mediaId, alias)
+            }
         } else {
             0
         }
-        val libraryComposeStates =
-            if (forceRebind) librarySurfaceHooks.refreshComposeStates(mediaId, alias) else 0
-        if (forceRebind) artistSurfaceHooks.refreshComposeMetadata(mediaId, alias)
-        val dataBindingTargets =
-            if (forceRebind) dataBindingHooks.refreshDataBindings(mediaId, alias) else 0
-        val listenNowDataBindingTargets =
-            if (forceRebind) listenNowHooks.refreshDataBindings(mediaId, alias) else 0
-        val queueAdapterTargets =
-            if (forceRebind) queueMetadataHooks.refreshAdapters(mediaId) else 0
-        val genericRecyclerTargets =
-            if (forceRebind) dataBindingHooks.refreshGenericRecyclerItems(mediaId) else 0
+        val libraryControllers = if (forceRebind) {
+            AppleMainThreadCost.section("refs_library_controllers") {
+                librarySurfaceHooks.refreshControllers(
+                    mediaId = mediaId,
+                    alias = alias,
+                    hasDirectPlaylistRow = playlistRowsApplied > 0,
+                )
+            }
+        } else {
+            0
+        }
+        val libraryComposeStates = if (forceRebind) {
+            AppleMainThreadCost.section("refs_library_compose") {
+                librarySurfaceHooks.refreshComposeStates(mediaId, alias)
+            }
+        } else {
+            0
+        }
+        if (forceRebind) {
+            AppleMainThreadCost.section("refs_artist_compose") {
+                artistSurfaceHooks.refreshComposeMetadata(mediaId, alias)
+            }
+        }
+        val dataBindingTargets = if (forceRebind) {
+            AppleMainThreadCost.section("refs_data_bindings") {
+                dataBindingHooks.refreshDataBindings(mediaId, alias)
+            }
+        } else {
+            0
+        }
+        val listenNowDataBindingTargets = if (forceRebind) {
+            AppleMainThreadCost.section("refs_listen_now") {
+                listenNowHooks.refreshDataBindings(mediaId, alias)
+            }
+        } else {
+            0
+        }
+        val queueAdapterTargets = if (forceRebind) {
+            AppleMainThreadCost.section("refs_queue") { queueMetadataHooks.refreshAdapters(mediaId) }
+        } else {
+            0
+        }
+        val genericRecyclerTargets = if (forceRebind) {
+            AppleMainThreadCost.section("refs_generic_recycler") {
+                dataBindingHooks.refreshGenericRecyclerItems(mediaId)
+            }
+        } else {
+            0
+        }
         if (
             metadataApplied + playbackItemApplied + containerItemApplied +
             libraryEntitiesApplied + playlistRowsApplied + libraryControllers +
@@ -385,7 +423,7 @@ internal class AppleInAppMetadataApplier(
                                 listenerHandled = true
                                 callbackTarget = "listener"
                                 appliedAlias?.let { callbackAppliedAliases[listener] = it }
-                                logMetadataIdentity(
+                                if (BuildConfig.DEBUG) logMetadataIdentity(
                                     "in_app_now_playing_refresh",
                                     "refreshId=${refresh.mediaId}",
                                 )
@@ -430,7 +468,7 @@ internal class AppleInAppMetadataApplier(
                             .onSuccess {
                                 callbackTarget = "dispatcher"
                                 appliedAlias?.let { callbackAppliedAliases[dispatcher] = it }
-                                logMetadataIdentity(
+                                if (BuildConfig.DEBUG) logMetadataIdentity(
                                     "in_app_dispatcher_refresh",
                                     "refreshId=${refresh.mediaId}",
                                 )

@@ -175,7 +175,7 @@ private fun AppleInternalCatalogResolver.publishOriginalEntityResult(
             "batch=$batchSize, priority=${request.priority}, hit=${alias != null}, " +
             "value=${alias?.title}/${alias?.artist}/${alias?.album}"
     )
-    request.callbacks.forEach { callback -> callback(alias) }
+    request.callbacks.forEach { callback -> resultDelivery.enqueue { callback(alias) } }
 }
 
 internal fun AppleInternalCatalogResolver.scheduleOriginalEntityBatchIfCapacity() {
@@ -371,7 +371,8 @@ internal fun AppleInternalCatalogResolver.finishLocalizedCacheHit(request: Local
         "Apple 地区元数据持久缓存命中: id=${request.mediaId}, " +
             "entityType=${request.entityType}, selection=${request.selection}"
     )
-    callbacks.forEach { callback -> callback(alias) }
+    // 持久缓存一次读出的整批命中在同一条主线程消息里发布，逐个同步回调单条可达 27 ms（221047）。
+    callbacks.forEach { callback -> resultDelivery.enqueue { callback(alias) } }
 }
 
 internal fun AppleInternalCatalogResolver.enqueueLocalizedRequest(request: LocalizedRequest) {
@@ -383,16 +384,29 @@ internal fun AppleInternalCatalogResolver.enqueueLocalizedRequest(request: Local
     }
 }
 
+/**
+ * 地区批次在拿到全局目录许可时才取：等待串行通道期间陆续绑定的行并入同一批，
+ * 不再提前取好小批次排队（221010 日志中歌手批次平均仅约 2 个 ID）。
+ */
 internal fun AppleInternalCatalogResolver.processLocalizedBatch() {
-    val batch = dispatch.takeLocalizedBatch()
-    if (batch.isEmpty()) return
+    catalogRequestGate.submit { release -> runLocalizedBatch(release) }
+}
 
-    queryByConfiguredRegion(
+private fun AppleInternalCatalogResolver.runLocalizedBatch(release: () -> Unit) {
+    val batch = dispatch.takeLocalizedBatch()
+    if (batch.isEmpty()) {
+        release()
+        return
+    }
+
+    queryByConfiguredRegionResult(
         mediaIds = batch.flatMap(LocalizedRequest::lookupIds).distinct(),
         entityType = batch.first().entityType,
         storefront = batch.first().storefront,
         language = batch.first().language,
-    ) { songs ->
+        release = release,
+    ) { resolved ->
+        val songs = resolved.orEmpty()
         batch.forEach { request ->
             val resolvedEntry = request.lookupIds.firstNotNullOfOrNull { lookupId ->
                 songs[lookupId]?.let { lookupId to it }
@@ -482,7 +496,7 @@ internal fun AppleInternalCatalogResolver.finishLocalizedRequest(
             "language=${request.language}, priority=${request.priority}, " +
             "value=${alias?.title}/${alias?.artist}"
     )
-    callbacks.forEach { callback -> callback(alias) }
+    callbacks.forEach { callback -> resultDelivery.enqueue { callback(alias) } }
 }
 
 internal fun AppleInternalCatalogResolver.finishResolve(
@@ -543,7 +557,7 @@ internal fun AppleInternalCatalogResolver.finishResolve(
         artistIds = artistIds,
         album = resolvedAlbum,
     )
-    callbacks.forEach { callback -> callback(resolution) }
+    callbacks.forEach { callback -> resultDelivery.enqueue { callback(resolution) } }
 }
 
 internal fun AppleInternalCatalogResolver.finishCachedOriginalResolve(mediaId: String, alias: Alias) {
@@ -671,12 +685,15 @@ internal fun isLocalizedArtistAliasCacheKey(key: String): Boolean =
     ":ARTIST_ALIAS:" in key
 
 internal const val LOCALIZED_BATCH_SIZE = 50
-internal const val MAX_LOCALIZED_BATCHES_RUNNING = 4
-internal const val MAX_BACKGROUND_LOCALIZED_BATCHES_RUNNING = 2
+// 模块目录请求经全局单许可门串行发出（见 AppleCatalogRequestGate）：车道名额只决定提前取好、
+// 排队等待的批次数。保留 2 个名额、后台最多 1 个，使后台批次占满时可见请求仍有名额；
+// 其余 ID 留在车道里累积，下一批取得更大。
+internal const val MAX_LOCALIZED_BATCHES_RUNNING = 2
+internal const val MAX_BACKGROUND_LOCALIZED_BATCHES_RUNNING = 1
 internal const val LOCALIZED_BATCH_DELAY_MS = 32L
 internal const val ORIGINAL_ENTITY_BATCH_SIZE = 50
-internal const val MAX_ORIGINAL_ENTITY_BATCHES_RUNNING = 3
-internal const val MAX_BACKGROUND_ORIGINAL_ENTITY_BATCHES_RUNNING = 2
+internal const val MAX_ORIGINAL_ENTITY_BATCHES_RUNNING = 2
+internal const val MAX_BACKGROUND_ORIGINAL_ENTITY_BATCHES_RUNNING = 1
 internal const val ORIGINAL_ENTITY_BATCH_DELAY_MS = 32L
 internal const val ORIGINAL_ENTITY_MISS_TTL_MS = 10 * 60_000L
 internal const val ORIGINAL_ENTITY_MISS_CACHE_SIZE = 1_024

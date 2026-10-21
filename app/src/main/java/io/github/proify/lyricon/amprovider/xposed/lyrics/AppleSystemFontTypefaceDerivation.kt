@@ -184,23 +184,28 @@ internal fun AppleSystemFontHooks.appleSystemFontRequest(typeface: Typeface): Ap
     )
 }
 
+/** span 类 → 其首个 Typeface 字段；[NO_METRIC_SPAN_TYPEFACE_FIELD] 表示该类没有。 */
+private val metricSpanTypefaceFields = java.util.concurrent.ConcurrentHashMap<Class<*>, Any>()
+private val NO_METRIC_SPAN_TYPEFACE_FIELD = Any()
+
 internal fun AppleSystemFontHooks.metricSpanTypeface(span: MetricAffectingSpan): Typeface? {
     if (span is TypefaceSpan) {
         span.typeface?.let { return it }
     }
-    var owner: Class<*>? = span.javaClass
-    while (owner != null && owner != MetricAffectingSpan::class.java) {
-        owner.declaredFields.firstOrNull { field ->
-            Typeface::class.java.isAssignableFrom(field.type)
-        }?.let { field ->
-            return runCatching {
-                field.isAccessible = true
-                field.get(span) as? Typeface
-            }.getOrNull()
+    val field = metricSpanTypefaceFields.computeIfAbsent(span.javaClass) { spanClass ->
+        var owner: Class<*>? = spanClass
+        while (owner != null && owner != MetricAffectingSpan::class.java) {
+            owner.declaredFields.firstOrNull { field ->
+                Typeface::class.java.isAssignableFrom(field.type)
+            }?.let { field ->
+                return@computeIfAbsent runCatching { field.apply { isAccessible = true } }
+                    .getOrDefault(NO_METRIC_SPAN_TYPEFACE_FIELD)
+            }
+            owner = owner.superclass
         }
-        owner = owner.superclass
-    }
-    return null
+        NO_METRIC_SPAN_TYPEFACE_FIELD
+    } as? java.lang.reflect.Field ?: return null
+    return runCatching { field.get(span) as? Typeface }.getOrNull()
 }
 
 internal fun AppleSystemFontHooks.createTypefaceMetricSpan(

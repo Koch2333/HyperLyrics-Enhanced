@@ -60,7 +60,7 @@ internal class AppleAtmosPcmMonitor(
         val available: Int,
         val bytesPerSample: Int,
         val volume: Volume,
-        val sampleAt: (Int) -> Double,
+        val sampleAt: AppleAtmosPcmSampleReader,
     )
 
     private val lock = Any()
@@ -80,7 +80,7 @@ internal class AppleAtmosPcmMonitor(
                         firstHit()
                         writes.enter capture@{
                             val track = chain.thisObject as? AudioTrack ?: return@capture null
-                            capture(track, chain.args.toTypedArray())
+                            capture(track, chain.args)
                         }
                     },
                     after = { _, result ->
@@ -141,7 +141,7 @@ internal class AppleAtmosPcmMonitor(
         }.onFailure { ProviderLogger.error("Apple Music PCM Hook 安装失败: $method", it) }
     }
 
-    private fun capture(track: AudioTrack, args: Array<Any?>): Capture? {
+    private fun capture(track: AudioTrack, args: List<Any?>): Capture? {
         val context = captureContext(track.audioSessionId, System.identityHashCode(track)) ?: return null
         val channels = track.channelCount.takeIf { it in 1..32 } ?: return null
         val rate = track.sampleRate.takeIf { it in 8_000..384_000 } ?: return null
@@ -158,12 +158,14 @@ internal class AppleAtmosPcmMonitor(
         var unitsPerSample = width
         val requested: Int
         val available: Int
-        val sampleAt: (Int) -> Double
+        val sampleAt: AppleAtmosPcmSampleReader
         if (source is ByteBuffer) {
             val buffer = source.duplicate().order(ByteOrder.nativeOrder())
             requested = args.getOrNull(1) as? Int ?: return null
             available = buffer.remaining()
-            sampleAt = { index -> readAppleAtmosPcmSample(buffer, buffer.position() + index * width, encoding) }
+            sampleAt = AppleAtmosPcmSampleReader { index ->
+                readAppleAtmosPcmSample(buffer, buffer.position() + index * width, encoding)
+            }
         } else {
             val offset = args.getOrNull(1) as? Int ?: return null
             requested = args.getOrNull(2) as? Int ?: return null
@@ -172,19 +174,21 @@ internal class AppleAtmosPcmMonitor(
                     if (offset !in 0..source.size) return null
                     available = source.size - offset
                     val buffer = ByteBuffer.wrap(source).order(ByteOrder.nativeOrder())
-                    sampleAt = { index -> readAppleAtmosPcmSample(buffer, offset + index * width, encoding) }
+                    sampleAt = AppleAtmosPcmSampleReader { index ->
+                        readAppleAtmosPcmSample(buffer, offset + index * width, encoding)
+                    }
                 }
                 is ShortArray -> {
                     if (encoding != AudioFormat.ENCODING_PCM_16BIT || offset !in 0..source.size) return null
                     unitsPerSample = 1
                     available = source.size - offset
-                    sampleAt = { index -> source[offset + index] / 32768.0 }
+                    sampleAt = AppleAtmosPcmSampleReader { index -> source[offset + index] / 32768.0 }
                 }
                 is FloatArray -> {
                     if (encoding != AudioFormat.ENCODING_PCM_FLOAT || offset !in 0..source.size) return null
                     unitsPerSample = 1
                     available = source.size - offset
-                    sampleAt = { index -> source[offset + index].toDouble() }
+                    sampleAt = AppleAtmosPcmSampleReader { index -> source[offset + index].toDouble() }
                 }
                 else -> return null
             }

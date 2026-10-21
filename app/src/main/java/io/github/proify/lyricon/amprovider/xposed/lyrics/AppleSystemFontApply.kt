@@ -147,6 +147,7 @@ internal fun AppleSystemFontHooks.applyAppleSystemFontForTextView(
     requestLayout: Boolean = true,
 ) {
     if (appleSystemFontApplyGuard.isActive) return
+    if (skipDormantAppleSystemFontView(view, view.typeface)) return
 
     appleSystemFontApplyGuard.run {
         val state = synchronized(appleSystemFontTrackedTextViews) {

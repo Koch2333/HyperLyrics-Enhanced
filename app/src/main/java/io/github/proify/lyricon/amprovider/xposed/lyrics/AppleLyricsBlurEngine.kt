@@ -253,7 +253,11 @@ internal fun AppleLyricsBlurHooks.applyAppleLyricsHyperOsBlur(view: View, radius
     }
 }
 
-internal fun AppleLyricsBlurHooks.clearAppleLyricsBlur(view: View) {
+/**
+ * [knownBlurred] 用于已从模糊集合取出的视图。HyperOS 自身模糊只由本模块设置，
+ * 从未模糊过的视图跳过 setMiSelfBlur(0) 的反射调用；setRenderEffect(null) 照常执行。
+ */
+internal fun AppleLyricsBlurHooks.clearAppleLyricsBlur(view: View, knownBlurred: Boolean = false) {
     if (BuildConfig.DEBUG) {
         ProviderLogger.debug(
             "[LyricsScrollDiag] clearBlur: " +
@@ -261,6 +265,7 @@ internal fun AppleLyricsBlurHooks.clearAppleLyricsBlur(view: View) {
         )
     }
     val state = blurState.runtimeStateOrNull(view)
+    val hadModuleBlur = knownBlurred || state != null || blurState.isBlurred(view)
     state?.let {
         cancelAppleLyricsBlurAnimator(it)
         it.blurMode = null
@@ -268,7 +273,7 @@ internal fun AppleLyricsBlurHooks.clearAppleLyricsBlur(view: View) {
         it.targetBlurRadius = 0f
     }
     view.setRenderEffect(null)
-    clearAppleLyricsHyperOsBlur(view)
+    if (hadModuleBlur) clearAppleLyricsHyperOsBlur(view)
     blurState.unmarkBlurred(view)
     if (state != null) blurState.removeRuntimeStateIf(view, state)
 }
@@ -280,7 +285,7 @@ internal fun AppleLyricsBlurHooks.clearAppleLyricsBlurForRecycler(recyclerView: 
         }
     }
     val affectedViews = blurState.takeBlurredViews()
-    affectedViews.forEach(::clearAppleLyricsBlur)
+    affectedViews.forEach { clearAppleLyricsBlur(it, knownBlurred = true) }
 }
 
 internal fun AppleLyricsBlurHooks.clearAppleLyricsHyperOsBlur(view: View) {
@@ -362,8 +367,8 @@ internal fun AppleLyricsBlurHooks.resolveAppleLyricsRecyclerView(fragment: Any):
 }
 
 internal fun AppleLyricsBlurHooks.directRecyclerViewField(instance: Any): Any? =
-    generateSequence<Class<*>>(instance.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
+    AppleReflection.hierarchyFields(instance.javaClass)
+        .asSequence()
         .filter { isAppleRecyclerViewClass(it.type) }
         .firstNotNullOfOrNull { field ->
             runCatching {
@@ -377,8 +382,8 @@ internal fun AppleLyricsBlurHooks.isDataBindingInstance(instance: Any): Boolean 
         .any { it.name == "androidx.databinding.ViewDataBinding" }
 
 internal fun AppleLyricsBlurHooks.instanceFieldValues(instance: Any): Sequence<Any> =
-    generateSequence<Class<*>>(instance.javaClass) { it.superclass }
-        .flatMap { it.declaredFields.asSequence() }
+    AppleReflection.hierarchyFields(instance.javaClass)
+        .asSequence()
         .filterNot { Modifier.isStatic(it.modifiers) }
         .mapNotNull { field ->
             runCatching {

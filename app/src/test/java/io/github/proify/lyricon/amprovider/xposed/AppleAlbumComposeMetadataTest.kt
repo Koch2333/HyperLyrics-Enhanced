@@ -125,4 +125,40 @@ class AppleAlbumComposeMetadataTest {
         assertTrue(first.dirty())
         assertFalse(second.dirty())
     }
+
+    /** Stands in for the host's own `kotlin.Pair`, which the module's `is Pair` can never match. */
+    class HostPair(val first: Any, val second: Any?)
+    class Entity
+    object Comparators {
+        @JvmStatic fun hostPairs(a: HostPair, b: HostPair) = true
+        @JvmStatic fun entities(a: Entity, b: Entity) = true
+    }
+
+    @Test fun `1611 comparator root is read from a host Pair loaded outside the module`() {
+        val method = Comparators::class.java.getMethod("hostPairs", HostPair::class.java, HostPair::class.java)
+        val getter = hostPairFirstGetter(method)
+        assertNotNull(getter)
+        val root = Entity()
+        val arg = HostPair(root, arrayOf<Any>())
+        assertFalse((arg as Any) is Pair<*, *>)
+        assertSame(root, albumComparatorRoot(arg, getter))
+    }
+
+    @Test fun `entity comparator keeps the argument itself as root`() {
+        val method = Comparators::class.java.getMethod("entities", Entity::class.java, Entity::class.java)
+        val getter = hostPairFirstGetter(method)
+        assertNull(getter)
+        val entity = Entity()
+        assertSame(entity, albumComparatorRoot(entity, getter))
+        assertNull(albumComparatorRoot(null, getter))
+    }
+
+    @Test fun `1611 comparator profile declares host Pair parameters`() {
+        val comparator = AppleMusicHookProfiles.exactTargets(
+            AppleMusicVersion("7.0.0-beta", 1611L),
+            AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR,
+        ).single()
+        assertEquals(listOf("kotlin.Pair", "kotlin.Pair"), comparator.parameterTypeNames)
+        assertEquals("getFirst", AppleMusicHookProfiles.HOST_PAIR_FIRST_GETTER)
+    }
 }

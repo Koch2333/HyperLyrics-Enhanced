@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.central.subscriber
 
 import android.os.SharedMemory
+import com.juren233.hyperlyricsenhanced.root.utils.LyricRuntimeDiagnostics
 import io.github.proify.lyricon.central.CentralRuntime
 import io.github.proify.lyricon.subscriber.IActivePlayerListener
 import io.github.proify.lyricon.subscriber.IRemoteService
@@ -20,6 +21,10 @@ internal class SubscriberServiceBinder(
     private val subscription = ActivePlayerSubscription(connection!!.subscriberInfo)
 
     override fun setActivePlayerListener(listener: IActivePlayerListener?) {
+        LyricRuntimeDiagnostics.record("central_subscriber_listener_set") {
+            "closed=${closed.get()} listenerPresent=${listener != null} " +
+                "subscriber=${connection?.subscriberInfo}"
+        }
         if (closed.get()) return
 
         subscription.remoteListener = listener

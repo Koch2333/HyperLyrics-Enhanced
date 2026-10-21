@@ -160,6 +160,10 @@ internal class AppleSystemFontHooks(
         )
     internal val appleSystemFontTrackedTextViews =
         Collections.synchronizedMap(WeakHashMap<TextView, AppleSystemFontTextViewState>())
+
+    /** 两项字体设置都关闭时只登记视图，开启时由 [refreshAppleSystemFont] 补做完整应用。 */
+    internal val appleSystemFontDormantTextViews =
+        Collections.synchronizedMap(WeakHashMap<TextView, Boolean>())
     internal val appleSystemFontLyricsRenderHookedMethods =
         ConcurrentHashMap.newKeySet<Executable>()
     internal val appleSystemFontLyricsTemplateFieldPaths =
@@ -275,6 +279,20 @@ internal class AppleSystemFontHooks(
         return originalAppleTypeface(requested) ?: requested
     }
 
+    /**
+     * 两项字体设置都关闭，且视图从未被跟踪、[typeface] 也不是替换字体时，完整应用路径
+     * 只会得到原字体，这里直接登记后跳过，避免每次 setText 都扫描文本与查表。
+     */
+    internal fun skipDormantAppleSystemFontView(view: TextView, typeface: Typeface?): Boolean {
+        if (isFollowSystemFontEnabled() || isFollowSystemFontWeightEnabled()) return false
+        if (appleSystemFontTrackedTextViews[view] != null) return false
+        if (typeface != null && appleSystemFontOriginalTypefacesByReplacement[typeface] != null) {
+            return false
+        }
+        appleSystemFontDormantTextViews[view] = true
+        return true
+    }
+
     internal fun rememberTextViewState(
         view: TextView,
         originalTypeface: Typeface,
@@ -304,9 +322,16 @@ internal class AppleSystemFontHooks(
                 currentMiuiFontWeightScale(forceRefresh = true)
             }
             val trackedViews = synchronized(appleSystemFontTrackedTextViews) {
-                appleSystemFontTrackedTextViews.entries.map { it.key to it.value }
+                appleSystemFontTrackedTextViews.keys.toList()
             }
-            trackedViews.forEach { (view, _) ->
+            val dormantViews = synchronized(appleSystemFontDormantTextViews) {
+                appleSystemFontDormantTextViews.keys.toList().also {
+                    if (systemFontEnabled || systemFontWeightEnabled) {
+                        appleSystemFontDormantTextViews.clear()
+                    }
+                }
+            }
+            (trackedViews + dormantViews).distinct().forEach { view ->
                 applyAppleSystemFontForTextView(view, stage = "settings_refresh")
             }
             if (BuildConfig.DEBUG) {
@@ -467,6 +492,9 @@ internal class AppleSystemFontHooks(
                     ?: return@installArgumentRewriteHook null
                 val requested = chain.args.getOrNull(0) as? Typeface
                     ?: return@installArgumentRewriteHook null
+                if (skipDormantAppleSystemFontView(view, requested)) {
+                    return@installArgumentRewriteHook null
+                }
                 val requestedStyle = (chain.args.getOrNull(1) as? Number)?.toInt()
                     ?: Typeface.NORMAL
                 val previousState = synchronized(appleSystemFontTrackedTextViews) {

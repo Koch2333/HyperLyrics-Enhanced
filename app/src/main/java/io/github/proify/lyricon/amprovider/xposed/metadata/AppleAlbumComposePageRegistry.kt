@@ -85,6 +85,22 @@ internal class AppleAlbumComposePageRegistry {
         page.root === root && page.revision.dirty() && current(page, nativeRootFor(page))
     }
 
+    /** Debug-only: why [invalidates] accepted or rejected this comparator root. */
+    fun describeInvalidation(root: Any, nativeRootFor: (Page) -> Any?): String {
+        val owners = owners(root)
+        val details = owners.joinToString(prefix = "[", postfix = "]") { page ->
+            val nativeRoot = nativeRootFor(page)
+            "page=${page.id}, rootMatch=${page.root === root}, dirty=${page.revision.dirty()}, " +
+                "rows=${page.revision.describe()}, header=${page.headerRevision.describe()}, " +
+                "current=${current(page, nativeRoot)}, registered=${synchronized(this) { pages[page.vm.get() ?: Unit] === page }}, " +
+                "pageRoot=${System.identityHashCode(page.root)}, nativeRoot=${System.identityHashCode(nativeRoot)}"
+        }
+        val known = snapshot().joinToString(prefix = "[", postfix = "]") { page ->
+            "${page.id}:root=${System.identityHashCode(page.root)}:rows=${page.revision.describe()}"
+        }
+        return "owners=${owners.size}, $details, knownPages=$known"
+    }
+
     @Synchronized
     private fun owners(root: Any): List<Page> = roots[root]?.mapNotNull { it.get() }.orEmpty()
 

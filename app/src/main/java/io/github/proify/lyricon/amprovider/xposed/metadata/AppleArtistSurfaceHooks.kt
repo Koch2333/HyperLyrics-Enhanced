@@ -6,7 +6,7 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
-import androidx.recyclerview.widget.RecyclerView
+import android.view.View
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 import java.util.Collections
@@ -62,7 +62,7 @@ internal interface AppleArtistSurfaceHost {
 
     fun knownArtistProfileCredits(artistId: String): Set<String>
 
-    fun onMetadataPageAttached(owner: Any, recycler: RecyclerView)
+    fun onMetadataPageAttached(owner: Any, recycler: View)
 
     fun onMetadataPageDetached(owner: Any)
 
@@ -524,8 +524,8 @@ internal class AppleArtistSurfaceHooks(
     fun isRecyclerAdapter(adapter: Any): Boolean {
         val controllerClass = artistClasses()?.get("artist_controller")?.clazz ?: return false
         if (controllerClass.isInstance(adapter)) return true
-        return generateSequence(adapter.javaClass) { it.superclass }
-            .flatMap { it.declaredFields.asSequence() }
+        return AppleReflection.hierarchyFields(adapter.javaClass)
+            .asSequence()
             .filter { field ->
                 !java.lang.reflect.Modifier.isStatic(field.modifiers) && !field.type.isPrimitive
             }
@@ -559,7 +559,8 @@ internal class AppleArtistSurfaceHooks(
             )
             runtime.hookRegistrar.installHook(attached, after = { chain, _ ->
                 val owner = chain.thisObject ?: return@installHook
-                val recycler = chain.args.firstOrNull() as? RecyclerView ?: return@installHook
+                // 宿主的 RecyclerView 与模块自带的不是同一个类，只能按框架 View 判断。
+                val recycler = chain.args.firstOrNull() as? View ?: return@installHook
                 host.onMetadataPageAttached(owner, recycler)
             })
             runtime.hookRegistrar.installHook(detached, before = { chain ->
@@ -683,11 +684,16 @@ internal class AppleArtistSurfaceHooks(
         }.add(profileArtistId)
     }
 
+    @Volatile
+    private var artistClassesByRole: Pair<List<ResolvedAppleMusicHookClass>, Map<String, ResolvedAppleMusicHookClass>>? = null
+
+    /** 按解析结果实例缓存角色映射；解析器缓存失效后列表实例变化，映射随之重建。 */
     private fun artistClasses(): Map<String, ResolvedAppleMusicHookClass>? = runCatching {
-        runtime.hookResolver.resolveClasses(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES)
-            .associateBy { resolved ->
-                resolved.target.runtimeMemberName(AppleMusicRuntimeMember.ARTIST_RUNTIME_ROLE)
-            }
+        val resolved = runtime.hookResolver.resolveClasses(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES)
+        artistClassesByRole?.takeIf { it.first === resolved }?.second
+            ?: resolved.associateBy { item ->
+                item.target.runtimeMemberName(AppleMusicRuntimeMember.ARTIST_RUNTIME_ROLE)
+            }.also { artistClassesByRole = resolved to it }
     }.onFailure {
         ProviderLogger.error("Apple Music 歌手页运行时类解析失败", it)
     }.getOrNull()
@@ -801,7 +807,7 @@ internal class DefaultAppleArtistSurfaceHost(
     ) -> Unit,
     private val activeMetadataPageOwnerFn: () -> Any?,
     private val knownArtistProfileCreditsFn: (String) -> Set<String>,
-    private val onMetadataPageAttachedFn: (Any, RecyclerView) -> Unit,
+    private val onMetadataPageAttachedFn: (Any, View) -> Unit,
     private val onMetadataPageDetachedFn: (Any) -> Unit,
     private val logMetadataIdentityFn: (String, String) -> Unit,
     private val traceSequence: AtomicLong,
@@ -871,7 +877,7 @@ internal class DefaultAppleArtistSurfaceHost(
     override fun knownArtistProfileCredits(artistId: String): Set<String> =
         knownArtistProfileCreditsFn(artistId)
 
-    override fun onMetadataPageAttached(owner: Any, recycler: RecyclerView) {
+    override fun onMetadataPageAttached(owner: Any, recycler: View) {
         onMetadataPageAttachedFn(owner, recycler)
     }
 

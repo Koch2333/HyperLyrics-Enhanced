@@ -1,5 +1,6 @@
 package com.juren233.hyperlyricsenhanced.root.island
 
+import com.juren233.hyperlyricsenhanced.root.reload.SystemUiHookLifetime
 import android.view.ViewGroup
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.lyric.view.LyricHugMeasureWindow
@@ -27,12 +28,15 @@ internal object IslandWidthHooker {
     var padIslandPathActive: Boolean = false
 
     class CalculateWidthHook : Hooker {
+        private var premeasureReuseLogged = false
+
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             var hookedContentView: ViewGroup? = null
             var previousIslandWidth = -1
             var lyricIslandCalculation = false
             runCatching {
-                if (!IslandProbeUtils.isSuperIslandEnabled()) return@runCatching
+                if (!IslandProbeUtils.isHyperIslandEnabled()) return@runCatching
                 val contentView = chain.thisObject as? ViewGroup ?: return@runCatching
                 hookedContentView = contentView
                 // 所有宽度计算路径（含系统自发调用、非歌词态）都必须提供内容视图，
@@ -48,15 +52,27 @@ internal object IslandWidthHooker {
                     return@runCatching
                 }
 
-                if (IslandLyricTextInjector.restoreExistingSlotsLightweight(contentView)) {
-                    IslandLyricTextInjector.refreshCurrentContent(contentView)
-                } else {
+                // restoreExistingSlotsLightweight returns "changed", not "ready". Using
+                // it as a success flag repeated all slot/host work for healthy unchanged
+                // views (35 of 36 measured width calculations). Non-reconfiguring injection
+                // already restores those properties and repairs missing/incompatible views.
+                val slotsChanged = traceIslandPerformance("HLE.width.injectSlots") {
                     IslandLyricTextInjector.injectSlots(contentView, reconfigureExisting = false)
-                    IslandLyricTextInjector.refreshCurrentContent(contentView)
                 }
+                val contentChanged = IslandLyricTextInjector.refreshCurrentContent(contentView)
                 // proceed 内的测量规格与上次相同且子树无 FORCE_LAYOUT 标志时会整体短路，
                 // 动态长度开启时必须先标记区域子树，换行后的新文字宽度才能进入岛宽计算。
-                IslandViewHelper.forceLayoutIslandAreasIfDynamicWidth(contentView)
+                if (IslandViewHelper.reuseNaturalWidthPremeasure(contentView, slotsChanged || contentChanged)) {
+                    traceIslandPerformance("HLE.width.premeasureReused") { }
+                    if (BuildConfig.DEBUG && !premeasureReuseLogged) {
+                        premeasureReuseLogged = true
+                        HookLogger.i(TAG, "动态长度首次复用同次自然宽度预测量: host=${contentView.javaClass.name}")
+                    }
+                } else {
+                    traceIslandPerformance("HLE.width.premeasure") {
+                        IslandViewHelper.forceLayoutIslandAreasIfDynamicWidth(contentView)
+                    }
+                }
                 lyricWidthCalculationActive = true
                 if (BuildConfig.DEBUG) {
                     runCatching { IslandOverlapDiagnostics.beforeWidthCalculation(contentView) }
@@ -73,7 +89,7 @@ internal object IslandWidthHooker {
 
             val result = try {
                 LyricHugMeasureWindow.reportIntrinsicWidth = true
-                chain.proceed()
+                traceIslandPerformance("HLE.width.nativeCalculate") { chain.proceed() }
             } finally {
                 LyricHugMeasureWindow.reportIntrinsicWidth = false
                 lyricWidthCalculationActive = false
@@ -178,6 +194,7 @@ internal object IslandWidthHooker {
      */
     class BigIslandMinWidthHook : Hooker {
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             val result = chain.proceed()
             return runCatching {
                 if (!lyricWidthCalculationActive) return@runCatching result
@@ -236,6 +253,7 @@ internal object IslandWidthHooker {
         }
 
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             val result = chain.proceed()
             val candidate = runCatching {
                 if (!IslandViewHelper.isUnlockIslandLengthEnabled()) {
@@ -317,6 +335,7 @@ internal object IslandWidthHooker {
         }
 
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             val result = chain.proceed()
             val candidate = runCatching {
                 if (!IslandViewHelper.isUnlockIslandLengthEnabled()) {

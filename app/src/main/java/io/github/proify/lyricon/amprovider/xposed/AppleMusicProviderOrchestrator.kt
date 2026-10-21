@@ -93,6 +93,7 @@ internal object AppleMusicProviderOrchestrator {
 
     private fun onAppCreate(app: Application) {
         if (!initialized.compareAndSet(false, true)) return
+        val phases = if (BuildConfig.DEBUG) AppleStartupPhaseTimer() else null
         // debug 包专用：性能/功耗采样（CPU、线程、电池），release 为空操作。
         RuntimePerfDiagnostics.start(app, scope = "applemusic")
         val appleMusicVersion = runCatching {
@@ -110,14 +111,17 @@ internal object AppleMusicProviderOrchestrator {
             nativeLibraryDir = module.getModuleApplicationInfo().nativeLibraryDir,
         )
         runtime.attach(app, hookResolver)
+        phases?.mark("resolver")
         if (BuildConfig.DEBUG) AppleActivityRestartDiagnostics.install(runtime)
         ProviderLogger.info(
             "Apple Music Hook 版本档案已加载: app=${appleMusicVersion.displayName}, " +
                 "profile=${hookResolver.profile?.id ?: "compatibility-fallback"}"
         )
 
+        phases?.mark("debugDiagnostics")
         runCatching {
             DiskSongManager.initialize(application)
+            phases?.mark("diskSongs")
             // 1) 目录/语言：prefs 尚未注入（由 initializeContentUiLanguage 完成），
             //    但对组件只暴露调用期 supplier，不提前快照。
             catalogLanguage = AppleOrchestratorCatalogLanguageAssembly(
@@ -126,6 +130,7 @@ internal object AppleMusicProviderOrchestrator {
                 hookResolver = hookResolver,
                 runtime = runtime,
             ).also { it.assemble() }
+            phases?.mark("catalogLanguage")
             // 2) 歌词/播放：对元数据表面组装群只持有延迟 provider，保持调用期解析。
             lyricsPlayback = AppleOrchestratorLyricsPlaybackAssembly(
                 runtime = runtime,
@@ -134,6 +139,7 @@ internal object AppleMusicProviderOrchestrator {
                 inAppMetadataRegistry = inAppMetadataRegistry,
                 inAppMetadataProvider = { inAppMetadata },
             ).also { it.assemble() }
+            phases?.mark("lyricsPlayback")
             // 3) 元数据表面：构造顺序与迁移前一致（表面 → 解析 → 应用/注册/覆盖 → 配置分发）。
             inAppMetadata = AppleOrchestratorInAppMetadataAssembly(
                 runtime = runtime,
@@ -143,11 +149,22 @@ internal object AppleMusicProviderOrchestrator {
                 inAppMetadataRegistry = inAppMetadataRegistry,
                 metadataTraceSequence = metadataTraceSequence,
             ).also { it.assemble() }
+            phases?.mark("inAppMetadata")
             // 4) 跨领域生命周期收尾：偏好监听、屏幕状态、远程播放器与 Hook 安装顺序。
             initializeContentUiLanguage()
+            phases?.mark("contentUiLanguage")
             lyricsPlayback.playbackHooks.initializeScreenStateMonitor()
+            phases?.mark("screenState")
             lyricsPlayback.initializeProvider()
+            phases?.mark("provider")
             startHooks()
+            hookResolver.releaseStartupCaches()
+            phases?.mark("hooks")
+            AppleMainThreadCost.installLooperObserver()
+            phases?.let {
+                ProviderLogger.info("[StartupCost] stage=app_create, ${it.summary()}")
+                ProviderLogger.info("[StartupCost] stage=resolve, ${AppleStartupResolveCost.summary()}")
+            }
             if (BuildConfig.DEBUG) AppleActivityRestartDiagnostics.stage("module_initialized")
             ProviderLogger.info("Apple Music 内置歌词提供器初始化完成")
         }.onFailure {
@@ -155,4 +172,21 @@ internal object AppleMusicProviderOrchestrator {
             ProviderLogger.error("Apple Music 内置歌词提供器初始化失败", it)
         }
     }
+}
+
+/** debug 包专用：`onAppCreate` 各阶段耗时。 */
+internal class AppleStartupPhaseTimer {
+    private val startNs = System.nanoTime()
+    private var lastNs = startNs
+    private val phases = mutableListOf<Pair<String, Long>>()
+
+    fun mark(name: String) {
+        val now = System.nanoTime()
+        phases += name to (now - lastNs)
+        lastNs = now
+    }
+
+    fun summary(): String =
+        "totalMs=${"%.1f".format((lastNs - startNs) / 1_000_000.0)}, " +
+            phases.joinToString { (name, ns) -> "$name=${"%.1f".format(ns / 1_000_000.0)}" }
 }

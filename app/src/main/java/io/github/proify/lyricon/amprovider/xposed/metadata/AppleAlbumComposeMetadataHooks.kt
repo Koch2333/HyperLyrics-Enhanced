@@ -144,13 +144,27 @@ internal class AppleAlbumComposeMetadataHooks(
                 },
                 exit = { mapping.remove() },
             )
-            runtime.hookRegistrar.installResultOverrideHook(method(AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR)) { chain, original ->
-                val root = chain.args.getOrNull(1)
+            val comparator = method(AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR)
+            val comparatorRootGetter = hostPairFirstGetter(comparator)
+            runtime.hookRegistrar.installResultOverrideHook(comparator) { chain, original ->
+                // 1611 compares the host's Pair(root, trackEntities) instead of the bare root entity.
+                val root = albumComparatorRoot(chain.args.getOrNull(1), comparatorRootGetter)
+                val nativeRootFor: (Page) -> Any? = { page -> page.vm.get()?.let { currentData?.invoke(it) } }
                 // Same-root aliases otherwise disappear at native distinctUntilChanged.
-                if (original == true && root != null && pages.invalidates(root) { page ->
-                        page.vm.get()?.let { currentData?.invoke(it) }
+                val invalidated = original == true && root != null && pages.invalidates(root, nativeRootFor)
+                if (original == true && diagnostics != null) {
+                    val previous = albumComparatorRoot(chain.args.getOrNull(0), comparatorRootGetter)
+                    val state = root?.let { pages.describeInvalidation(it, nativeRootFor) } ?: "root=null"
+                    diagnostics.decision(
+                        "cmp:${System.identityHashCode(root)}:$invalidated:$state",
+                        "album_compose_comparator",
+                    ) {
+                        "invalidated=$invalidated, root=${System.identityHashCode(root)}, " +
+                            "previousRoot=${System.identityHashCode(previous)}, " +
+                            "rootType=${root?.javaClass?.simpleName}, thread=${Thread.currentThread().name}, $state"
                     }
-                ) false else original
+                }
+                if (invalidated) false else original
             }
             runtime.hookRegistrar.installHook(rowTarget.method, before = { chain ->
                 val nativeRow = chain.args.getOrNull(1) ?: return@installHook
@@ -232,12 +246,31 @@ internal class AppleAlbumComposeMetadataHooks(
                 runCatching {
                     refreshRows?.invoke(page.vm.get())
                     if (BuildConfig.DEBUG) host.logMetadataIdentity(
-                        "album_compose_refresh", "albumId=${page.id}, refreshMethod=${refreshRows?.name}"
+                        "album_compose_refresh",
+                        "albumId=${page.id}, refreshMethod=${refreshRows?.name}, " +
+                            "rows=${page.revision.describe()}, current=${current(page)}, " +
+                            "pageRoot=${System.identityHashCode(page.root)}, " +
+                            "nativeRoot=${System.identityHashCode(page.vm.get()?.let { currentData?.invoke(it) })}"
                     )
                 }.onFailure { ProviderLogger.error("Apple Music Compose 专辑行刷新失败", it) }
             }
         }
     }
+}
+
+/**
+ * 比较器参数若是宿主 `kotlin.Pair` 则返回其首元素的 getter。不能用模块侧 `is Pair` 判断：
+ * 宿主与模块各自加载 Kotlin 标准库，类型检查永远不成立。1606/1607 参数是实体本身，返回 null。
+ */
+internal fun hostPairFirstGetter(comparator: Method): Method? =
+    comparator.parameterTypes.getOrNull(1)?.let { type ->
+        runCatching { type.getMethod(AppleMusicHookProfiles.HOST_PAIR_FIRST_GETTER) }.getOrNull()
+    }?.takeIf { it.parameterCount == 0 && it.returnType == Any::class.java }
+
+internal fun albumComparatorRoot(arg: Any?, firstGetter: Method?): Any? {
+    arg ?: return null
+    val getter = firstGetter?.takeIf { it.declaringClass.isInstance(arg) } ?: return arg
+    return runCatching { getter.invoke(arg) }.getOrNull()
 }
 
 /** A completion for older row text must never acknowledge an alias that arrived while mapping. */
@@ -254,4 +287,5 @@ internal class AppleAlbumRowRevision {
     @Synchronized fun invalidateIfKnown() { if (aliases.isNotEmpty()) revision++ }
     @Synchronized fun mapped(value: Long) { rendered = maxOf(rendered, value) }
     @Synchronized fun dirty(): Boolean = rendered < revision
+    @Synchronized fun describe(): String = "$rendered/$revision"
 }

@@ -492,6 +492,7 @@ internal fun AppleLyricsSupplementHooks.refreshAppleLyricsSupplementPresentation
     expectedSongId: String? = null,
     expectedRevision: Long? = null,
     deferWhileSourceMenuShowing: Boolean = true,
+    syncDisplayFlags: Boolean = false,
 ) {
     if (BuildConfig.DEBUG) {
         ProviderLogger.debug(
@@ -512,6 +513,7 @@ internal fun AppleLyricsSupplementHooks.refreshAppleLyricsSupplementPresentation
             deferNativeTranslationPresentationRefresh(
                 expectedSongId = expectedSongId ?: requireNotNull(activeMenuSongId),
                 expectedRevision = expectedRevision,
+                syncDisplayFlags = syncDisplayFlags,
             )
             return@post
         }
@@ -555,6 +557,7 @@ internal fun AppleLyricsSupplementHooks.refreshAppleLyricsSupplementPresentation
                 fragment = fragment,
                 expectedSongId = currentSongId,
                 expectedRevision = expectedRevision,
+                syncDisplayFlags = syncDisplayFlags,
             )
             ProviderLogger.debug(
                 "Apple Music 在线翻译页面已轻量刷新: " +
@@ -600,8 +603,9 @@ internal fun AppleLyricsSupplementHooks.refreshVisibleMissingLyricsTranslation(u
 internal fun AppleLyricsSupplementHooks.deferNativeTranslationPresentationRefresh(
     expectedSongId: String,
     expectedRevision: Long?,
+    syncDisplayFlags: Boolean = false,
 ) {
-    val update = AppleLyricsPresentationUpdate(expectedSongId, expectedRevision)
+    val update = AppleLyricsPresentationUpdate(expectedSongId, expectedRevision, syncDisplayFlags)
     if (!deferredTranslationPresentation.offer(update)) return
     mainHandler.postDelayed(
         {
@@ -613,6 +617,7 @@ internal fun AppleLyricsSupplementHooks.deferNativeTranslationPresentationRefres
                 deferNativeTranslationPresentationRefresh(
                     expectedSongId = deferredSongId,
                     expectedRevision = deferred.revision,
+                    syncDisplayFlags = deferred.syncDisplayFlags,
                 )
                 return@postDelayed
             }
@@ -620,6 +625,7 @@ internal fun AppleLyricsSupplementHooks.deferNativeTranslationPresentationRefres
                 expectedSongId = deferredSongId,
                 expectedRevision = deferred.revision,
                 deferWhileSourceMenuShowing = false,
+                syncDisplayFlags = deferred.syncDisplayFlags,
             )
         },
         100L,
@@ -660,6 +666,8 @@ internal fun AppleLyricsSupplementHooks.shouldHideMandarinPronunciation(
     pronunciationLanguages: Collection<String> = emptyList(),
     lyricObject: Any? = null,
 ): Boolean {
+    // 策略在开关关闭时恒为 false；先判断开关，免去每次读取注音都拼流派与语言列表。
+    if (!isHideMandarinPinyinEnabled()) return false
     val lyricContext = lyricObject?.let(pronunciationState::contextFor)
     val resolvedSongId = songId ?: lyricContext?.songId ?: currentAppleLyricsSongId
     val genre = resolvedSongId?.let { id ->
@@ -685,6 +693,6 @@ internal fun AppleLyricsSupplementHooks.shouldHideMandarinPronunciation(
     return ApplePronunciationVisibilityPolicy.shouldHide(
         genre = genre,
         pronunciationLanguages = resolvedPronunciationLanguages,
-        hideMandarinPinyin = isHideMandarinPinyinEnabled(),
+        hideMandarinPinyin = true,
     )
 }

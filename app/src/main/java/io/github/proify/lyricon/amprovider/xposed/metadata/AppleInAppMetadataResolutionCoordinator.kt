@@ -25,6 +25,16 @@ internal class AppleInAppMetadataResolutionCoordinator(
         linkedMapOf<String, DeferredMetadataResolution>()
     private var deferredMetadataResolutionScheduled = false
 
+    /**
+     * 批量发起名称请求：首次遇到的 ID 每个约 1 ms（缓存命中时当场套用覆盖与传播艺人别名），
+     * 延后解析一批可达 60–94 ms、队列历史记录一次 24 个约 29 ms（221047/221048）。
+     * 按每 [ENSURE_OVERRIDES_CHUNK] 个 ID 一个任务排队，每条主线程消息约 6 ms。
+     */
+    private val overrideRequests = AppleBudgetedResultQueue(
+        post = { runtime.mainHandler.post(it) },
+        failureMessage = "Apple 元数据批量请求失败",
+    )
+
     fun schedule(
         mediaIds: Collection<String>,
         priority: RequestPriority,
@@ -68,17 +78,54 @@ internal class AppleInAppMetadataResolutionCoordinator(
                 .entries
                 .sortedByDescending { it.key.priority.ordinal }
                 .forEach { (resolution, pendingIds) ->
-                    val stillUnresolved = pendingIds.filter(::shouldRequestOverride)
-                    if (stillUnresolved.isNotEmpty()) {
-                        ensureOverrides(
-                            mediaIds = stillUnresolved,
-                            preBind = true,
-                            priority = resolution.priority,
-                            originalResolutionMode = resolution.originalResolutionMode,
-                        )
-                    }
+                    enqueueOverrides(
+                        mediaIds = pendingIds,
+                        preBind = true,
+                        priority = resolution.priority,
+                        originalResolutionMode = resolution.originalResolutionMode,
+                        onlyUnresolved = true,
+                    )
                 }
         }
+    }
+
+    /**
+     * 同 [ensureOverrides]，但分批在后续主线程消息里执行（见 [overrideRequests]）。
+     * [originalResolutionLimit] 按提交顺序在各批之间累计；[onlyUnresolved] 时执行前再筛掉已解析的 ID。
+     */
+    fun enqueueOverrides(
+        mediaIds: Collection<String>,
+        preBind: Boolean = false,
+        originalResolutionLimit: Int = Int.MAX_VALUE,
+        priority: RequestPriority = RequestPriority.BACKGROUND,
+        originalResolutionMode: InAppOriginalResolutionMode =
+            InAppOriginalResolutionMode.AFTER_LOCALIZED,
+        onlyUnresolved: Boolean = false,
+    ) {
+        var remainingOriginal = originalResolutionLimit.coerceAtLeast(0)
+        mediaIds.asSequence()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && it.all(Char::isDigit) }
+            .distinct()
+            .chunked(ENSURE_OVERRIDES_CHUNK)
+            .forEach { chunk ->
+                val chunkOriginalLimit = minOf(remainingOriginal, chunk.size)
+                remainingOriginal -= chunkOriginalLimit
+                overrideRequests.enqueue {
+                    AppleMainThreadCost.section("ensure_overrides_chunk") {
+                        val ids = if (onlyUnresolved) chunk.filter(::shouldRequestOverride) else chunk
+                        if (ids.isNotEmpty()) {
+                            ensureOverrides(
+                                mediaIds = ids,
+                                preBind = preBind,
+                                originalResolutionLimit = chunkOriginalLimit,
+                                priority = priority,
+                                originalResolutionMode = originalResolutionMode,
+                            )
+                        }
+                    }
+                }
+            }
     }
 
     fun mergePlaybackAssociatedArtistIds(
@@ -91,6 +138,12 @@ internal class AppleInAppMetadataResolutionCoordinator(
             .distinct()
             .toList()
         if (normalizedIds.isEmpty()) return
+        AppleQueueOpenCost.time(AppleQueueOpenCost.Kind.MERGE_ARTIST_IDS) {
+            mergeNormalizedAssociatedArtistIds(mediaId, normalizedIds)
+        }
+    }
+
+    private fun mergeNormalizedAssociatedArtistIds(mediaId: String, normalizedIds: List<String>) {
         val previousAlias = effectiveAlias(mediaId)
         trackAssociatedMediaIds(mediaId, normalizedIds)
         val changed = metadataStore.mergeAssociatedArtistIds(mediaId, normalizedIds)
@@ -99,8 +152,10 @@ internal class AppleInAppMetadataResolutionCoordinator(
                 mediaId = mediaId,
                 resetSafeResolution = true,
             )
-            hydrateSharedArtistOverrides(mediaId)
-            host.refreshRequestScope()
+            AppleQueueOpenCost.time(AppleQueueOpenCost.Kind.HYDRATE) {
+                hydrateSharedArtistOverrides(mediaId)
+            }
+            AppleQueueOpenCost.time(AppleQueueOpenCost.Kind.SCOPE) { host.refreshRequestScope() }
             changedAssociatedArtistAlias(
                 previousAlias = previousAlias,
                 updatedAlias = effectiveAlias(mediaId),
@@ -115,12 +170,14 @@ internal class AppleInAppMetadataResolutionCoordinator(
                             updatedAlias.album,
                     )
                 }
-                host.applyAliasToMetadataRefs(
-                    mediaId = mediaId,
-                    alias = updatedAlias,
-                    forceRebind = true,
-                    notifyModelChange = true,
-                )
+                AppleQueueOpenCost.time(AppleQueueOpenCost.Kind.APPLY_REFS) {
+                    host.applyAliasToMetadataRefs(
+                        mediaId = mediaId,
+                        alias = updatedAlias,
+                        forceRebind = true,
+                        notifyModelChange = true,
+                    )
+                }
                 if (shouldPublishAssociatedArtistAliasToCurrentPlayback(
                         mediaId = mediaId,
                         currentPlaybackMediaId = host.currentPlaybackMetadataId(),
@@ -659,7 +716,7 @@ internal class AppleInAppMetadataResolutionCoordinator(
             val lookupIds = request.lookup.lookupIds
             val entityType = request.lookup.entityType
             metadataStore.finishConfiguredRequest(request.requestKey)
-            host.logMetadataIdentity(
+            if (BuildConfig.DEBUG) host.logMetadataIdentity(
                 event = "catalog_resolve_finished",
                 details = "requestedId=$mediaId, lookupIds=$lookupIds, " +
                     "entityType=$entityType, selection=$selection, hit=${alias != null}, " +
@@ -720,4 +777,8 @@ internal class AppleInAppMetadataResolutionCoordinator(
             lastMissUptimeMillis = metadataStore.originalCacheMissUptimeMillis(mediaId),
             nowUptimeMillis = SystemClock.uptimeMillis(),
         )
+
+    private companion object {
+        const val ENSURE_OVERRIDES_CHUNK = 2
+    }
 }

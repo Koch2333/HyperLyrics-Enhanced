@@ -55,12 +55,29 @@ internal class ActivePlayerCoordinator(
     }
 
     fun addListener(listener: ActivePlayerListener) {
-        if (listeners.add(listener)) {
+        val added = listeners.add(listener)
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                "ActivePlayerCoordinator",
+                "[debug] stage=listener_added, added=$added, listeners=${listeners.size}, " +
+                    "hasActiveRecorder=${activeRecorder != null}",
+            )
+        }
+        if (added) {
             syncLatestState(listener)
         }
     }
 
-    fun removeListener(listener: ActivePlayerListener) = listeners.remove(listener)
+    fun removeListener(listener: ActivePlayerListener): Boolean {
+        val removed = listeners.remove(listener)
+        if (BuildConfig.DEBUG) {
+            HookLogger.i(
+                "ActivePlayerCoordinator",
+                "[debug] stage=listener_removed, removed=$removed, listeners=${listeners.size}",
+            )
+        }
+        return removed
+    }
 
     fun syncLatestState(listener: ActivePlayerListener) {
         val snapshot = lock.read {
@@ -393,7 +410,7 @@ internal class ActivePlayerCoordinator(
         // Playback state and position recover through the normal path once the conflict clears,
         // but the cached lyric is only replayed when the next setSong arrives. Re-dispatch the
         // recorded lyric exactly on the suppressed -> unsuppressed transition so the first Song
-        // is not lost forever and AOD/Super Island recover without a track switch.
+        // is not lost forever and AOD/HyperIsland recover without a track switch.
         if (transitionedFromSuppression && !isSwitched && recorderInfo === activeInfo) {
             broadcast {
                 when (recorder.lyricType) {

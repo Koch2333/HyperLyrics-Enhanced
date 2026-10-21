@@ -20,4 +20,16 @@ internal class AppleAlbumComposeDiagnostics(private val host: AppleArtistSurface
         runCatching { host.logMetadataIdentity(event, details()) }
             .onFailure { ProviderLogger.diagnostic("Apple Music 专辑链路诊断失败: event=$event, error=${it.javaClass.simpleName}") }
     }
+
+    private val seenDecisions = LinkedHashSet<String>()
+
+    /** 不受单 owner 16 条上限约束的去重记录；用于每个 revision 都可能变化的判定。 */
+    @Synchronized
+    fun decision(key: String, event: String, details: () -> String) {
+        if (!BuildConfig.DEBUG) return
+        if (!seenDecisions.add(key)) return
+        if (seenDecisions.size > 512) seenDecisions.remove(seenDecisions.first())
+        runCatching { host.logMetadataIdentity(event, details()) }
+            .onFailure { ProviderLogger.diagnostic("Apple Music 专辑链路诊断失败: event=$event, error=${it.javaClass.simpleName}") }
+    }
 }

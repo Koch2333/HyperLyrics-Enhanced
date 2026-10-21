@@ -210,7 +210,8 @@ internal class AppleOrchestratorInAppMetadataAssembly(
                     )
                 },
                 ensureOverridesFn = { mediaIds, preBind, originalResolutionLimit ->
-                    metadataResolutionCoordinator.ensureOverrides(
+                    // 队列整表与延后登记一次几十个 ID，分批发起，避免历史记录 Hook 等长消息。
+                    metadataResolutionCoordinator.enqueueOverrides(
                         mediaIds = mediaIds,
                         preBind = preBind,
                         originalResolutionLimit = originalResolutionLimit,
@@ -1188,7 +1189,7 @@ internal class AppleOrchestratorInAppMetadataAssembly(
     fun requestPriorityForMediaId(mediaId: String): RequestPriority =
         metadataRequestContext(mediaId).priority
 
-    fun onMetadataPageAttached(owner: Any, recycler: RecyclerView) =
+    fun onMetadataPageAttached(owner: Any, recycler: View) =
         metadataSurfaceRuntime.onPageAttached(owner, recycler)
 
     fun onMetadataPageDetached(owner: Any) =
@@ -1211,9 +1212,13 @@ internal class AppleOrchestratorInAppMetadataAssembly(
 
     fun logMetadataIdentity(
         event: String,
-        identity: ActivePlaybackMediaIdentity = activePlaybackMediaIdentity(),
+        identity: ActivePlaybackMediaIdentity? = null,
         details: String,
-    ) = media3MetadataCoordinator.logIdentity(event, identity, details)
+    ) {
+        // 默认身份只为日志计算；release 不应为丢弃的日志解析当前播放身份。
+        if (!BuildConfig.DEBUG) return
+        media3MetadataCoordinator.logIdentity(event, identity ?: activePlaybackMediaIdentity(), details)
+    }
 
     fun registerInAppMetadata(
         mediaId: String,

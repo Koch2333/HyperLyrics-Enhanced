@@ -389,7 +389,8 @@ def verify_profile(ctx, profile):
         row = one('ALBUM_COMPOSE_ROW')
         row_owner = row['parameterTypeNames'][1]
         names = row['runtimeMemberNames']
-        key_owner = field(row_owner, names['ALBUM_COMPOSE_ROW_KEY_FIELD'], 'D7.q')
+        key_owner = field(row_owner, names['ALBUM_COMPOSE_ROW_KEY_FIELD'],
+                          'D7.s' if profile['id'].endswith('-1611') else 'D7.q')
         if key_owner:
             field(key_owner, names['ALBUM_COMPOSE_KEY_ID_FIELD'], 'java.lang.String')
 
@@ -408,7 +409,8 @@ def verify_profile(ctx, profile):
         field(kind, names['RADIO_SEARCH_SESSION_KIND_FIELD'], kind)
         field(section, names['RADIO_SEARCH_ARTISTS_KIND_FIELD'], section)
         field(catalogue, names['RADIO_SEARCH_CATALOG_KIND_FIELD'], catalogue)
-        method(scope, names['RADIO_SEARCH_SCOPE_CONTEXT_METHOD'], [], 'fi.e', False)
+        method(scope, names['RADIO_SEARCH_SCOPE_CONTEXT_METHOD'], [],
+               'fi.f' if profile['id'].endswith('-1611') else 'fi.e', False)
 
     names = ui['runtimeMemberNames']
     binding = field(ui['className'], names['LYRICS_UI_BINDING_FIELD'])
@@ -449,6 +451,16 @@ def verify_profile(ctx, profile):
     names = queue['runtimeMemberNames']
     method(queue['className'], names['QUEUE_ADAPTER_DISPLAYED_ENTRY_METHOD'], ['int'])
     field(queue['className'], names['QUEUE_ADAPTER_SUBMITTED_ENTRIES_FIELD'], 'java.util.ArrayList')
+    # The queue refresh calls the host Adapter's getItemCount; its R8 name lives on the
+    # notify target. The queue adapter must inherit that Adapter class.
+    notify = one('RECYCLER_NOTIFY_ITEM_CHANGED')
+    item_count = notify['runtimeMemberNames'].get('RECYCLER_ADAPTER_ITEM_COUNT_METHOD')
+    if item_count:
+        method(notify['className'], item_count, [], 'int', False)
+        supers = [binary_name(c.superclass_descriptor)
+                  for c in lineage(ctx, queue['className']) if c.superclass_descriptor]
+        require(notify['className'] in supers,
+                f"{queue['className']}: does not extend {notify['className']}")
     for key, expected in [('MEDIA3_METADATA_BUNDLE_FIELD', 'android.os.Bundle'),
                           ('MEDIA3_METADATA_TITLE_FIELD', 'java.lang.CharSequence'),
                           ('MEDIA3_METADATA_ARTIST_FIELD', 'java.lang.CharSequence')]:
@@ -499,10 +511,10 @@ def verify_profile(ctx, profile):
                 for c in lineage(ctx, model['className']) for f in c.fields),
             f'{model["className"]}: not the ListenNow callback-bearing model')
     semantic_checks = 0
-    if profile['id'] in ('am-7.0.0-beta-1607', 'am-7.0.0-beta-1609'):
+    if profile['id'] in ('am-7.0.0-beta-1607', 'am-7.0.0-beta-1609', 'am-7.0.0-beta-1611'):
         from verify_apple_music_1607_members import verify_consumer_members
         verify_consumer_members(ctx, points, field, method, require,
-                                version_code=1609 if profile['id'].endswith('-1609') else 1607)
+                                version_code=int(profile['id'].rsplit('-', 1)[1]))
         semantic_checks, semantic_errors = verify_1607_semantics(ctx, points)
         errors.extend(semantic_errors)
     return dict(profile=profile['id'], groups=len(points), targets=checked, memberChecks=member_checks,

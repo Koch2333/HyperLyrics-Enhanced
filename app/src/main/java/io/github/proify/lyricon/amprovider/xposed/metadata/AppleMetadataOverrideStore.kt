@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.amprovider.xposed
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** Owns Apple Music metadata overrides, identity facts, and request lifecycle state. */
 internal class AppleMetadataOverrideStore {
@@ -186,17 +187,28 @@ internal class AppleMetadataOverrideStore {
 
     fun accountMetadataSnapshot(): Map<String, AccountMetadata> = HashMap(accountMetadataValues)
 
-    fun mergeAccountMetadata(mediaId: String, incoming: AccountMetadata): AccountMetadata =
-        accountMetadataValues.merge(mediaId, incoming) { previous, next ->
+    fun mergeAccountMetadata(mediaId: String, incoming: AccountMetadata): AccountMetadata {
+        // 合并只填补空字段：已有值已覆盖 incoming 能提供的字段时结果不变，不再分配新对象。
+        accountMetadataValues[mediaId]?.let { previous ->
+            if (
+                (previous.title != null || incoming.title == null) &&
+                (previous.artist != null || incoming.artist == null)
+            ) {
+                return previous
+            }
+        }
+        return accountMetadataValues.merge(mediaId, incoming) { previous, next ->
             AccountMetadata(
                 title = previous.title ?: next.title,
                 artist = previous.artist ?: next.artist,
             )
         } ?: incoming
+    }
 
     fun lookupIds(mediaId: String): Set<String> = metadataLookupIds[mediaId].orEmpty()
 
     fun mergeLookupIds(mediaId: String, lookupIds: Collection<String>) {
+        if (metadataLookupIds[mediaId]?.containsAll(lookupIds) == true) return
         metadataLookupIds.merge(mediaId, lookupIds.toSet()) { previous, incoming ->
             previous + incoming
         }
@@ -215,6 +227,7 @@ internal class AppleMetadataOverrideStore {
     fun artistKeys(mediaId: String): Set<String> = metadataArtistKeys[mediaId].orEmpty()
 
     fun mergeArtistKeys(mediaId: String, artistKeys: Collection<String>) {
+        if (metadataArtistKeys[mediaId]?.containsAll(artistKeys) == true) return
         metadataArtistKeys.merge(mediaId, artistKeys.toSet()) { previous, incoming ->
             previous + incoming
         }
@@ -222,6 +235,11 @@ internal class AppleMetadataOverrideStore {
 
     fun associatedArtistIds(mediaId: String): List<String> =
         metadataAssociatedArtistIds[mediaId].orEmpty()
+
+    /** 任一 mediaId 的关联艺人 ID 变化时递增；请求范围同步据此判断是否需要重新展开。 */
+    private val associatedArtistIdsRevision = AtomicLong()
+
+    fun associatedArtistIdsRevision(): Long = associatedArtistIdsRevision.get()
 
     fun mergeAssociatedArtistIds(mediaId: String, artistIds: Collection<String>): Boolean {
         val normalizedIds = AppleMetadataResolutionEngine
@@ -234,6 +252,7 @@ internal class AppleMetadataOverrideStore {
             changed = merged != previous
             merged
         }
+        if (changed) associatedArtistIdsRevision.incrementAndGet()
         return changed
     }
 

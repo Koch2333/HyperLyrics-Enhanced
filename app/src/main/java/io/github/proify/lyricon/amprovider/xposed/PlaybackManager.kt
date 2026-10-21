@@ -67,6 +67,7 @@ object PlaybackManager {
         ProviderLogger.debug("PlaybackManager: Song changed to $newId")
 
         // 1. 立即设置歌曲（可能是完整版，也可能是占位版）
+        val switchStartNs = if (BuildConfig.DEBUG) android.os.SystemClock.elapsedRealtimeNanos() else 0L
         val cachedSong = SongRepository.getSong(newId)
         val persistedMissingLyrics = DiskSongManager.loadMissingLyrics(newId)
             ?.lyrics
@@ -90,6 +91,13 @@ object PlaybackManager {
             cachedSong
         }
         setSong(song)
+        if (BuildConfig.DEBUG) {
+            ProviderLogger.diagnostic(
+                "[SongCacheIo] stage=song_changed_sync, id=$newId, " +
+                    "totalMs=${(android.os.SystemClock.elapsedRealtimeNanos() - switchStartNs) / 1_000_000.0}, " +
+                    "lines=${song.lyrics?.size ?: 0}, thread=${Thread.currentThread().name}"
+            )
+        }
         if (cachedMissingLyricsSupplement) {
             ProviderLogger.info(
                 if (legacyMissingLyricsCandidate) {
@@ -132,6 +140,18 @@ object PlaybackManager {
             }
         }
         if (id != currentSongId) return
+        val republishInputs = CatalogRepublishInputs(
+            songId = id,
+            metadata = MediaMetadataCache.getMetadataById(id),
+            diskGeneration = DiskSongManager.generation,
+            displayTranslation = PreferencesMonitor.isTranslationSelected(),
+        )
+        if (isCatalogRepublishUnchanged(lastCatalogRepublish, republishInputs, lastSong)) {
+            if (BuildConfig.DEBUG) ProviderLogger.debug(
+                "PlaybackManager: Catalog republish skipped for $id, inputs unchanged."
+            )
+            return
+        }
         val resolvedSong = SongRepository.getSong(id)
         val mergedSong = mergeCatalogMetadata(lastSong, resolvedSong)
         if (BuildConfig.DEBUG) AppleMetadataFlowDiagnostics.record("catalog_republish_merge") {
@@ -143,8 +163,40 @@ object PlaybackManager {
                 "resolvedLines=${resolvedSong.lyrics?.size ?: 0}, " +
                 "publishedLines=${mergedSong.lyrics?.size ?: 0}."
         )
-        setSong(mergedSong)
+        val published = setSong(mergedSong)
+        lastCatalogRepublish = if (published) {
+            CatalogRepublish(republishInputs, mergedSong)
+        } else {
+            null
+        }
     }
+
+    /**
+     * 一次目录重发布的输入。切歌后 App 内元数据每覆盖一次都会调用 [onCatalogMetadataResolved]
+     * （221013 实测 13 首歌 151 次），输入未变时结果必然相同：歌曲缓存只随 [DiskSongManager.generation]
+     * 变化，映射与合并是纯函数，合并的另一输入是上次发布后未被替换的 [lastSong]。
+     */
+    internal data class CatalogRepublishInputs(
+        val songId: String,
+        val metadata: MediaMetadataCache.Metadata?,
+        val diskGeneration: Long,
+        val displayTranslation: Boolean,
+    )
+
+    internal class CatalogRepublish(
+        val inputs: CatalogRepublishInputs,
+        val output: Song,
+    )
+
+    private var lastCatalogRepublish: CatalogRepublish? = null
+
+    internal fun isCatalogRepublishUnchanged(
+        previous: CatalogRepublish?,
+        inputs: CatalogRepublishInputs,
+        currentSong: Song?,
+    ): Boolean = previous != null &&
+        previous.output === currentSong &&
+        previous.inputs == inputs
 
     /**
      * 当 Hook 捕获到歌词构建完成时调用
@@ -154,6 +206,7 @@ object PlaybackManager {
         source: String,
         visibleSongId: String? = null,
         playbackSongId: String? = null,
+        trigger: String = "",
     ) {
         val previousSong = lastSong
         val parserAccess = lyricsParserAccess
@@ -162,7 +215,7 @@ object PlaybackManager {
             logDisplayDiagnostic(null, "skipped", "lyrics_parser_profile_missing", "source=$source")
             return
         }
-        val song = SongRepository.saveSong(nativeSongObj, parserAccess, source)
+        val song = SongRepository.saveSong(nativeSongObj, parserAccess, source, trigger)
         if (song == null) {
             ProviderLogger.debug("PlaybackManager: Failed to save song.")
             logDisplayDiagnostic(null, "skipped", "lyrics_parse_failed", "source=$source")
@@ -503,7 +556,8 @@ object PlaybackManager {
     }
 
     @Synchronized
-    private fun setSong(song: Song?) {
+    /** 返回歌曲与翻译显示状态是否都已送达（内容未变视为已送达）。 */
+    private fun setSong(song: Song?): Boolean {
         lastSong = song
         val contentUnchanged = song == lastPublishedSong
         val sent = if (contentUnchanged) {
@@ -548,6 +602,7 @@ object PlaybackManager {
                     "displayTranslation=$displayTranslation, translationSent=$translationSent",
             )
         }
+        return sent && translationSent
     }
 
     private fun logDisplayDiagnostic(

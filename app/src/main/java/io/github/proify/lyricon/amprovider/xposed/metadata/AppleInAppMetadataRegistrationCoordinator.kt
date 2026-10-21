@@ -6,6 +6,8 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
+import java.util.concurrent.ConcurrentHashMap
+
 /** Owns in-app metadata/model identity registration and account-value capture. */
 internal class AppleInAppMetadataRegistrationCoordinator(
     runtime: AppleMusicProviderRuntime,
@@ -36,6 +38,8 @@ internal class AppleInAppMetadataRegistrationCoordinator(
                     "base"
             }
     }
+    /** 非历史条目的实体类型只取决于具体类继承链的类名，按类缓存；值为 [NO_ENTITY_TYPE] 表示 null。 */
+    private val classEntityTypes = ConcurrentHashMap<Class<*>, Any>()
 
     fun registerMetadata(
         mediaId: String,
@@ -69,6 +73,7 @@ internal class AppleInAppMetadataRegistrationCoordinator(
         analyzeMetadata: Boolean = true,
     ) {
         dataBindingHooks.recordCurrentRecyclerMediaId(mediaId)
+        if (!analyzeMetadata && isPlaybackItemRegistrationSettled(mediaId, playbackItem)) return
         val contract = playbackItemContract(playbackItem)
         val rawTitle = readPlaybackItemValue(playbackItem, InAppPlaybackItemField.TITLE, contract)
         val rawArtist = readPlaybackItemValue(playbackItem, InAppPlaybackItemField.ARTIST, contract)
@@ -135,6 +140,15 @@ internal class AppleInAppMetadataRegistrationCoordinator(
             metadataStore.rememberEntityType(mediaId, entityType)
         }
     }
+
+    /**
+     * 不分析元数据时，登记只剩注册表登记与账号元数据补空：同一对象已登记为同一 mediaId，
+     * 且账号元数据标题与艺人都已存在时，两者都不会再有变化（[AppleMetadataOverrideStore.mergeAccountMetadata]
+     * 只填补空字段，注册表按对象身份去重），可以跳过读取原始值。
+     */
+    private fun isPlaybackItemRegistrationSettled(mediaId: String, playbackItem: Any): Boolean =
+        registry.playbackItemId(playbackItem) == mediaId &&
+            metadataStore.accountMetadata(mediaId).isComplete()
 
     fun registerContainerItem(
         mediaId: String,
@@ -278,12 +292,20 @@ internal class AppleInAppMetadataRegistrationCoordinator(
 
     fun contentItemLocalizedEntityType(
         contentItem: Any,
-    ): LocalizedEntityType? = localizedEntityTypeForQueueItem(
-        historyEntry = playbackItemContract(contentItem) == InAppPlaybackItemContract.HISTORY,
-        classNames = generateSequence(contentItem.javaClass as Class<*>?) { it.superclass }
-            .map { it.simpleName }
-            .toList(),
-    )
+    ): LocalizedEntityType? {
+        if (playbackItemContract(contentItem) == InAppPlaybackItemContract.HISTORY) {
+            return localizedEntityTypeForQueueItem(historyEntry = true, classNames = emptyList())
+        }
+        val cached = classEntityTypes.computeIfAbsent(contentItem.javaClass) { clazz ->
+            localizedEntityTypeForQueueItem(
+                historyEntry = false,
+                classNames = generateSequence(clazz as Class<*>?) { it.superclass }
+                    .map { it.simpleName }
+                    .toList(),
+            ) ?: NO_ENTITY_TYPE
+        }
+        return cached as? LocalizedEntityType
+    }
 
     private fun registerMetadataRef(mediaId: String, metadata: Any) {
         val originalTitle = metadataTarget?.runtimeMemberNameOrNull(
@@ -327,3 +349,8 @@ internal class AppleInAppMetadataRegistrationCoordinator(
         }
     }
 }
+
+private val NO_ENTITY_TYPE = Any()
+
+internal fun AccountMetadata?.isComplete(): Boolean =
+    this != null && title != null && artist != null

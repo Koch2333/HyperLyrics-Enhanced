@@ -6,6 +6,8 @@
 
 package io.github.proify.lyricon.amprovider.xposed
 
+import com.juren233.hyperlyricsenhanced.BuildConfig
+
 internal interface ApplePlaybackMetadataCoordinatorHost {
     fun activePlayer(): Any?
 
@@ -198,7 +200,7 @@ internal class ApplePlaybackMetadataCoordinator(
                     currentRefresh = PlaybackMetadataRefresh(mediaId, callback)
                 }
                 PlaybackManager.onSongChanged(publishedMetadata.id)
-                host.logMetadataIdentity(
+                if (BuildConfig.DEBUG) host.logMetadataIdentity(
                     event = "queue_current_published",
                     details = "trigger=$source, previousId=$previousCurrentId, " +
                         "publishedId=$mediaId, title=${publishedMetadata.title}, " +
@@ -343,7 +345,7 @@ internal class ApplePlaybackMetadataCoordinator(
             return
         }
         if (!resolutionPlan.resolveConfiguredRegion) {
-            host.logMetadataIdentity(
+            if (BuildConfig.DEBUG) host.logMetadataIdentity(
                 event = "current_catalog_resolve_skipped",
                 details = "requestedId=${metadata.id}, selection=$languageSelection, reason=disabled",
             )
@@ -354,7 +356,7 @@ internal class ApplePlaybackMetadataCoordinator(
         metadata: MediaMetadataCache.Metadata,
         languageSelection: Int,
     ) {
-        host.logMetadataIdentity(
+        if (BuildConfig.DEBUG) host.logMetadataIdentity(
             event = "current_catalog_resolve_started",
             details = "requestedId=${metadata.id}, selection=$languageSelection, " +
                 "title=${metadata.title}, artist=${metadata.artist}",
@@ -364,7 +366,7 @@ internal class ApplePlaybackMetadataCoordinator(
             mediaId = metadata.id,
             selection = languageSelection,
         ) { alias ->
-            host.logMetadataIdentity(
+            if (BuildConfig.DEBUG) host.logMetadataIdentity(
                 event = "current_catalog_resolve_finished",
                 details = "requestedId=${metadata.id}, selection=$languageSelection, " +
                     "hit=${alias != null}, resolved=${alias?.title}/${alias?.artist}/${alias?.album}",

@@ -18,17 +18,17 @@ internal object ProviderLogger {
     private const val TAG = "AppleMusicProvider"
 
     fun debug(message: String) {
-        if (BuildConfig.DEBUG) HookLogger.d(TAG, message)
+        if (BuildConfig.DEBUG) AppleMainThreadCost.timeLog { HookLogger.d(TAG, message) }
     }
 
     fun diagnostic(message: String) {
         if (BuildConfig.DEBUG) {
-            runCatching { HookLogger.i(TAG, "[debug] $message") }
+            AppleMainThreadCost.timeLog { runCatching { HookLogger.i(TAG, "[debug] $message") } }
         }
     }
 
     fun info(message: String) {
-        if (BuildConfig.DEBUG) HookLogger.i(TAG, message)
+        if (BuildConfig.DEBUG) AppleMainThreadCost.timeLog { HookLogger.i(TAG, message) }
     }
 
     fun error(message: String, throwable: Throwable? = null) =
@@ -40,6 +40,21 @@ internal object AppleReflection {
         ConcurrentHashMap<Class<*>, Map<String, List<Method>>>()
     private val fieldsByClass =
         ConcurrentHashMap<Class<*>, Map<String, Field>>()
+    private val hierarchyFieldsByClass =
+        ConcurrentHashMap<Class<*>, List<Field>>()
+    private val zeroArgMethodsByClass =
+        ConcurrentHashMap<Class<*>, ConcurrentHashMap<String, Method>>()
+
+    /**
+     * 类及其父类声明的全部字段，顺序同自身到父类逐级 `declaredFields`。
+     * 运行期回调按类型找字段时用它代替每次重新反射整条继承链。
+     */
+    fun hierarchyFields(clazz: Class<*>): List<Field> =
+        hierarchyFieldsByClass.computeIfAbsent(clazz) { owner ->
+            generateSequence(owner) { it.superclass }
+                .flatMap { it.declaredFields.asSequence() }
+                .toList()
+        }
 
     fun findMethod(
         clazz: Class<*>,
@@ -59,6 +74,7 @@ internal object AppleReflection {
     }
 
     fun call(instance: Any, name: String, vararg args: Any?): Any? {
+        if (args.isEmpty()) return zeroArgMethod(instance.javaClass, name).invoke(instance)
         val method = methodsNamed(instance.javaClass, name).firstOrNull { candidate ->
             parametersMatch(candidate.parameterTypes, args)
         } ?: throw NoSuchMethodException("${instance.javaClass.name}#$name/${args.size}")
@@ -107,8 +123,20 @@ internal object AppleReflection {
             ?: throw NoSuchFieldException("${clazz.name}#$name")
     }
 
+    /** 无参调用的匹配只看参数个数，结果按类与名称缓存，并只设置一次可访问。 */
+    private fun zeroArgMethod(clazz: Class<*>, name: String): Method =
+        zeroArgMethodsByClass.computeIfAbsent(clazz) { ConcurrentHashMap() }[name]
+            ?: (methodsNamed(clazz, name).firstOrNull { it.parameterCount == 0 }
+                ?: throw NoSuchMethodException("${clazz.name}#$name/0"))
+                .also { method ->
+                    method.isAccessible = true
+                    zeroArgMethodsByClass.getValue(clazz)[name] = method
+                }
+
     private fun methodsNamed(clazz: Class<*>, name: String): List<Method> =
-        methodsByClass.computeIfAbsent(clazz, ::indexMethods)[name].orEmpty()
+        methodsByClass.computeIfAbsent(clazz) { owner ->
+            AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.REFLECTION_INDEX) { indexMethods(owner) }
+        }[name].orEmpty()
 
     private fun indexMethods(clazz: Class<*>): Map<String, List<Method>> {
         val methods = LinkedHashMap<String, MutableList<Method>>()

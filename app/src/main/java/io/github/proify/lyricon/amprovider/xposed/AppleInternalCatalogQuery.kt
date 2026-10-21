@@ -33,7 +33,7 @@ internal fun AppleInternalCatalogResolver.resolveCatalogIdentity(
     val ownsRequest = dispatch.attachCatalogIdentityCallback(mediaId, onResult)
     if (!ownsRequest) return
 
-    queryById(mediaId, null) { currentSong ->
+    queryIdentityBase(mediaId) { currentSong ->
         currentSong?.isrc?.let { isrc ->
             ProviderLogger.info("Apple 内部歌曲 ISRC: id=$mediaId, isrc=$isrc")
             finishCatalogIdentity(
@@ -46,7 +46,7 @@ internal fun AppleInternalCatalogResolver.resolveCatalogIdentity(
                     albumIds = currentSong.albumIds,
                 ),
             )
-            return@queryById
+            return@queryIdentityBase
         }
 
         val fallbackAliases = mutableListOf<Alias>().apply {
@@ -167,6 +167,65 @@ internal fun AppleInternalCatalogResolver.queryById(
     )
 }
 
+/**
+ * 身份链路的首个无语言查询（只为取 ISRC、流派和歌手 ID）。1611 的 amp-api 拦截器 `y9.d.a`
+ * 持锁执行 `proceed`，同一客户端的请求全部串行；逐首单 ID 查询会把 Apple 页面请求挤在后面，
+ * 新页面长时间白屏。请求先在 [IDENTITY_BASE_BATCH_WINDOW_MS] 内收集，拿到全局目录许可时才取批
+ * （最多 [IDENTITY_BASE_BATCH_SIZE] 个 ID），等待许可期间到达的 ID 并入同一批，再按 ID 分发结果。
+ */
+internal fun AppleInternalCatalogResolver.queryIdentityBase(
+    mediaId: String,
+    onResult: (CatalogSong?) -> Unit,
+) {
+    if (dispatch.submitIdentityBaseQuery(mediaId, onResult)) {
+        mainHandler.postDelayed(
+            { catalogRequestGate.submit { release -> runIdentityBaseBatch(release) } },
+            IDENTITY_BASE_BATCH_WINDOW_MS,
+        )
+    }
+}
+
+private fun AppleInternalCatalogResolver.runIdentityBaseBatch(release: () -> Unit) {
+    val (batch, hasMore) = dispatch.takeIdentityBaseQueryBatch(IDENTITY_BASE_BATCH_SIZE)
+    if (hasMore) catalogRequestGate.submit { next -> runIdentityBaseBatch(next) }
+    if (batch.isEmpty()) {
+        release()
+        return
+    }
+    val ids = batch.keys.toList()
+    val description = "identity-ids=${ids.size}"
+    val queryParams = linkedMapOf(
+        "ids" to ids.joinToString(","),
+        "platform" to "android",
+        "include[songs]" to "artists,albums",
+    )
+    performQueryResponse(
+        storefront = null,
+        language = null,
+        description = description,
+        path = "songs",
+        queryParams = queryParams,
+        diagnosticRequestId = logCatalogRequestQueued(description, null, null),
+        queuedAtMs = SystemClock.uptimeMillis(),
+        release = release,
+    ) { response ->
+        val songs = runCatching {
+            response?.let { parseCatalogSongs(it, CURRENT_LANGUAGE) }
+        }.onFailure { error ->
+            ProviderLogger.error("Apple 内部歌曲身份批量响应解析失败: ids=${ids.size}", error)
+        }.getOrNull()
+        ProviderLogger.info(
+            "Apple 内部歌曲身份批量查询: requested=${ids.size}, " +
+                "resolved=${songs?.size ?: 0}, responded=${songs != null}"
+        )
+        // 一批约 50 首的身份结果逐首同步续接原名查询，单条消息可达 33 ms（221047）。
+        batch.forEach { (id, callbacks) ->
+            val song = selectIdentityBaseSong(id, ids.size, songs)
+            callbacks.forEach { callback -> resultDelivery.enqueue { callback(song) } }
+        }
+    }
+}
+
 internal fun AppleInternalCatalogResolver.queryByConfiguredRegion(
     mediaIds: List<String>,
     entityType: LocalizedEntityType,
@@ -177,12 +236,16 @@ internal fun AppleInternalCatalogResolver.queryByConfiguredRegion(
     onResult(songs.orEmpty())
 }
 
-/** 同 [queryByConfiguredRegion]，但请求失败、超时或响应解析失败时回调 null，以区分目录空结果。 */
+/**
+ * 同 [queryByConfiguredRegion]，但请求失败、超时或响应解析失败时回调 null，以区分目录空结果。
+ * 传入 [release] 表示调用方已持有全局目录许可，直接发出请求并在结束时归还。
+ */
 internal fun AppleInternalCatalogResolver.queryByConfiguredRegionResult(
     mediaIds: List<String>,
     entityType: LocalizedEntityType,
     storefront: String,
     language: String,
+    release: (() -> Unit)? = null,
     onResult: (Map<String, CatalogSong>?) -> Unit,
 ) {
     val queryParams = linkedMapOf(
@@ -194,13 +257,8 @@ internal fun AppleInternalCatalogResolver.queryByConfiguredRegionResult(
         queryParams["include[${entityType.path}]"] =
             if (entityType == LocalizedEntityType.SONG) "artists,albums" else "artists"
     }
-    queryResponse(
-        storefront = storefront,
-        language = language,
-        description = "localized-${entityType.path}-ids=${mediaIds.size}",
-        path = entityType.path,
-        queryParams = queryParams,
-    ) { response ->
+    val description = "localized-${entityType.path}-ids=${mediaIds.size}"
+    val handleResponse: (Any?) -> Unit = { response ->
         val songs = runCatching {
             response?.let { parseCatalogEntities(it, language, entityType) }
         }.onFailure { error ->
@@ -221,9 +279,106 @@ internal fun AppleInternalCatalogResolver.queryByConfiguredRegionResult(
         )
         onResult(byId.takeIf { songs != null })
     }
+    if (release == null) {
+        queryResponse(
+            storefront = storefront,
+            language = language,
+            description = description,
+            path = entityType.path,
+            queryParams = queryParams,
+            onResult = handleResponse,
+        )
+    } else {
+        performQueryResponse(
+            storefront = storefront,
+            language = language,
+            description = description,
+            path = entityType.path,
+            queryParams = queryParams,
+            diagnosticRequestId = logCatalogRequestQueued(description, storefront, language),
+            queuedAtMs = SystemClock.uptimeMillis(),
+            release = release,
+            onResult = handleResponse,
+        )
+    }
 }
 
+/**
+ * ISRC 查原名。同一语言的请求在拿到全局目录许可时合并为 `filter[isrc]=a,b,...`
+ * （最多 [ISRC_BATCH_SIZE] 个），减少经 amp-api 串行通道的请求数。
+ */
 internal fun AppleInternalCatalogResolver.queryByIsrc(
+    isrc: String,
+    language: String,
+    onResult: (CatalogSong?) -> Unit
+) {
+    if (dispatch.submitIsrcQuery(language, isrc, onResult)) {
+        mainHandler.postDelayed(
+            { catalogRequestGate.submit { release -> runIsrcBatch(release) } },
+            IDENTITY_BASE_BATCH_WINDOW_MS,
+        )
+    }
+}
+
+private fun AppleInternalCatalogResolver.runIsrcBatch(release: () -> Unit) {
+    val (language, batch, hasMore) = dispatch.takeIsrcQueryBatch(ISRC_BATCH_SIZE)
+    if (hasMore) catalogRequestGate.submit { next -> runIsrcBatch(next) }
+    if (language == null || batch.isEmpty()) {
+        release()
+        return
+    }
+    val isrcs = batch.keys.toList()
+    val single = isrcs.size == 1
+    val description = if (single) "isrc=${isrcs.first()}" else "isrc-batch=${isrcs.size}"
+    val queryParams = linkedMapOf(
+        "filter[isrc]" to isrcs.joinToString(","),
+        "l" to language,
+        "platform" to "android",
+        "include[songs]" to "artists,albums",
+    )
+    if (single) queryParams["limit"] = "1"
+    val storefront = runCatching { storefrontForLanguage(language) }.getOrElse { error ->
+        release()
+        ProviderLogger.error("Apple ISRC 批量查询地区不支持: language=$language", error)
+        batch.values.flatten().forEach { callback -> callback(null) }
+        return
+    }
+    performQueryResponse(
+        storefront = storefront,
+        language = language,
+        description = description,
+        path = "songs",
+        queryParams = queryParams,
+        diagnosticRequestId = logCatalogRequestQueued(description, storefront, language),
+        queuedAtMs = SystemClock.uptimeMillis(),
+        release = release,
+    ) { response ->
+        val songs = runCatching {
+            response?.let { parseCatalogSongs(it, language) }
+        }.onFailure { error ->
+            ProviderLogger.error(
+                "Apple ISRC 批量响应解析失败: isrcs=${isrcs.size}, language=$language",
+                error,
+            )
+        }.getOrNull()
+        ProviderLogger.info(
+            "Apple 内部原名 ISRC 查询: requested=${isrcs.size}, resolved=${songs?.size ?: 0}, " +
+                "language=$language, responded=${songs != null}"
+        )
+        batch.forEach { (isrc, callbacks) ->
+            val song = selectIsrcBatchSong(isrc, isrcs.size, songs)
+            if (song == null && songs != null && !single) {
+                // 批量结果可能被分页截断：缺失项回退原单条查询，不当作无结果。
+                callbacks.forEach { callback -> queryByIsrcSingle(isrc, language, callback) }
+            } else {
+                callbacks.forEach { callback -> callback(song) }
+            }
+        }
+    }
+}
+
+/** 原单条 ISRC 查询（`limit=1`、取第一条），用于批量结果缺失时回退。 */
+internal fun AppleInternalCatalogResolver.queryByIsrcSingle(
     isrc: String,
     language: String,
     onResult: (CatalogSong?) -> Unit
@@ -287,8 +442,29 @@ internal fun AppleInternalCatalogResolver.queryResponse(
     queryParams: Map<String, String>,
     onResult: (Any?) -> Unit,
 ) {
-    val diagnosticRequestId = catalogDiagnosticSequence.incrementAndGet().toString(36)
+    val diagnosticRequestId = logCatalogRequestQueued(description, storefront, language)
     val queuedAtMs = SystemClock.uptimeMillis()
+    catalogRequestGate.submit { release ->
+        performQueryResponse(
+            storefront = storefront,
+            language = language,
+            description = description,
+            path = path,
+            queryParams = queryParams,
+            diagnosticRequestId = diagnosticRequestId,
+            queuedAtMs = queuedAtMs,
+            release = release,
+            onResult = onResult,
+        )
+    }
+}
+
+internal fun AppleInternalCatalogResolver.logCatalogRequestQueued(
+    description: String,
+    storefront: String?,
+    language: String?,
+): String {
+    val diagnosticRequestId = catalogDiagnosticSequence.incrementAndGet().toString(36)
     logCatalogRequestDiagnostic(
         requestId = diagnosticRequestId,
         event = "queued",
@@ -296,14 +472,34 @@ internal fun AppleInternalCatalogResolver.queryResponse(
         storefront = storefront,
         language = language,
         elapsedMs = 0L,
+        detail = if (BuildConfig.DEBUG) "gateWaiting=${catalogRequestGate.waitingCount}" else null,
     )
-    mainHandler.post {
+    return diagnosticRequestId
+}
+
+/**
+ * 在已持有 [AppleInternalCatalogResolver.catalogRequestGate] 许可的主线程任务中发出请求；
+ * 完成、失败或超时（先到者）调用 [release] 归还许可。超时从真正发出时开始计算。
+ */
+internal fun AppleInternalCatalogResolver.performQueryResponse(
+    storefront: String?,
+    language: String?,
+    description: String,
+    path: String,
+    queryParams: Map<String, String>,
+    diagnosticRequestId: String,
+    queuedAtMs: Long,
+    release: () -> Unit,
+    onResult: (Any?) -> Unit,
+) {
+    run {
         var requestToken: String? = null
         val completed = AtomicBoolean(false)
         var slowResponse: Runnable? = null
         var timeout: Runnable? = null
 
         fun finish(response: Any?, event: String = "response") {
+            release()
             if (!completed.compareAndSet(false, true)) {
                 logCatalogRequestDiagnostic(
                     requestId = diagnosticRequestId,
@@ -313,7 +509,7 @@ internal fun AppleInternalCatalogResolver.queryResponse(
                     language = language,
                     requestToken = requestToken,
                     elapsedMs = SystemClock.uptimeMillis() - queuedAtMs,
-                    detail = catalogResponseDiagnostic(response),
+                    detail = if (BuildConfig.DEBUG) catalogResponseDiagnostic(response) else null,
                 )
                 return
             }
@@ -328,12 +524,13 @@ internal fun AppleInternalCatalogResolver.queryResponse(
                 language = language,
                 requestToken = requestToken,
                 elapsedMs = SystemClock.uptimeMillis() - queuedAtMs,
-                detail = catalogResponseDiagnostic(response),
+                detail = if (BuildConfig.DEBUG) catalogResponseDiagnostic(response) else null,
             )
             onResult(response)
         }
 
         fun fail(event: String, error: Throwable) {
+            release()
             if (!completed.compareAndSet(false, true)) {
                 logCatalogRequestDiagnostic(
                     requestId = diagnosticRequestId,
@@ -397,6 +594,7 @@ internal fun AppleInternalCatalogResolver.queryResponse(
                 )
             }.also { mainHandler.postDelayed(it, QUERY_SLOW_RESPONSE_MS) }
             timeout = Runnable {
+                release()
                 if (!completed.compareAndSet(false, true)) return@Runnable
                 requestToken?.let(pendingCatalogRequests::remove)
                 logCatalogRequestDiagnostic(
@@ -469,8 +667,10 @@ internal fun AppleInternalCatalogResolver.createDirectCatalogContinuation(
         "resumeWith" -> {
             val result = args?.firstOrNull()
             mainHandler.post {
-                val failure = coroutineResultFailure(result)
-                if (failure != null) onFailure(failure) else onSuccess(result)
+                AppleMainThreadCost.sectionWithLog("catalog_response", "catalog_response_log") {
+                    val failure = coroutineResultFailure(result)
+                    if (failure != null) onFailure(failure) else onSuccess(result)
+                }
             }
             null
         }
@@ -493,3 +693,35 @@ internal fun AppleInternalCatalogResolver.coroutineResultFailure(result: Any?): 
     field.isAccessible = true
     return field.get(value) as? Throwable
 }
+
+/**
+ * 单 ID 批次保持原单条查询语义（取响应第一条）；多 ID 批次按实体 ID 精确匹配，
+ * 未返回的 ID 视为该首歌查询无结果。
+ */
+internal fun selectIdentityBaseSong(
+    mediaId: String,
+    requestedCount: Int,
+    songs: List<CatalogSong>?,
+): CatalogSong? {
+    songs ?: return null
+    return if (requestedCount == 1) songs.firstOrNull() else songs.firstOrNull { it.id == mediaId }
+}
+
+internal const val IDENTITY_BASE_BATCH_SIZE = 50
+internal const val IDENTITY_BASE_BATCH_WINDOW_MS = 50L
+
+/** 单个 ISRC 的批次保持原语义（取第一条）；多个时按 ISRC 精确匹配首条。 */
+internal fun selectIsrcBatchSong(
+    isrc: String,
+    requestedCount: Int,
+    songs: List<CatalogSong>?,
+): CatalogSong? {
+    songs ?: return null
+    return if (requestedCount == 1) {
+        songs.firstOrNull()
+    } else {
+        songs.firstOrNull { it.isrc.equals(isrc, ignoreCase = true) }
+    }
+}
+
+internal const val ISRC_BATCH_SIZE = 25

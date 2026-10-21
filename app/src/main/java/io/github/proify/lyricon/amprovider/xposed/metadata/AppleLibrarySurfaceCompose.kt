@@ -342,9 +342,11 @@ internal fun AppleLibrarySurfaceHooks.drainControllerRefresh(controller: Any) {
             )
             debugLibraryModelRefreshMediaId.set(traceMediaId)
         }
+        val buildStartNs = if (BuildConfig.DEBUG) System.nanoTime() else 0L
         runCatching {
             host.requestControllerBuild(controller, buildStrategy)
         }.onSuccess {
+            val buildMs = if (BuildConfig.DEBUG) (System.nanoTime() - buildStartNs) / 1_000_000.0 else 0.0
             val rebuiltMediaIds = if (
                 buildStrategy == InAppLibraryControllerBuildStrategy.ALBUM_SET_DATA
             ) {
@@ -374,9 +376,17 @@ internal fun AppleLibrarySurfaceHooks.drainControllerRefresh(controller: Any) {
                     "Apple Music 元数据链路: " +
                         "seq=${host.nextMetadataTraceSequence()}, " +
                         "event=library_epoxy_rebuild, contentIds=$activeMediaIds, " +
-                        "controller=${controller.javaClass.name}"
+                        "controller=${controller.javaClass.name}, strategy=$buildStrategy, " +
+                        "requestMs=$buildMs"
                 )
+                // Epoxy 可能把模型构建延后到下一条消息；记录到下一条消息开始的总间隔。
+                val postedNs = System.nanoTime()
                 runtime.mainHandler.post {
+                    ProviderLogger.diagnostic(
+                        "[PlaylistRowDiag] epoxy_rebuild_next_message: " +
+                            "controller=${controller.javaClass.simpleName}, ids=${activeMediaIds.size}, " +
+                            "requestMs=$buildMs, untilNextMs=${(System.nanoTime() - postedNs) / 1_000_000.0}"
+                    )
                 }
             }
         }.onFailure {

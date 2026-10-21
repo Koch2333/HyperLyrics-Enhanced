@@ -123,6 +123,38 @@ class AppleMetadataOverrideStoreTest {
         assertNull(store.currentPlaybackOverride())
     }
 
+    @Test
+    fun `account metadata merge only fills blanks and keeps settled value`() {
+        val store = AppleMetadataOverrideStore()
+
+        assertEquals(AccountMetadata("Title", null), store.mergeAccountMetadata("1", AccountMetadata("Title", null)))
+        assertEquals(
+            AccountMetadata("Title", "Artist"),
+            store.mergeAccountMetadata("1", AccountMetadata("Other", "Artist")),
+        )
+        val settled = store.accountMetadata("1")
+        assertSame(settled, store.mergeAccountMetadata("1", AccountMetadata("New", "New Artist")))
+        assertSame(settled, store.mergeAccountMetadata("1", AccountMetadata(null, null)))
+        assertTrue(settled.isComplete())
+        assertFalse(AccountMetadata("Title", null).isComplete())
+        assertFalse((null as AccountMetadata?).isComplete())
+    }
+
+    @Test
+    fun `lookup and artist key merges keep union when incoming is already present`() {
+        val store = AppleMetadataOverrideStore()
+
+        store.mergeLookupIds("1", setOf("1", "2"))
+        store.mergeLookupIds("1", setOf("2"))
+        store.mergeLookupIds("1", setOf("3"))
+        store.mergeArtistKeys("1", setOf("id:9"))
+        store.mergeArtistKeys("1", emptySet())
+        store.mergeArtistKeys("1", setOf("name:a", "id:9"))
+
+        assertEquals(setOf("1", "2", "3"), store.lookupIds("1"))
+        assertEquals(setOf("id:9", "name:a"), store.artistKeys("1"))
+    }
+
     private fun alias(
         title: String,
         artist: String,

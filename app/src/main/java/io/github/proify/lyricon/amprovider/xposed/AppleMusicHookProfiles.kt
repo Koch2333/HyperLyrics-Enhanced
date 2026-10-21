@@ -314,6 +314,7 @@ internal enum class AppleMusicRuntimeMember {
     LYRICS_GRADIENT_MASK_END_CHILD_FIELD,
     LYRICS_GRADIENT_MASK_POSITIONS_FIELD,
     LYRICS_GRADIENT_MASK_FRACTION_FIELD,
+    RECYCLER_ADAPTER_ITEM_COUNT_METHOD,
     QUEUE_ADAPTER_DISPLAYED_ENTRY_METHOD,
     QUEUE_ADAPTER_SUBMITTED_ENTRIES_FIELD,
     QUEUE_ENTRY_ITEM_FIELD,
@@ -501,6 +502,13 @@ internal data class AppleMusicHookProfile(
  * 实际业务结构、现有契约无法唯一识别时，才需要新增或调整人工档案。
  */
 internal object AppleMusicHookProfiles {
+    /**
+     * 1611 起专辑比较器参数为宿主的 `kotlin.Pair(root, tracks)`。该类由 Apple Music 自带的
+     * Kotlin 标准库加载，与模块的 `kotlin.Pair` 不是同一个类，只能按名称反射读取首元素。
+     * 原包 1611 DEX 核对：`Lkotlin/Pair;->getFirst()Ljava/lang/Object;`。
+     */
+    const val HOST_PAIR_FIRST_GETTER = "getFirst"
+
     private val APPLE_MUSIC_6_5_0 = AppleMusicHookProfile(
         id = "am-6.5.0-1580",
         versionName = "6.5.0",
@@ -1967,6 +1975,325 @@ internal object AppleMusicHookProfiles {
         )
     }
 
+    private val APPLE_MUSIC_7_0_0_1611 by lazy {
+        AppleMusicHookProfile(
+            id = "am-7.0.0-beta-1611",
+            versionName = "7.0.0-beta",
+            versionCodes = setOf(1611L),
+            matchVersionName = false,
+            settingsDataCategoryHasNoSimGate = true,
+            hookTargets = verified7001611Targets(),
+        )
+    }
+
+    /**
+     * Original 1611 base.apk SHA-256: 6e961c7c7de4db525d907fa4c6ba5967486fda82ae92ac249817534b93eff3d9.
+     * Descriptors come from the original DEX and are verified by AppleMusicProfileBinaryTest.
+     */
+    private fun verified7001611Targets(): Map<AppleMusicHookPoint, List<AppleMusicHookTarget>> {
+        val inherited = AppleMusicHookPoint.entries.associateWith(APPLE_MUSIC_7_0_0_1609::targets)
+            .filterValues { it.isNotEmpty() }
+        fun target(point: AppleMusicHookPoint, index: Int = 0) = inherited.getValue(point)[index]
+        return inherited + mapOf(
+            // 以下子类原先在首个实例构造时于主线程补装 getter Hook；补装需进入 GC 临界区，
+            // 遇上宿主后台 GC 会阻塞主线程（221036：三次共约 880 ms，掉 195 帧，
+            // PERF-LAZY-HOOK-GC-001）。改为启动时预装；未知版本按类名兼容加载同样预装。
+            // 1611 原始 DEX 核实各类自身声明的 `()Ljava/lang/String;` getter：RadioStation 声明
+            // getArtistName/getCollectionName/getNowPlayingSubtitle/getNowPlayingTitle/getSubTitle；
+            // Playlist 声明 getTitle；PlaylistCollectionItem 声明 getSubTitle；Editor 与
+            // CommonHeaderCollectionItem 声明 getTitle/getSubTitle。所选类为 221011–221036
+            // 日志中实际补装过的子类。
+            AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES to
+                inherited.getValue(AppleMusicHookPoint.CONTENT_ITEM_METADATA_CLASSES) + listOf(
+                    AppleMusicHookTarget("com.apple.android.music.model.RadioStation"),
+                    AppleMusicHookTarget("com.apple.android.music.model.PlaylistCollectionItem"),
+                    AppleMusicHookTarget("com.apple.android.music.model.Playlist"),
+                    AppleMusicHookTarget("com.apple.android.music.model.Editor"),
+                    AppleMusicHookTarget("com.apple.android.music.model.CommonHeaderCollectionItem"),
+                ),
+            AppleMusicHookPoint.ACTIVITY_THEME_CREATE to listOf(
+                target(AppleMusicHookPoint.ACTIVITY_THEME_CREATE).copy(
+                    runtimeMemberNames = target(AppleMusicHookPoint.ACTIVITY_THEME_CREATE).runtimeMemberNames + mapOf(
+                        AppleMusicRuntimeMember.ACTIVITY_THEME_MODE_FIELD to "I0",
+                    ),
+                ),
+            ),
+            AppleMusicHookPoint.THEME_MODE_EMIT to listOf(
+                target(AppleMusicHookPoint.THEME_MODE_EMIT).copy(
+                    className = "com.apple.android.music.E\$a",
+                ),
+            ),
+            AppleMusicHookPoint.EPOXY_FINAL_BIND to listOf(
+                target(AppleMusicHookPoint.EPOXY_FINAL_BIND).copy(
+                    className = "com.airbnb.epoxy.J",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_SOURCE_MENU_CLICK_LISTENER to listOf(
+                target(AppleMusicHookPoint.LYRICS_SOURCE_MENU_CLICK_LISTENER).copy(
+                    className = "com.apple.android.music.player.fragment.b0",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_WORD_RENDER_ADAPTER to listOf(
+                target(AppleMusicHookPoint.LYRICS_WORD_RENDER_ADAPTER).copy(
+                    className = "com.apple.android.music.player.y",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_RECYCLER_ADAPTER to listOf(
+                target(AppleMusicHookPoint.LYRICS_RECYCLER_ADAPTER).copy(
+                    className = "com.apple.android.music.player.y",
+                ),
+                target(AppleMusicHookPoint.LYRICS_RECYCLER_ADAPTER, 1).copy(
+                    className = "com.apple.android.music.player.S0",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_TRANSLATION_PREFERENCE to listOf(
+                target(AppleMusicHookPoint.LYRICS_TRANSLATION_PREFERENCE).copy(
+                    className = "ja.i0",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_PRONUNCIATION_PREFERENCE to listOf(
+                target(AppleMusicHookPoint.LYRICS_PRONUNCIATION_PREFERENCE).copy(
+                    className = "ja.i0",
+                ),
+            ),
+            AppleMusicHookPoint.LYRICS_UI_ON_CREATE_VIEW to listOf(
+                target(AppleMusicHookPoint.LYRICS_UI_ON_CREATE_VIEW).copy(
+                    runtimeMemberNames = target(AppleMusicHookPoint.LYRICS_UI_ON_CREATE_VIEW).runtimeMemberNames + mapOf(
+                        AppleMusicRuntimeMember.LYRICS_UI_BINDING_FIELD to "m0",
+                        AppleMusicRuntimeMember.LYRICS_UI_BINDING_RECYCLER_FIELD to "e0",
+                        AppleMusicRuntimeMember.LYRICS_UI_ADAPTER_FIELD to "o0",
+                        AppleMusicRuntimeMember.LYRICS_UI_VIEW_MODEL_FIELD to "n1",
+                    ),
+                    contract = AllOfContract(
+                        RequireFieldOfType("q8.X4", fieldName = "m0"),
+                        RequireFieldOfType(
+                            "com.apple.android.music.player.viewmodel.PlayerLyricsViewModel",
+                            fieldName = "n1",
+                        ),
+                    ),
+                ),
+            ),
+            AppleMusicHookPoint.PLAYER_LYRICS_AVAILABILITY_CALCULATOR to listOf(
+                target(AppleMusicHookPoint.PLAYER_LYRICS_AVAILABILITY_CALCULATOR).copy(
+                    className = "com.apple.android.music.player.c1",
+                ),
+            ),
+            AppleMusicHookPoint.PLAYER_SONG_BINDING_EXECUTE to listOf(
+                target(AppleMusicHookPoint.PLAYER_SONG_BINDING_EXECUTE).copy(
+                    runtimeMemberNames = target(AppleMusicHookPoint.PLAYER_SONG_BINDING_EXECUTE).runtimeMemberNames + mapOf(
+                        AppleMusicRuntimeMember.PLAYER_SONG_BINDING_PLAYBACK_ITEM_FIELD to "m0",
+                        AppleMusicRuntimeMember.PLAYER_SONG_BINDING_LYRICS_BUTTON_FIELD to "e0",
+                    ),
+                ),
+            ),
+            AppleMusicHookPoint.COMPOSE_TEXT_LAYOUT to listOf(
+                target(AppleMusicHookPoint.COMPOSE_TEXT_LAYOUT).copy(
+                    className = "A1.E",
+                ),
+                target(AppleMusicHookPoint.COMPOSE_TEXT_LAYOUT, 1).copy(
+                    className = "A1.q",
+                ),
+            ),
+            AppleMusicHookPoint.APPLE_TEXT_STYLE_UTILS to listOf(
+                target(AppleMusicHookPoint.APPLE_TEXT_STYLE_UTILS).copy(
+                    className = "com.apple.android.music.utils.f1",
+                ),
+            ),
+            AppleMusicHookPoint.IN_APP_ACTION_SHEET_BINDING to listOf(
+                target(AppleMusicHookPoint.IN_APP_ACTION_SHEET_BINDING).copy(
+                    className = "q8.q7",
+                ),
+            ),
+            AppleMusicHookPoint.IN_APP_GLOBAL_METADATA_DISPATCHER to listOf(
+                target(AppleMusicHookPoint.IN_APP_GLOBAL_METADATA_DISPATCHER).copy(
+                    className = "com.apple.android.music.player.c",
+                ),
+            ),
+            AppleMusicHookPoint.SEARCH_RESULTS_MODEL_BOUND to listOf(
+                target(AppleMusicHookPoint.SEARCH_RESULTS_MODEL_BOUND).copy(
+                    parameterTypeNames = listOf("com.airbnb.epoxy.J", "com.airbnb.epoxy.w", "int", "com.airbnb.epoxy.w"),
+                ),
+            ),
+            // Original 1611 DEX: RecyclerView$f is the host Adapter; its only abstract ()I method
+            // d is getItemCount (alongside abstract k(RecyclerView$D,I)V and
+            // m(ViewGroup,I)RecyclerView$D). androidx.recyclerview.widget.v (ListAdapter, ea.a's
+            // superclass) overrides d()I.
+            AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED to listOf(
+                target(AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED).copy(
+                    runtimeMemberNames = target(AppleMusicHookPoint.RECYCLER_NOTIFY_ITEM_CHANGED).runtimeMemberNames + mapOf(
+                        AppleMusicRuntimeMember.RECYCLER_ADAPTER_ITEM_COUNT_METHOD to "d",
+                    ),
+                ),
+            ),
+            AppleMusicHookPoint.BROWSE_COMPOSE_ITEM to listOf(
+                target(AppleMusicHookPoint.BROWSE_COMPOSE_ITEM).copy(
+                    className = "Yb.e",
+                    parameterTypeNames = listOf("O0.i", "int", "java.util.List", "W8.d", "boolean", "java.lang.String", "pi.q", "pi.p", "boolean", "z0.n", "int"),
+                ),
+                target(AppleMusicHookPoint.BROWSE_COMPOSE_ITEM, 1).copy(
+                    className = "O9.e",
+                    parameterTypeNames = listOf("O0.i", "int", "java.util.List", "W8.d", "boolean", "java.lang.String", "pi.q", "pi.p", "boolean", "z0.n", "int"),
+                ),
+                target(AppleMusicHookPoint.BROWSE_COMPOSE_ITEM, 2).copy(
+                    className = "oa.f",
+                    parameterTypeNames = listOf("O0.i", "int", "java.util.List", "W8.d", "boolean", "java.lang.String", "pi.q", "pi.p", "boolean", "z0.n", "int"),
+                ),
+                target(AppleMusicHookPoint.BROWSE_COMPOSE_ITEM, 3).copy(
+                    className = "oa.n",
+                    parameterTypeNames = listOf("O0.i", "int", "java.util.List", "W8.d", "boolean", "java.lang.String", "pi.q", "pi.p", "boolean", "z0.n", "int"),
+                ),
+                target(AppleMusicHookPoint.BROWSE_COMPOSE_ITEM, 4).copy(
+                    className = "Yb.m",
+                    parameterTypeNames = listOf("O0.i", "int", "java.util.List", "W8.d", "boolean", "java.lang.String", "pi.q", "pi.p", "boolean", "z0.n", "int"),
+                ),
+            ),
+            AppleMusicHookPoint.BROWSE_COMPOSER_SCOPE to listOf(
+                target(AppleMusicHookPoint.BROWSE_COMPOSER_SCOPE).copy(
+                    className = "z0.n",
+                    returnTypeName = "z0.S0",
+                ),
+            ),
+            AppleMusicHookPoint.BROWSE_COMPOSER_USE_SCOPE to listOf(
+                target(AppleMusicHookPoint.BROWSE_COMPOSER_USE_SCOPE).copy(
+                    className = "z0.n",
+                    parameterTypeNames = listOf("z0.Q0"),
+                ),
+            ),
+            AppleMusicHookPoint.BROWSE_SCOPE_INVALIDATE to listOf(
+                target(AppleMusicHookPoint.BROWSE_SCOPE_INVALIDATE).copy(
+                    className = "z0.S0",
+                ),
+            ),
+            AppleMusicHookPoint.APPLE_SHARED_PREFERENCES_CLASS to listOf(
+                target(AppleMusicHookPoint.APPLE_SHARED_PREFERENCES_CLASS).copy(
+                    className = "ja.i0",
+                ),
+            ),
+            AppleMusicHookPoint.APPLE_PLAYER_UTIL_CLASS to listOf(
+                target(AppleMusicHookPoint.APPLE_PLAYER_UTIL_CLASS).copy(
+                    className = "com.apple.android.music.player.N",
+                ),
+            ),
+            AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR to listOf(
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR),
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR, 1),
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR, 2).copy(
+                    className = "G5.p",
+                    methodName = "b",
+                ),
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR, 3).copy(
+                    className = "G5.p",
+                    methodName = "a",
+                ),
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR, 4).copy(
+                    className = "E1.T",
+                    methodName = "e",
+                ),
+                target(AppleMusicHookPoint.MEDIA_API_CATALOG_REQUEST_EXECUTOR, 5).copy(
+                    className = "E1.T",
+                    methodName = "f",
+                ),
+            ),
+            AppleMusicHookPoint.COMPOSE_NEVER_EQUAL_POLICY to listOf(
+                target(AppleMusicHookPoint.COMPOSE_NEVER_EQUAL_POLICY).copy(
+                    className = "z0.v0",
+                ),
+            ),
+            AppleMusicHookPoint.LIBRARY_EPOXY_BUILD to listOf(
+                target(AppleMusicHookPoint.LIBRARY_EPOXY_BUILD).copy(
+                    parameterTypeNames = listOf("com.apple.android.music.library2.J", "java.util.List", "java.util.List", "com.apple.android.music.library2.a", "Q7.e"),
+                ),
+            ),
+            AppleMusicHookPoint.LIBRARY_COMPOSE_CONTENT to listOf(
+                target(AppleMusicHookPoint.LIBRARY_COMPOSE_CONTENT).copy(
+                    methodName = "w1",
+                    parameterTypeNames = listOf("z0.n", "int"),
+                ),
+            ),
+            AppleMusicHookPoint.COMPOSE_OBSERVE_AS_STATE to listOf(
+                target(AppleMusicHookPoint.COMPOSE_OBSERVE_AS_STATE).copy(
+                    className = "I0.d",
+                    methodName = "h",
+                    returnTypeName = "z0.s0",
+                    parameterTypeNames = listOf("androidx.lifecycle.H", "z0.n"),
+                ),
+            ),
+            AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES to listOf(
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 1),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 2),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 3),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 4).copy(
+                    className = "com.apple.android.music.q",
+                ),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 5),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 6),
+                target(AppleMusicHookPoint.COLLECTION_SURFACE_CLASSES, 7),
+            ),
+            AppleMusicHookPoint.ARTIST_SURFACE_CLASSES to listOf(
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES),
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES, 1),
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES, 2),
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES, 3),
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES, 4).copy(
+                    className = "com.apple.android.music.v1",
+                ),
+                target(AppleMusicHookPoint.ARTIST_SURFACE_CLASSES, 5).copy(
+                    className = "com.apple.android.music.j0",
+                ),
+            ),
+            AppleMusicHookPoint.ALBUM_COMPOSE_CONTENT to listOf(
+                target(AppleMusicHookPoint.ALBUM_COMPOSE_CONTENT).copy(
+                    methodName = "PageContent",
+                    parameterTypeNames = listOf("z0.n", "int"),
+                ),
+            ),
+            AppleMusicHookPoint.ALBUM_COMPOSE_VIEW_MODEL_GETTER to listOf(
+                target(AppleMusicHookPoint.ALBUM_COMPOSE_VIEW_MODEL_GETTER).copy(
+                    methodName = "y1",
+                ),
+            ),
+            AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR to listOf(
+                target(AppleMusicHookPoint.ALBUM_COMPOSE_TRACK_COMPARATOR).copy(
+                    methodName = "trackDisplayItems_delegate\$lambda\$14\$lambda\$11",
+                    parameterTypeNames = listOf("kotlin.Pair", "kotlin.Pair"),
+                ),
+            ),
+            AppleMusicHookPoint.ALBUM_COMPOSE_ROW to listOf(
+                target(AppleMusicHookPoint.ALBUM_COMPOSE_ROW).copy(
+                    className = "y7.m",
+                    parameterTypeNames = listOf("O0.i", "D7.h", "D7.u", "Rb.I5", "Vb.s", "Rb.H5", "Rb.J5", "int", "boolean", "D7.q", "D7.r", "pi.l", "pi.p", "pi.p", "z0.n", "int"),
+                ),
+            ),
+            AppleMusicHookPoint.ARTIST_COMPOSE_CONTENT to listOf(
+                target(AppleMusicHookPoint.ARTIST_COMPOSE_CONTENT).copy(
+                    methodName = "PageContent",
+                    parameterTypeNames = listOf("z0.n", "int"),
+                ),
+            ),
+            AppleMusicHookPoint.ARTIST_COMPOSE_VIEW_MODEL_GETTER to listOf(
+                target(AppleMusicHookPoint.ARTIST_COMPOSE_VIEW_MODEL_GETTER).copy(
+                    methodName = "y1",
+                ),
+            ),
+            AppleMusicHookPoint.ARTIST_COMPOSE_FRAGMENT_RESUMED to listOf(
+                target(AppleMusicHookPoint.ARTIST_COMPOSE_FRAGMENT_RESUMED).copy(
+                    className = "androidx.fragment.app.l",
+                ),
+            ),
+            AppleMusicHookPoint.LISTEN_NOW_MODEL_BUILDER to listOf(
+                target(AppleMusicHookPoint.LISTEN_NOW_MODEL_BUILDER).copy(
+                    methodName = "buildStandardSwoosh\$lambda\$44",
+                ),
+            ),
+            AppleMusicHookPoint.LISTEN_NOW_MODEL to listOf(
+                target(AppleMusicHookPoint.LISTEN_NOW_MODEL).copy(
+                    className = "com.apple.android.music.z1",
+                ),
+            ),
+        )
+    }
+
     /** Verified against all four original 1606 DEX files, SHA-256 recorded in docs. */
     private fun verified700Targets(): Map<AppleMusicHookPoint, List<AppleMusicHookTarget>> {
         val inherited = AppleMusicHookPoint.entries.associateWith(APPLE_MUSIC_6_5_3::targets)
@@ -2734,6 +3061,7 @@ internal object AppleMusicHookProfiles {
 
     /** 新版本档案必须放在前面，未知版本回退时优先尝试较新的目标。 */
     private val KNOWN_PROFILES = listOf(
+        APPLE_MUSIC_7_0_0_1611,
         APPLE_MUSIC_7_0_0_1609,
         APPLE_MUSIC_7_0_0_1607,
         APPLE_MUSIC_7_0_0,
@@ -3938,18 +4266,23 @@ internal object AppleMusicHookProfiles {
         // Preserve the OLD compatibility pool within 6.5.0-6.5.2 (650 intentionally
         // borrows some 651 groups). Unknown APKs still try newest-first.
         val compatible = when (known) {
-            null, APPLE_MUSIC_7_0_0_1609 -> KNOWN_PROFILES
-            APPLE_MUSIC_7_0_0_1607 -> KNOWN_PROFILES.filterNot { it === APPLE_MUSIC_7_0_0_1609 }
+            null, APPLE_MUSIC_7_0_0_1611 -> KNOWN_PROFILES
+            APPLE_MUSIC_7_0_0_1609 -> KNOWN_PROFILES.filterNot { it === APPLE_MUSIC_7_0_0_1611 }
+            APPLE_MUSIC_7_0_0_1607 -> KNOWN_PROFILES.filterNot {
+                it === APPLE_MUSIC_7_0_0_1609 || it === APPLE_MUSIC_7_0_0_1611
+            }
             APPLE_MUSIC_7_0_0 -> KNOWN_PROFILES.filterNot {
-                it === APPLE_MUSIC_7_0_0_1607 || it === APPLE_MUSIC_7_0_0_1609
+                it === APPLE_MUSIC_7_0_0_1607 || it === APPLE_MUSIC_7_0_0_1609 ||
+                    it === APPLE_MUSIC_7_0_0_1611
             }
             APPLE_MUSIC_6_5_3 -> KNOWN_PROFILES.filterNot {
                 it === APPLE_MUSIC_7_0_0 || it === APPLE_MUSIC_7_0_0_1607 ||
-                    it === APPLE_MUSIC_7_0_0_1609
+                    it === APPLE_MUSIC_7_0_0_1609 || it === APPLE_MUSIC_7_0_0_1611
             }
             else -> KNOWN_PROFILES.filterNot {
                 it === APPLE_MUSIC_6_5_3 || it === APPLE_MUSIC_7_0_0 ||
-                    it === APPLE_MUSIC_7_0_0_1607 || it === APPLE_MUSIC_7_0_0_1609
+                    it === APPLE_MUSIC_7_0_0_1607 || it === APPLE_MUSIC_7_0_0_1609 ||
+                    it === APPLE_MUSIC_7_0_0_1611
             }
         }
         return (exact + compatible.flatMap { profile -> profile.targets(hookPoint) })
@@ -4005,9 +4338,14 @@ internal data class ResolvedAppleMusicHookMethod(
 /** 统一负责按 Apple Music 版本加载并校验混淆 Hook 目标。 */
 internal class AppleMusicHookResolver(
     val version: AppleMusicVersion,
-    private val classLookup: (String) -> Class<*>,
+    classLookup: (String) -> Class<*>,
     private val dexKitResolver: AppleMusicDexKitResolver? = null,
 ) {
+    // 初始化器里的 classLookup 指构造参数；类体其余位置使用这个计时包装后的属性。
+    private val classLookup: (String) -> Class<*> = { name ->
+        AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.CLASS_LOOKUP) { classLookup(name) }
+    }
+
     constructor(version: AppleMusicVersion, classLoader: ClassLoader) : this(
         version = version,
         classLookup = classLoader::loadClass,
@@ -4028,6 +4366,20 @@ internal class AppleMusicHookResolver(
     )
 
     val profile: AppleMusicHookProfile? = AppleMusicHookProfiles.profileFor(version)
+
+    /**
+     * 类解析结果缓存：运行期回调（Epoxy 绑定、控制器判断等）反复解析同一 Hook 点，
+     * 每次都会重做类加载、契约校验与基线记录。拒绝 DexKit 结果时整体失效。
+     */
+    private val resolvedClassesCache =
+        java.util.concurrent.ConcurrentHashMap<AppleMusicHookPoint, List<ResolvedAppleMusicHookClass>>()
+    private val resolvedClassCache =
+        java.util.concurrent.ConcurrentHashMap<AppleMusicHookPoint, ResolvedAppleMusicHookClass>()
+
+    private fun invalidateResolvedClasses() {
+        resolvedClassesCache.clear()
+        resolvedClassCache.clear()
+    }
 
     @Volatile
     var lyricsPreferenceBindings: AppleLyricsPreferenceBindings? = null
@@ -4073,6 +4425,13 @@ internal class AppleMusicHookResolver(
      * 避免在已知版本里同时 Hook 旧版本碰巧仍存在、但语义已经变化的类。
      */
     fun resolveClasses(hookPoint: AppleMusicHookPoint): List<ResolvedAppleMusicHookClass> {
+        resolvedClassesCache[hookPoint]?.let { return it }
+        return resolveClassesUncached(hookPoint).also { resolved ->
+            if (resolved.isNotEmpty()) resolvedClassesCache[hookPoint] = resolved
+        }
+    }
+
+    private fun resolveClassesUncached(hookPoint: AppleMusicHookPoint): List<ResolvedAppleMusicHookClass> {
         val exactTargets = AppleMusicHookProfiles.exactTargets(version, hookPoint)
         val exactClasses = exactTargets.mapNotNull { target ->
             loadClass(hookPoint, target, compatibilityFallback = false)
@@ -4134,7 +4493,11 @@ internal class AppleMusicHookResolver(
     }
 
     /** 解析单个类；精确档案缺失时才尝试已知版本候选。通过语义契约校验才允许返回。 */
-    fun resolveClass(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass {
+    fun resolveClass(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass =
+        resolvedClassCache[hookPoint]
+            ?: resolveClassUncached(hookPoint).also { resolvedClassCache[hookPoint] = it }
+
+    private fun resolveClassUncached(hookPoint: AppleMusicHookPoint): ResolvedAppleMusicHookClass {
         val exactTargets = AppleMusicHookProfiles.exactTargets(version, hookPoint).toSet()
         val failures = mutableListOf<String>()
         AppleMusicHookProfiles.candidates(version, hookPoint).forEach { target ->
@@ -4202,12 +4565,16 @@ internal class AppleMusicHookResolver(
                     failures += "${target.className}:class:${throwable.javaClass.simpleName}"
                     return@forEach
                 }
-            val matchingMethods = allDeclaredMethods(
-                clazz = clazz,
-                includeSynthetic = target.includeSynthetic,
-            )
-                .filter { method -> methodMatches(hookPoint, target, method) }
-                .toList()
+            val matchingMethods = AppleStartupResolveCost.time(
+                AppleStartupResolveCost.Kind.METHOD_SCAN,
+            ) {
+                allDeclaredMethods(
+                    clazz = clazz,
+                    includeSynthetic = target.includeSynthetic,
+                )
+                    .filter { method -> methodMatches(hookPoint, target, method) }
+                    .toList()
+            }
             if (matchingMethods.size == 1 || target.allowFirstMatch && matchingMethods.isNotEmpty()) {
                 val method = matchingMethods.first().apply { isAccessible = true }
                 val contractResult = AppleMusicHookContracts.validate(
@@ -4318,7 +4685,7 @@ internal class AppleMusicHookResolver(
                     templateClassName = resolved.baselineClassName,
                     method = resolved.method,
                     reason = reason,
-                )
+                ).also { invalidateResolvedClasses() }
             },
             retry = {
                 resolveDexKitMethod(hookPoint)?.method
@@ -4340,6 +4707,7 @@ internal class AppleMusicHookResolver(
             actualClassName = resolved.clazz.name,
             reason = reason,
         )
+        invalidateResolvedClasses()
         return true
     }
 
@@ -4639,10 +5007,34 @@ internal class AppleMusicHookResolver(
         }
     }
 
+    /**
+     * 冷启动时同一个类会被多个 Hook 点反复扫描（221031：124 次扫描合计 52 ms，`declaredMethods`
+     * 每次都为整条继承链新建 Method 对象）。启动期间按类缓存去重后的结果，
+     * [releaseStartupCaches] 后恢复为每次现扫，不长期持有这些对象。
+     */
+    @Volatile
+    private var declaredMethodsCache: java.util.concurrent.ConcurrentHashMap<Pair<Class<*>, Boolean>, List<Method>>? =
+        java.util.concurrent.ConcurrentHashMap()
+
+    fun releaseStartupCaches() {
+        declaredMethodsCache = null
+    }
+
     private fun allDeclaredMethods(
         clazz: Class<*>,
         includeSynthetic: Boolean,
-    ): Sequence<Method> =
+    ): Sequence<Method> {
+        val cache = declaredMethodsCache
+            ?: return scanDeclaredMethods(clazz, includeSynthetic).asSequence()
+        return cache.computeIfAbsent(clazz to includeSynthetic) {
+            scanDeclaredMethods(clazz, includeSynthetic)
+        }.asSequence()
+    }
+
+    private fun scanDeclaredMethods(
+        clazz: Class<*>,
+        includeSynthetic: Boolean,
+    ): List<Method> =
         generateSequence(clazz) { current -> current.superclass }
             .flatMap { current -> current.declaredMethods.asSequence() }
             .filter { method ->
@@ -4651,4 +5043,5 @@ internal class AppleMusicHookResolver(
             .distinctBy { method ->
                 method.name to method.parameterTypes.joinToString(separator = ",") { it.name }
             }
+            .toList()
 }

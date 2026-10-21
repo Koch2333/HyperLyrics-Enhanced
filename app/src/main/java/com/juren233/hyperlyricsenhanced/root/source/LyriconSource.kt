@@ -35,6 +35,9 @@ import com.juren233.hyperlyricsenhanced.online.source.lunabeat.LunaBeatTtmlRepos
 import com.juren233.hyperlyricsenhanced.online.utils.ChineseUtils
 import com.juren233.hyperlyricsenhanced.root.LyriconDataBridge
 import com.juren233.hyperlyricsenhanced.root.island.renderer.BaseIslandRenderer
+import com.juren233.hyperlyricsenhanced.root.utils.RuntimeCallbackDispatcher
+import com.juren233.hyperlyricsenhanced.root.utils.RuntimeResourceCleanup
+import com.juren233.hyperlyricsenhanced.root.utils.RuntimeResourceCleanupException
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import com.juren233.hyperlyricsenhanced.root.utils.MediaCardDiagnosticLogger
 import com.juren233.hyperlyricsenhanced.timeline.model.TrackIdentity
@@ -95,6 +98,20 @@ class LyriconSource : LyricSource {
     @Volatile
     internal var subscriber: LyriconSubscriber? = null
 
+    internal var centralSubscriptionEnabled = true
+        private set
+
+    internal fun configureCentralSubscription(enabled: Boolean) {
+        check(subscriber == null && directBridge == null) { "Stop the lyric source before changing its connection mode" }
+        centralSubscriptionEnabled = enabled
+    }
+
+    @Volatile
+    private var centralCallbackGeneration = 0L
+
+    private val acceptsCentralCallbacks: Boolean
+        get() = centralSubscriptionEnabled && subscriber != null && sink != null
+
     internal var activeProviderPackageName: String? = null
     @Volatile
     internal var activeCentralPlayerPackageName: String? = null
@@ -103,6 +120,7 @@ class LyriconSource : LyricSource {
     internal var onCentralConnected: (() -> Unit)? = null
     internal var onCentralConnectTimeout: (() -> Unit)? = null
     internal var directBridge: AppleMusicDirectBridge? = null
+    private var cleanupFailure: RuntimeResourceCleanupException? = null
     internal val loggedPlayerVersionSnapshots = ConcurrentHashMap.newKeySet<String>()
     internal val mainHandler = Handler(Looper.getMainLooper())
     internal val fallbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -120,6 +138,7 @@ class LyriconSource : LyricSource {
     internal val onlineMatchedTranslationActive get() = publication.onlineMatchedTranslationActive
     internal val confirmedLyricsSourceSelection get() = publication.confirmedLyricsSourceSelection
     internal val onlineTranslationRequest = OnlineTranslationRequest<PendingOnlineTranslationCommit>()
+    internal val onlineTranslationPreparation = OnlineTranslationPreparationQueue()
     internal val onlineTranslationGeneration get() = onlineTranslationRequest.snapshot().generation
     internal val onlineTranslationAttemptKey get() = onlineTranslationRequest.snapshot().attempt
     internal val onlineTranslationRunning get() = onlineTranslationRequest.snapshot().running
@@ -186,12 +205,13 @@ class LyriconSource : LyricSource {
     override fun isAvailable(): Boolean = true
 
     override fun start(sink: LyricSink) {
+        cleanupFailure?.let { throw it }
         diagnostic(
             "stage=source_start_requested, appPresent=${app != null}, " +
                 "prefsPresent=${prefs != null}, subscriberPresent=${subscriber != null}, " +
                 "directBridgePresent=${directBridge != null}",
         )
-        if (this.subscriber != null) {
+        if (this.subscriber != null || directBridge != null) {
             HookLogger.d(TAG, "跳过重复启动: reason=already_running")
             diagnostic(
                 "stage=source_start_skipped, reason=already_running, " +
@@ -199,16 +219,27 @@ class LyriconSource : LyricSource {
             )
             return
         }
+        centralCallbackGeneration++
+        activePlayerListener = createActivePlayerListener(centralCallbackGeneration)
         this.sink = sink
-        val application = app ?: run {
-            HookLogger.w(TAG, "数据源启动延后: reason=application_unavailable")
-            return
-        }
+        val application = checkNotNull(app) { "Lyric source application is unavailable" }
         registerLocalMediaSessionTracker()
         diagnostic("stage=direct_bridge_starting")
-        directBridge = AppleMusicDirectBridge(application, this).also { it.start() }
+        directBridge = AppleMusicDirectBridge(application, this)
+        directBridge?.start()
         diagnostic("stage=direct_bridge_started")
-        initializeSubscriber(application)
+        if (centralSubscriptionEnabled) {
+            try {
+                initializeSubscriber(application)
+            } catch (failure: Throwable) {
+                diagnostic(
+                    "stage=subscriber_initialize_failed, error=${failure.javaClass.name}:${failure.message}",
+                )
+                throw failure
+            }
+        } else {
+            diagnostic("stage=subscriber_skipped, reason=apple_direct_only")
+        }
         startAppleMediaMonitor()
         HookLogger.i(TAG, "数据源已启动")
         diagnostic(
@@ -218,35 +249,40 @@ class LyriconSource : LyricSource {
     }
 
     override fun stop() {
-        stopAppleMediaMonitor()
-        unregisterLocalMediaSessionTracker()
-        cancelFallback(clearAppleSong = true, reason = "source_stopped")
-        cancelThirdPartyFallback(reason = "source_stopped")
-        cancelOnlineTranslation(
-            clearAttempt = true,
-            clearMatched = true,
-            reason = "source_stopped"
-        )
-        try {
-            directBridge?.stop()
-            directBridge = null
-            subscriber?.unsubscribeActivePlayer(activePlayerListener)
-            subscriber?.unregister()
-            subscriber?.destroy()
-        } catch (e: Exception) {
-            HookLogger.e(TAG, "清理歌词订阅连接失败", e)
-        } finally {
-            centralAppleProviderActive = false
-            centralAppleSongAvailable = false
-            activeCentralPlayerPackageName = null
-            activeProviderPackageName = null
-            publication.reset()
-            applePositionState.clearReferences()
-            subscriber = null
-            centralPlaybackPositionWitness.reset()
-            sink?.onStop()
-            sink = null
+        // Revoke callback ownership before invoking any external cleanup code.
+        centralCallbackGeneration++
+        val previousSubscriber = subscriber
+        val previousBridge = directBridge
+        val previousSink = sink
+        subscriber = null
+        directBridge = null
+        sink = null
+        val cleanup = RuntimeResourceCleanup()
+        cleanup.attempt("previous source cleanup") { cleanupFailure?.let { throw it } }
+        cleanup.attempt("Apple media monitor") { stopAppleMediaMonitor() }
+        cleanup.attempt("local media-session tracker") { unregisterLocalMediaSessionTracker() }
+        cleanup.attempt("Apple fallback") { cancelFallback(clearAppleSong = true, reason = "source_stopped") }
+        cleanup.attempt("third-party fallback") { cancelThirdPartyFallback(reason = "source_stopped") }
+        cleanup.attempt("online translation") {
+            cancelOnlineTranslation(clearAttempt = true, clearMatched = true, reason = "source_stopped")
         }
+        cleanup.attempt("Apple direct bridge") { previousBridge?.stop() }
+        cleanup.attempt("active player subscription") {
+            previousSubscriber?.unsubscribeActivePlayer(activePlayerListener)
+        }
+        cleanup.attempt("subscriber registration") { previousSubscriber?.unregister() }
+        cleanup.attempt("subscriber instance") { previousSubscriber?.destroy() }
+        centralAppleProviderActive = false
+        centralAppleSongAvailable = false
+        activeCentralPlayerPackageName = null
+        activeProviderPackageName = null
+        cleanup.attempt("publication") { publication.reset() }
+        cleanup.attempt("Apple position state") { applePositionState.clearReferences() }
+        cleanup.attempt("media-session gate") { activeMediaSessionGate.updateLocal(null) }
+        cleanup.attempt("central position witness") { centralPlaybackPositionWitness.reset() }
+        cleanup.attempt("source sink") { previousSink?.onStop() }
+        cleanupFailure = cleanup.failureOrNull()
+        cleanupFailure?.let { throw it }
         HookLogger.i(TAG, "数据源已停止")
     }
 
@@ -432,7 +468,8 @@ class LyriconSource : LyricSource {
             sink?.onStop()
             return
         }
-        sink?.onTimelineContent(
+        val targetSink = sink
+        targetSink?.onTimelineContent(
             TimelineContent(
                 sourceId = id,
                 track = timelineTrack(song),
@@ -440,8 +477,8 @@ class LyriconSource : LyricSource {
                 onlineTranslationMatched = onlineTranslationMatched,
             )
         )
-        if (BuildConfig.DEBUG) AppleMetadataFlowDiagnostics.record("bridge_publish_complete") {
-            "restoreRequested=$restorePosition " +
+        if (BuildConfig.DEBUG) AppleMetadataFlowDiagnostics.record("bridge_publish_submitted") {
+            "sinkPresent=${targetSink != null} restoreRequested=$restorePosition " +
                 "requested=${AppleMetadataFlowDiagnostics.local(song)} " +
                 "submitted=${AppleMetadataFlowDiagnostics.local(song)}"
         }
@@ -582,8 +619,32 @@ class LyriconSource : LyricSource {
     }
 
 
+private val centralCallbackDispatcher = RuntimeCallbackDispatcher(
+    isOnOwnerThread = { Looper.myLooper() == mainHandler.looper },
+    post = { mainHandler.post(it); Unit },
+)
+
+private fun dispatchCentralCallback(
+    generation: Long,
+    peer: LyriconSubscriber? = null,
+    action: () -> Unit,
+) {
+    centralCallbackDispatcher.dispatch(
+        isCurrent = {
+            acceptsCentralCallbacks && centralCallbackGeneration == generation &&
+                (peer == null || subscriber === peer)
+        },
+        action = {
+            runCatching(action).onFailure { error ->
+                // A malformed callback must not escape onto SystemUI's main Looper or log lyrics.
+                HookLogger.e(TAG, "Central 回调处理失败: error=${error.javaClass.name}")
+            }
+        },
+    )
+}
+
 internal val connectionListener = object : ConnectionListener {
-    override fun onConnected(subscriber: LyriconSubscriber) {
+    override fun onConnected(subscriber: LyriconSubscriber) = dispatchCentralCallback(centralCallbackGeneration, subscriber) {
         MediaCardDiagnosticLogger.log(
             stage = "subscriber",
             event = "connected",
@@ -591,10 +652,14 @@ internal val connectionListener = object : ConnectionListener {
         )
         HookLogger.i(TAG, "订阅连接已建立")
         diagnostic("stage=subscriber_connected")
-        mainHandler.post { onCentralConnected?.invoke() }
+        mainHandler.post {
+            if (acceptsCentralCallbacks && this@LyriconSource.subscriber === subscriber) {
+                onCentralConnected?.invoke()
+            }
+        }
     }
 
-    override fun onReconnected(subscriber: LyriconSubscriber) {
+    override fun onReconnected(subscriber: LyriconSubscriber) = dispatchCentralCallback(centralCallbackGeneration, subscriber) {
         MediaCardDiagnosticLogger.log(
             stage = "subscriber",
             event = "reconnected",
@@ -602,10 +667,14 @@ internal val connectionListener = object : ConnectionListener {
         )
         HookLogger.i(TAG, "订阅连接已恢复")
         diagnostic("stage=subscriber_reconnected")
-        mainHandler.post { onCentralConnected?.invoke() }
+        mainHandler.post {
+            if (acceptsCentralCallbacks && this@LyriconSource.subscriber === subscriber) {
+                onCentralConnected?.invoke()
+            }
+        }
     }
 
-    override fun onDisconnected(subscriber: LyriconSubscriber) {
+    override fun onDisconnected(subscriber: LyriconSubscriber) = dispatchCentralCallback(centralCallbackGeneration, subscriber) {
         MediaCardDiagnosticLogger.log(
             stage = "subscriber",
             event = "disconnected",
@@ -620,7 +689,7 @@ internal val connectionListener = object : ConnectionListener {
         diagnostic("stage=subscriber_disconnected")
     }
 
-    override fun onConnectTimeout(subscriber: LyriconSubscriber) {
+    override fun onConnectTimeout(subscriber: LyriconSubscriber) = dispatchCentralCallback(centralCallbackGeneration, subscriber) {
         MediaCardDiagnosticLogger.log(
             stage = "subscriber",
             event = "connect_timeout",
@@ -634,6 +703,7 @@ internal val connectionListener = object : ConnectionListener {
         HookLogger.w(TAG, "订阅连接超时")
         diagnostic("stage=subscriber_connect_timeout")
         mainHandler.post {
+            if (!acceptsCentralCallbacks || this@LyriconSource.subscriber !== subscriber) return@post
             onCentralConnectTimeout?.invoke()
             diagnostic("stage=subscriber_retry_requested")
             subscriber.register()
@@ -641,8 +711,11 @@ internal val connectionListener = object : ConnectionListener {
         }
     }
 }
-internal val activePlayerListener = object : ActivePlayerListener {
-    override fun onActiveProviderChanged(providerInfo: ProviderInfo?) {
+internal var activePlayerListener: ActivePlayerListener = createActivePlayerListener(centralCallbackGeneration)
+    private set
+
+private fun createActivePlayerListener(generation: Long): ActivePlayerListener = object : ActivePlayerListener {
+    override fun onActiveProviderChanged(providerInfo: ProviderInfo?) = dispatchCentralCallback(generation) {
         val playerPackageName = providerInfo?.playerPackageName
         MediaCardDiagnosticLogger.log(
             stage = "central",
@@ -674,7 +747,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 reason = "empty_player_preserved_direct_song",
                 details = "directTitle=${MediaCardDiagnosticLogger.sanitize(currentAppleSong?.name)}",
             )
-            return
+            return@dispatchCentralCallback
         }
 
         val preserveDirectAppleSong =
@@ -721,7 +794,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
     }
 
 
-    override fun onSongChanged(song: LyriconSong?) {
+    override fun onSongChanged(song: LyriconSong?) = dispatchCentralCallback(generation) {
         val localSong = song?.toLocalSong()
         if (BuildConfig.DEBUG) AppleMetadataFlowDiagnostics.record("central_received") {
             "player=$activeCentralPlayerPackageName provider=$activeProviderPackageName " +
@@ -753,7 +826,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 reason = "no_active_media_session",
                 details = "incomingId=${MediaCardDiagnosticLogger.sanitize(localSong?.id)},incomingTitle=${MediaCardDiagnosticLogger.sanitize(localSong?.name)}",
             )
-            return
+            return@dispatchCentralCallback
         }
         if (centralAppleProviderActive) {
             centralAppleSongAvailable = !localSong?.lyrics.isNullOrEmpty()
@@ -765,7 +838,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                     "忽略无活动提供者的 Central 歌曲回调: " +
                         "title=${localSong?.name}, directTitle=${currentAppleSong?.name}"
                 )
-                return
+                return@dispatchCentralCallback
             }
             cancelFallback(clearAppleSong = true, reason = "central_non_apple_song")
             cancelOnlineTranslation(
@@ -782,7 +855,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
         )
     }
 
-    override fun onPlaybackStateChanged(isPlaying: Boolean) {
+    override fun onPlaybackStateChanged(isPlaying: Boolean) = dispatchCentralCallback(generation) {
         val blocked = isCentralPlayerBlockedByMediaSession()
         MediaCardDiagnosticLogger.log(
             stage = "central",
@@ -799,7 +872,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 reason = "no_active_media_session",
                 details = "isPlaying=$isPlaying",
             )
-            return
+            return@dispatchCentralCallback
         }
         val shouldForward = shouldForwardCentralPlaybackState(
             hasActiveCentralPlayer = hasActiveCentralPlayer(),
@@ -813,7 +886,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 reason = "forward_policy_rejected",
                 details = "isPlaying=$isPlaying,activePlayer=${MediaCardDiagnosticLogger.sanitize(activeCentralPlayerPackageName)},apple=$centralAppleProviderActive,fallback=$fallbackSongActive",
             )
-            return
+            return@dispatchCentralCallback
         }
         centralPlaybackPositionWitness.onSinkPlaybackState(isPlaying)
         MediaCardDiagnosticLogger.log(
@@ -823,7 +896,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
         )
     }
 
-    override fun onPositionChanged(position: Long) {
+    override fun onPositionChanged(position: Long) = dispatchCentralCallback(generation) {
         if (!hasActiveCentralPlayer()) {
             logCentralPositionDiagnostic(position, null, "dropped_no_active_player")
             MediaCardDiagnosticLogger.log(
@@ -833,7 +906,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 details = "rawPosition=$position",
                 positionSample = true,
             )
-            return
+            return@dispatchCentralCallback
         }
         val blocked = isCentralPlayerBlockedByMediaSession()
         if (blocked) {
@@ -845,7 +918,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 details = "rawPosition=$position,activePlayer=${MediaCardDiagnosticLogger.sanitize(activeCentralPlayerPackageName)}",
                 positionSample = true,
             )
-            return
+            return@dispatchCentralCallback
         }
         if (isBuiltInAppleCentralProviderActive() && !fallbackSongActive) {
             val currentSink = sink
@@ -881,7 +954,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 details = "rawPosition=$position",
                 positionSample = true,
             )
-            return
+            return@dispatchCentralCallback
         }
         val adjustedPosition = (position - activeProviderDelayMs).coerceAtLeast(0L)
         if (centralAppleProviderActive) {
@@ -903,7 +976,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                     details = "rawPosition=$position,adjustedPosition=$adjustedPosition",
                     positionSample = true,
                 )
-                return
+                return@dispatchCentralCallback
             }
             maybeCommitPendingOnlineTranslation(resolvedPosition)
             sink?.onPositionChanged(resolvedPosition)
@@ -914,7 +987,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 details = "rawPosition=$position,forwardedPosition=$resolvedPosition,apple=true,sink=${sink != null}",
                 positionSample = true,
             )
-            return
+            return@dispatchCentralCallback
         }
         maybeCommitPendingOnlineTranslation(adjustedPosition)
         sink?.onPositionChanged(adjustedPosition)
@@ -928,7 +1001,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
     }
 
 
-    override fun onSeekTo(position: Long) {
+    override fun onSeekTo(position: Long) = dispatchCentralCallback(generation) {
         val blocked = isCentralPlayerBlockedByMediaSession()
         MediaCardDiagnosticLogger.log(
             stage = "central",
@@ -936,9 +1009,9 @@ internal val activePlayerListener = object : ActivePlayerListener {
             details = "rawPosition=$position,activePlayer=${MediaCardDiagnosticLogger.sanitize(activeCentralPlayerPackageName)},blocked=$blocked,apple=$centralAppleProviderActive,sink=${sink != null}",
             positionSample = true,
         )
-        if (!hasActiveCentralPlayer()) return
-        if (blocked) return
-        if (centralAppleProviderActive && fallbackSongActive) return
+        if (!hasActiveCentralPlayer()) return@dispatchCentralCallback
+        if (blocked) return@dispatchCentralCallback
+        if (centralAppleProviderActive && fallbackSongActive) return@dispatchCentralCallback
         val adjustedPosition = (position - activeProviderDelayMs).coerceAtLeast(0L)
         if (centralAppleProviderActive) {
             val resolution = resolveApplePosition(adjustedPosition, explicitSeek = true)
@@ -958,7 +1031,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                     details = "rawPosition=$position,adjustedPosition=$adjustedPosition",
                     positionSample = true,
                 )
-                return
+                return@dispatchCentralCallback
             }
             maybeCommitPendingOnlineTranslation(resolvedPosition)
             sink?.onSeekTo(resolvedPosition)
@@ -968,7 +1041,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
                 details = "rawPosition=$position,forwardedPosition=$resolvedPosition,apple=true,sink=${sink != null}",
                 positionSample = true,
             )
-            return
+            return@dispatchCentralCallback
         }
         maybeCommitPendingOnlineTranslation(adjustedPosition)
         sink?.onSeekTo(adjustedPosition)
@@ -980,7 +1053,7 @@ internal val activePlayerListener = object : ActivePlayerListener {
         )
     }
 
-    override fun onReceiveText(text: String?) {
+    override fun onReceiveText(text: String?) = dispatchCentralCallback(generation) {
         val controlFrame = OfficialProviderSubscriberControlFrame.inspect(text)
         if (controlFrame.consumed) {
             val providerPackage = activeProviderPackageName
@@ -1005,10 +1078,10 @@ internal val activePlayerListener = object : ActivePlayerListener {
                         "provider=$providerPackage, player=$playerPackage",
                 )
             }
-            return
+            return@dispatchCentralCallback
         }
-        if (!hasActiveCentralPlayer()) return
-        if (centralAppleProviderActive && fallbackSongActive) return
+        if (!hasActiveCentralPlayer()) return@dispatchCentralCallback
+        if (centralAppleProviderActive && fallbackSongActive) return@dispatchCentralCallback
         diagnostic("忽略来源侧纯文本帧；统一时间轴只接受完整 Song")
     }
 

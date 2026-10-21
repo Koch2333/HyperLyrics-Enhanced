@@ -70,6 +70,7 @@ class AppleExactProfileMemberPrecedenceTest {
 
         fun assertVerified(target: AppleMusicHookTarget) {
             assertEquals("v", target.runtimeMemberName(member))
+            dex.awaitPendingBaselines()
             assertEquals("v", dex.decodeMemberDescriptor(values[key])!!.name)
         }
     }
@@ -101,6 +102,7 @@ class AppleExactProfileMemberPrecedenceTest {
         val resolved = f.resolver.resolveMethod(f.point)
         assertTrue(resolved.compatibilityFallback)
         assertEquals("oldEntry", resolved.target.runtimeMemberName(f.member))
+        f.dex.awaitPendingBaselines()
         assertEquals(before, f.values)
     }
 }

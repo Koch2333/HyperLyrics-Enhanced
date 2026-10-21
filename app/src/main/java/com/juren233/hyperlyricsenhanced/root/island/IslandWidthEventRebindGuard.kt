@@ -6,6 +6,7 @@
 
 package com.juren233.hyperlyricsenhanced.root.island
 
+import com.juren233.hyperlyricsenhanced.root.reload.SystemUiHookLifetime
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import io.github.libxposed.api.XposedInterface.Chain
@@ -21,8 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Exact runtime identifiers verified from the original phone and tablet plugin DEX files.
  *
  * Do not replace these with JADX aliases or broaden the matchers. The full width event and its
- * native transition must run; only the Lottie scene selection for the exact transition produced
- * by an HLE lyric-width request may be changed.
+ * state update and transition lifecycle must run, even for an identical target. The controller
+ * already counted this transition in expectDispatches; replacing it with NoOp leaks a completion.
+ * Lottie scene selection is scoped to the exact width transition.
  */
 internal object IslandWidthEventMethodProfile {
     const val ANIMATION_CONTROLLER_CLASS =
@@ -95,9 +97,8 @@ internal object IslandWidthEventMethodProfile {
 }
 
 /**
- * Keeps the complete native width event and BigIslandChanged transition, but prevents the generic
- * island-transition Lottie manager from pausing and restarting animations for the exact transition
- * created by an HLE lyric-width request.
+ * Keeps the complete native width event and transition, while avoiding a Lottie restart through
+ * the generic island-transition manager for a lyric width update.
  *
  * The request and event scopes are thread-local and identity-gated. The resulting transition may
  * start asynchronously, so it is carried across that boundary in a small identity map and removed
@@ -199,6 +200,7 @@ internal object IslandWidthEventRebindGuard {
     }
 
     fun install(module: XposedModule, classLoader: ClassLoader) {
+        IslandContentUpdateCoordinator.install(classLoader)
         val coordinatorClass = classLoader.loadClass(
             IslandWidthEventMethodProfile.EVENT_COORDINATOR_CLASS
         )
@@ -251,6 +253,7 @@ internal object IslandWidthEventRebindGuard {
         private val firstCallbackLogged = AtomicBoolean()
 
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             logFirstCallback(firstCallbackLogged, IslandWidthEventMethodProfile.DISPATCH_METHOD)
             val event = chain.args.getOrNull(0)
             val target = chain.args.getOrNull(1)
@@ -272,6 +275,7 @@ internal object IslandWidthEventRebindGuard {
         private val firstCallbackLogged = AtomicBoolean()
 
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             logFirstCallback(
                 firstCallbackLogged,
                 IslandWidthEventMethodProfile.DISPATCH_TRANSITION_METHOD,
@@ -292,7 +296,7 @@ internal object IslandWidthEventRebindGuard {
                 )
             }
             return try {
-                chain.proceed()
+                IslandContentUpdateCoordinator.duringNativeTransition(target) { chain.proceed() }
             } catch (throwable: Throwable) {
                 if (marked) discardWidthTransition(transition)
                 throw throwable
@@ -304,6 +308,7 @@ internal object IslandWidthEventRebindGuard {
         private val firstCallbackLogged = AtomicBoolean()
 
         override fun intercept(chain: Chain): Any? {
+            if (SystemUiHookLifetime.retired) return chain.proceed()
             logFirstCallback(
                 firstCallbackLogged,
                 IslandWidthEventMethodProfile.VISIBLE_LOTTIE_SCENES_METHOD,

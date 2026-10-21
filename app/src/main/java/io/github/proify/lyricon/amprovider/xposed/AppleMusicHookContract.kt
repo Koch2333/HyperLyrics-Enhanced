@@ -414,7 +414,10 @@ internal object AppleMusicHookContracts {
         hookPoint == AppleMusicHookPoint.COMPOSE_TEXT_LAYOUT ||
             hookPoint == AppleMusicHookPoint.APPLE_TEXT_STYLE_UTILS
 
-    fun validate(context: HookContractContext): ContractResult {
+    fun validate(context: HookContractContext): ContractResult =
+        AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.CONTRACT) { validateUntimed(context) }
+
+    private fun validateUntimed(context: HookContractContext): ContractResult {
         val targetContract = context.target.contract
         if (targetContract != null) {
             val result = targetContract.validate(context)

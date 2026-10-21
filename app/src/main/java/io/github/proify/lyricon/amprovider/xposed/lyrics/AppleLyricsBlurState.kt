@@ -95,6 +95,8 @@ internal class AppleLyricsBlurState {
         blurredViews.remove(view)
     }
 
+    fun isBlurred(view: View): Boolean = blurredViews.contains(view)
+
     /** Atomically takes every currently-blurred view, clearing the set. */
     fun takeBlurredViews(): List<View> =
         synchronized(blurredViews) { blurredViews.toList().also { blurredViews.clear() } }
@@ -135,6 +137,15 @@ internal class AppleLyricsBlurState {
 
     fun rememberChildAdapterPositionMethod(recyclerViewClass: Class<*>, method: Method) {
         childAdapterPositionMethods[recyclerViewClass] = method
+    }
+
+    private val childViewHolderMethods = ConcurrentHashMap<Class<*>, List<Method>>()
+
+    fun childViewHolderMethods(recyclerViewClass: Class<*>): List<Method>? =
+        childViewHolderMethods[recyclerViewClass]
+
+    fun rememberChildViewHolderMethods(recyclerViewClass: Class<*>, methods: List<Method>) {
+        childViewHolderMethods[recyclerViewClass] = methods
     }
 
     private val hyperOsMethods = Collections.synchronizedMap(

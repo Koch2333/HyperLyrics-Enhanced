@@ -97,11 +97,53 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 internal fun AppleMusicProviderOrchestrator.startHooks() {
+    val costs = if (BuildConfig.DEBUG) mutableListOf<StartupHookModuleCost>() else null
     hookModules().asSequence()
         .filter { hookModule -> !hookModule.debugOnly || BuildConfig.DEBUG }
         .forEach { hookModule ->
+            val startNs = if (costs != null) System.nanoTime() else 0L
             hookRegistrar.withModule(hookModule.id, hookModule::installHooks)
+            costs?.add(
+                StartupHookModuleCost(
+                    id = hookModule.id,
+                    debugOnly = hookModule.debugOnly,
+                    wallNs = System.nanoTime() - startNs,
+                    installed = hookRegistrar.installCost.snapshot(hookModule.id),
+                )
+            )
         }
+    costs?.let(::logStartupHookCosts)
+}
+
+private class StartupHookModuleCost(
+    val id: String,
+    val debugOnly: Boolean,
+    val wallNs: Long,
+    val installed: io.github.proify.lyricon.amprovider.xposed.hooks.AppleHookInstallCost.Entry,
+) {
+    /** 去掉安装日志后的耗时，近似 release 包的开销。 */
+    val workNs: Long get() = wallNs - installed.logNs
+}
+
+/**
+ * debug 包专用：冷启动 Hook 安装耗时拆分。`work` 已扣除每个 Hook 的安装日志；
+ * `hook` 为 `module.hook()` 本身，其余（`work - hook`）是目标解析与反射查找。
+ */
+private fun logStartupHookCosts(costs: List<StartupHookModuleCost>) {
+    fun ms(ns: Long) = "%.1f".format(ns / 1_000_000.0)
+    val release = costs.filterNot { it.debugOnly }
+    val top = release.sortedByDescending { it.workNs }.take(12).joinToString { cost ->
+        "${cost.id}=${ms(cost.workNs)}/${ms(cost.installed.hookNs)}/n${cost.installed.hooks}"
+    }
+    ProviderLogger.info(
+        "[StartupCost] stage=hooks, wallMs=${ms(costs.sumOf { it.wallNs })}, " +
+            "logMs=${ms(costs.sumOf { it.installed.logNs })}, " +
+            "releaseWorkMs=${ms(release.sumOf { it.workNs })}, " +
+            "releaseHookMs=${ms(release.sumOf { it.installed.hookNs })}, " +
+            "releaseHooks=${release.sumOf { it.installed.hooks }}, " +
+            "debugOnlyWorkMs=${ms(costs.filter { it.debugOnly }.sumOf { it.workNs })}, " +
+            "top(work/hook/n)=[$top]"
+    )
 }
 
 internal fun AppleMusicProviderOrchestrator.hookModuleIdsForBuild(debug: Boolean): List<String> =

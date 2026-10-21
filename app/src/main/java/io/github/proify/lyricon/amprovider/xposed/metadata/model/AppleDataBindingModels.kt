@@ -21,6 +21,8 @@ internal data class PendingVisibleDataBindingResolution(
 internal enum class DataBindingRefreshStrategy {
     VARIABLES_ONLY,
     FULL_INVALIDATE,
+    /** 行上已显示别名，跳过整体失效重绑。 */
+    ALREADY_RENDERED,
 }
 
 internal data class DataBindingAliasValues(

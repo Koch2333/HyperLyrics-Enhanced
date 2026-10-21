@@ -1,10 +1,13 @@
 package io.github.proify.lyricon.amprovider.xposed
 
-import java.util.IdentityHashMap
+import io.github.proify.lyricon.amprovider.xposed.internal.WeakIdentityMap
 
+/**
+ * Apple Attributes 对象的原始名称快照。按对象身份弱引用保存：对象被回收即释放，
+ * 不再强引用宿主对象，也不会因数量上限整体清空而丢掉仍存活对象的原始值。
+ */
 internal object AppleMediaApiAttributeSnapshots {
-    private const val MAX_SNAPSHOTS = 8_192
-    private val snapshots = IdentityHashMap<Any, Snapshot>()
+    private val snapshots = WeakIdentityMap<Any, Snapshot>()
 
     fun remember(
         attributes: Any,
@@ -16,15 +19,10 @@ internal object AppleMediaApiAttributeSnapshots {
             name = name,
             artistName = artistName,
             albumName = albumName,
-        ).also { snapshot ->
-            if (snapshots.size >= MAX_SNAPSHOTS) snapshots.clear()
-            snapshots[attributes] = snapshot
-        }
+        ).also { snapshot -> snapshots[attributes] = snapshot }
     }
 
-    fun get(attributes: Any): Snapshot? = synchronized(snapshots) {
-        snapshots[attributes]
-    }
+    fun get(attributes: Any): Snapshot? = snapshots[attributes]
 
     data class Snapshot(
         val name: String?,

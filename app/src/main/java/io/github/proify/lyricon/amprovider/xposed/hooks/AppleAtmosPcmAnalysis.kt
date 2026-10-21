@@ -48,6 +48,11 @@ internal data class AppleAtmosPcmWindow(
     }
 }
 
+/** Primitive sample reader: a generic `(Int) -> Double` would box index and sample on the audio thread. */
+internal fun interface AppleAtmosPcmSampleReader {
+    fun read(index: Int): Double
+}
+
 /** Counts accepted audio frames, not wall time. Reads only: never changes the caller's PCM. */
 internal class AppleAtmosPcmAccumulator(
     val context: AppleAtmosPcmContext,
@@ -74,14 +79,14 @@ internal class AppleAtmosPcmAccumulator(
         sampleCount: Int,
         leftGain: Float,
         rightGain: Float,
-        sampleAt: (Int) -> Double,
+        sampleAt: AppleAtmosPcmSampleReader,
         onWindow: (AppleAtmosPcmWindow) -> Unit,
     ) {
         val frontChannels = minOf(channelCount, 2)
         // max(L,R) is conservative for multichannel mixer volume routing.
         val peakGain = maxOf(leftGain, rightGain).toDouble()
         repeat(sampleCount) { index ->
-            val sample = sampleAt(index)
+            val sample = sampleAt.read(index)
             if (sample.isFinite()) {
                 peak = maxOf(peak, abs(sample)) // Do not clamp float PCM: > 1 is a real overload.
                 effectivePeak = maxOf(effectivePeak, abs(sample) * peakGain)

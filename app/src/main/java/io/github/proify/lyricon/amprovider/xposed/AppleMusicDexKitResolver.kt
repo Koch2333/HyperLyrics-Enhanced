@@ -9,6 +9,7 @@ package io.github.proify.lyricon.amprovider.xposed
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
+import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.dexkit.DexResolutionSource
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.FindClass
@@ -18,6 +19,7 @@ import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Slow-path resolver for Apple Music methods whose verified version profile no longer loads.
@@ -42,6 +44,12 @@ internal class AppleMusicDexKitResolver(
         )
     }
     private val rejectionRegistry = AppleMusicDexKitRejectionRegistry()
+    private val recordedBaselines = ConcurrentHashMap.newKeySet<Pair<String, String>>()
+    private val baselineExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+        Thread(task, "HLE-AppleHookBaseline").apply { isDaemon = true }
+    }
+    /** 取不到 APK 身份时无法证明基线未变，只做进程内去重，跨启动照常重写。 */
+    private val baselineApkScope: String? by lazy { runCatching { runtimeCacheScope }.getOrNull() }
 
     /**
      * Record the identifiers that were actually resolved by the exact profile.
@@ -54,42 +62,77 @@ internal class AppleMusicDexKitResolver(
         target: AppleMusicHookTarget,
         clazz: Class<*>,
         baselineClassName: String = target.className,
+    ) = AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.BASELINE) {
+        recordInBackground { recordBaselineNow(hookPoint, target, clazz, baselineClassName) }
+    }
+
+    /**
+     * 基线只供以后宿主改名时的 DexKit 修复使用，Hook 安装本身不依赖它。221031 冷启动时在主线程
+     * 记录 187 次共 122 ms（首次读取偏好、计算 APK 身份，模块版本变化后还要重算类结构并写入），
+     * 因此改为在单独线程按提交顺序执行。
+     */
+    private fun recordInBackground(block: () -> Unit) {
+        baselineExecutor.execute {
+            runCatching(block).onFailure { ProviderLogger.error("Apple Music Hook 基线记录失败", it) }
+        }
+    }
+
+    /** 等待已提交的基线记录全部写完（测试用）。 */
+    internal fun awaitPendingBaselines() {
+        baselineExecutor.submit {}.get()
+    }
+
+    private fun recordBaselineNow(
+        hookPoint: AppleMusicHookPoint,
+        target: AppleMusicHookTarget,
+        clazz: Class<*>,
+        baselineClassName: String,
     ) {
         val preferences = preferences()
-        preferences.edit()
+        val stampKey = baselineStampKey(hookPoint, baselineClassName)
+        val stamp = baselineStamp(target, clazz)
+        // 同一 APK、同一模块版本下基线内容不变：进程内与跨启动都只写一次，避免冷启动和运行期
+        // 每次解析都重算 ClassShape 并提交 SharedPreferences。
+        if (!recordedBaselines.add(stampKey to stamp)) return
+        val persistedStamp = baselineApkScope?.let { "$it|$stamp" }
+        if (persistedStamp != null && preferences.getString(stampKey, null) == persistedStamp) return
+        val editor = preferences.edit()
             .putString(classBaselineKey(hookPoint, baselineClassName), encodeClassShape(ClassShape.from(clazz)))
-            .apply()
         target.runtimeMemberNames.forEach { (member, name) ->
             when (member.kind()) {
                 MemberKind.CLASS_REFERENCE -> runCatching { classLoader.loadClass(name) }
                     .getOrNull()
                     ?.let { referenced ->
-                        preferences.edit()
-                            .putString(
-                                classReferenceBaselineKey(hookPoint, baselineClassName, member),
-                                encodeClassShape(ClassShape.from(referenced)),
-                            )
-                            .apply()
+                        editor.putString(
+                            classReferenceBaselineKey(hookPoint, baselineClassName, member),
+                            encodeClassShape(ClassShape.from(referenced)),
+                        )
                     }
 
                 MemberKind.FIELD -> findField(clazz, name)?.let { field ->
-                    preferences.edit()
-                        .putString(
-                            memberBaselineKey(hookPoint, baselineClassName, member),
-                            encodeMemberDescriptor(MemberDescriptor.from(field, clazz)),
-                        )
-                        .apply()
+                    editor.putString(
+                        memberBaselineKey(hookPoint, baselineClassName, member),
+                        encodeMemberDescriptor(MemberDescriptor.from(field, clazz)),
+                    )
                 }
 
                 MemberKind.METHOD -> findMethods(clazz, name).firstOrNull()?.let { method ->
-                    preferences.edit()
-                        .putString(
-                            memberBaselineKey(hookPoint, baselineClassName, member),
-                            encodeMemberDescriptor(MemberDescriptor.from(method, clazz)),
-                        )
-                        .apply()
+                    editor.putString(
+                        memberBaselineKey(hookPoint, baselineClassName, member),
+                        encodeMemberDescriptor(MemberDescriptor.from(method, clazz)),
+                    )
                 }
             }
+        }
+        persistedStamp?.let { editor.putString(stampKey, it) }
+        editor.apply()
+    }
+
+    /** 模块版本 + 实际类与成员名；持久化时再拼上 APK 身份，任一变化都必须重新记录基线。 */
+    private fun baselineStamp(target: AppleMusicHookTarget, clazz: Class<*>): String = buildString {
+        append(BuildConfig.VERSION_CODE).append('|').append(clazz.name)
+        target.runtimeMemberNames.entries.sortedBy { it.key.name }.forEach { (member, name) ->
+            append('|').append(member.name).append('=').append(name)
         }
     }
 
@@ -122,14 +165,28 @@ internal class AppleMusicDexKitResolver(
         target: AppleMusicHookTarget,
         method: Method,
         baselineClassName: String = target.className,
+    ) = AppleStartupResolveCost.time(AppleStartupResolveCost.Kind.BASELINE) {
+        recordInBackground { recordMethodBaselineNow(hookPoint, target, method, baselineClassName) }
+    }
+
+    private fun recordMethodBaselineNow(
+        hookPoint: AppleMusicHookPoint,
+        target: AppleMusicHookTarget,
+        method: Method,
+        baselineClassName: String,
     ) {
-        recordBaseline(hookPoint, target, method.declaringClass, baselineClassName)
-        preferences().edit()
-            .putString(
-                hookMethodBaselineKey(hookPoint, baselineClassName),
-                encodeMemberDescriptor(MemberDescriptor.from(method, method.declaringClass)),
-            )
-            .apply()
+        recordBaselineNow(hookPoint, target, method.declaringClass, baselineClassName)
+        val key = hookMethodBaselineKey(hookPoint, baselineClassName)
+        val stampKey = "$key:stamp"
+        val stamp = "${BuildConfig.VERSION_CODE}|${method.toGenericString()}"
+        if (!recordedBaselines.add(stampKey to stamp)) return
+        val preferences = preferences()
+        val persistedStamp = baselineApkScope?.let { "$it|$stamp" }
+        if (persistedStamp != null && preferences.getString(stampKey, null) == persistedStamp) return
+        val editor = preferences.edit()
+            .putString(key, encodeMemberDescriptor(MemberDescriptor.from(method, method.declaringClass)))
+        persistedStamp?.let { editor.putString(stampKey, it) }
+        editor.apply()
     }
 
     /**
@@ -795,6 +852,9 @@ internal class AppleMusicDexKitResolver(
 
     private fun classBaselineKey(hookPoint: AppleMusicHookPoint, className: String): String =
         AppleMusicDexKitCachePolicy.trustedClassBaselineKey(hookPoint, className)
+
+    private fun baselineStampKey(hookPoint: AppleMusicHookPoint, className: String): String =
+        "${classBaselineKey(hookPoint, className)}:stamp"
 
     private fun classReferenceBaselineKey(
         hookPoint: AppleMusicHookPoint,

@@ -34,6 +34,7 @@ import io.github.proify.lyricon.amprovider.xposed.AppleMusicRuntimeMember
 import io.github.proify.lyricon.amprovider.xposed.AppleReflection
 import io.github.proify.lyricon.amprovider.xposed.ProviderLogger
 import io.github.proify.lyricon.amprovider.xposed.isAppleLyricsRequestPath
+import io.github.proify.lyricon.amprovider.xposed.internal.ThreadLocalStack
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -47,6 +48,8 @@ internal class AppleContentLocalizationHooks(
 ) {
     @Volatile
     private var lastLoggedContentLanguage: String? = null
+    /** 每个 amp-api 拦截调用是否计入 Apple 自身在途数；enter/exit 在同一线程配对。 */
+    private val ampNativeRequestScopes = ThreadLocalStack<Boolean>()
     private val contentRequestTraceKeys = ConcurrentHashMap.newKeySet<String>()
     private val contentRequestDecisionTraceKeys = ConcurrentHashMap.newKeySet<String>()
     private val contentRequestHeaderTraceKeys = ConcurrentHashMap.newKeySet<String>()
@@ -241,10 +244,23 @@ internal class AppleContentLocalizationHooks(
             val resolved = runtime.hookResolver.resolveMethod(
                 AppleMusicHookPoint.MEDIA_API_AMP_HTTP_INTERCEPTOR
             )
-            runtime.hookRegistrar.installHook(
-                resolved.method,
-                before = { chain -> contentHttpLocalizationBefore(chain, "amp-api") },
+            // 作用域 Hook：exit 在 finally 中执行，Apple 自身请求在途计数不会因请求抛异常而泄漏。
+            runtime.hookRegistrar.installScopedHook(
+                executable = resolved.method,
+                enter = { chain ->
+                    val native = !isModuleMarkedAmpRequest(chain)
+                    if (native) catalogResolver().nativeAmpRequestsInFlight.incrementAndGet()
+                    ampNativeRequestScopes.push(native)
+                    runCatching { contentHttpLocalizationBefore(chain, "amp-api") }
+                        .onFailure { ProviderLogger.error("Apple amp-api 内容请求改写失败", it) }
+                    true
+                },
                 after = ::contentHttpLocalizationAfter,
+                exit = {
+                    if (ampNativeRequestScopes.pop() == true) {
+                        catalogResolver().nativeAmpRequestsInFlight.decrementAndGet()
+                    }
+                },
             )
             ProviderLogger.info(
                 "Apple amp-api 内容请求网络拦截 Hook 已安装: " +
@@ -254,6 +270,19 @@ internal class AppleContentLocalizationHooks(
             ProviderLogger.error("Apple amp-api 内容请求网络拦截 Hook 安装失败", it)
         }
     }
+
+    /** 模块经 executor 发出的目录请求在到达拦截器时仍带常量标记（随后才被剥离）。 */
+    private fun isModuleMarkedAmpRequest(chain: Chain): Boolean = runCatching {
+        val httpChain = chain.args.firstOrNull() ?: return false
+        val request = AppleReflection.field(
+            httpChain,
+            member(AppleMusicRuntimeMember.CONTENT_HTTP_CHAIN_REQUEST_FIELD),
+        ) ?: return false
+        AppleReflection.field(
+            request,
+            member(AppleMusicRuntimeMember.CONTENT_HTTP_REQUEST_URL_FIELD),
+        )?.toString().orEmpty().contains("$AMP_HTTP_MODULE_MARKER_PARAM=")
+    }.getOrDefault(false)
 
     private fun contentHttpLocalizationBefore(chain: Chain, hookSource: String) {
         val prefs = preferences() ?: return
