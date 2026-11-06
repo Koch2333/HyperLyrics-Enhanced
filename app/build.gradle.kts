@@ -40,8 +40,8 @@ android {
         applicationId = "com.juren233.hyperlyricsenhanced"
         minSdk = 33
         targetSdk = 37
-        versionCode = 222002
-        versionName = ciVersionName ?: "8.2.2-canary"
+        versionCode = 230008
+        versionName = ciVersionName ?: "8.3.0-canary"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -129,6 +129,7 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.palette.ktx)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.hiddenapibypass)
     implementation(libs.bouncycastle.provider)
     implementation(libs.dexkit)

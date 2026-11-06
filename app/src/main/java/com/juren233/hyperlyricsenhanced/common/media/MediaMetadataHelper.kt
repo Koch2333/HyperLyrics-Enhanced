@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.media.MediaMetadata
 import android.media.session.MediaController
+import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
@@ -35,12 +36,24 @@ object MediaMetadataHelper {
     private const val ARTWORK_MAX_DIMENSION = 512
     private const val ARTWORK_MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
     private const val ARTWORK_FAILURE_RETRY_MS = 60_000L
+    private const val ARTWORK_PENDING_CACHE_TTL_MS = 5_000L
+    private const val MEDIA_INFO_CACHE_TTL_MS = 30_000L
+    private const val SESSION_REFRESH_COOLDOWN_MS = 1_000L
+    private const val NEXT_LOOKUP_FAILURE_CACHE_MS = 1_000L
     private const val ARTWORK_CONNECT_TIMEOUT_MS = 2_500
     private const val ARTWORK_READ_TIMEOUT_MS = 4_000
     private const val ARTWORK_LOG_TAG = "MediaArtworkResolver"
 
     private val sessionLock = Any()
     private val artworkLock = Any()
+    private val mediaInfoLock = Any()
+    private val mediaInfoCache = HashMap<String, CachedMediaInfo>()
+    private var mediaInfoGeneration = 0L
+    private val nextLookupFailureLock = Any()
+    private val nextLookupFailures = HashMap<String, CachedNextLookupFailure>()
+    private val controllerCallbacks = HashMap<MediaSession.Token, ControllerCallback>()
+    private val lastSessionRefreshByPackage = HashMap<String, Long>()
+    private val lastTrackSignatureByPackage = HashMap<String, String>()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val artworkExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "HyperLyrics-MediaArtwork").apply { isDaemon = true }
@@ -55,13 +68,16 @@ object MediaMetadataHelper {
     private var artworkResolvedListener: (() -> Unit)? = null
 
     @Volatile
+    private var mediaInfoChangedListener: ((String) -> Unit)? = null
+
+    @Volatile
     private var mediaSessionManager: MediaSessionManager? = null
 
     @Volatile
     private var activeControllers: List<MediaController> = emptyList()
 
     private val activeSessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-        activeControllers = controllers.orEmpty()
+        updateActiveControllers(controllers.orEmpty())
     }
 
     data class MediaInfo(
@@ -121,12 +137,41 @@ object MediaMetadataHelper {
     fun getMediaInfo(context: Context, packageName: String, logger: HyperLogger? = null): MediaInfo {
         if (packageName.isEmpty()) return MediaInfo()
 
+        val generation: Long
+        synchronized(mediaInfoLock) {
+            val cached = mediaInfoCache[packageName]
+            if (cached != null) {
+                if (SystemClock.uptimeMillis() < cached.expiresAtMs) {
+                    return cached.info
+                }
+                mediaInfoCache.remove(packageName)
+            }
+            generation = mediaInfoGeneration
+        }
         return try {
-            findController(context, packageName)?.metadata?.toMediaInfo(
+            val result = findController(context, packageName)?.metadata?.toMediaInfo(
                 context = context.applicationContext ?: context,
                 packageName = packageName,
                 logger = logger,
-            ) ?: MediaInfo()
+            ) ?: return MediaInfo()
+            val mediaInfo = result.info
+            if (mediaInfo.title.isNotBlank() || mediaInfo.artist.isNotBlank() ||
+                mediaInfo.album.isNotBlank() || mediaInfo.albumArt != null || mediaInfo.duration > 0L
+            ) {
+                // 兜底过期时间：正常靠元数据/播放态/会话变化回调失效，这里只防回调漏报，间隔放长避免周期性跨进程拉封面。
+                val expiresAtMs = SystemClock.uptimeMillis() + if (result.artworkPending) {
+                    ARTWORK_PENDING_CACHE_TTL_MS
+                } else {
+                    MEDIA_INFO_CACHE_TTL_MS
+                }
+                synchronized(mediaInfoLock) {
+                    // 元数据回调可能在本次取值期间已经让缓存失效，此时不写回旧值。
+                    if (mediaInfoGeneration == generation) {
+                        mediaInfoCache[packageName] = CachedMediaInfo(mediaInfo, expiresAtMs)
+                    }
+                }
+            }
+            mediaInfo
         } catch (e: Exception) {
             logger?.e("MediaMetadataHelper", "获取媒体信息失败 ($packageName)", e)
             MediaInfo()
@@ -137,15 +182,43 @@ object MediaMetadataHelper {
         artworkResolvedListener = listener
     }
 
+    fun setMediaInfoChangedListener(listener: ((String) -> Unit)?) {
+        mediaInfoChangedListener = listener
+    }
+
     fun clearArtworkResolution() {
         artworkGeneration.incrementAndGet()
         artworkResolvedListener = null
+        mediaInfoChangedListener = null
+        releaseSessionObservers()
+        synchronized(nextLookupFailureLock) { nextLookupFailures.clear() }
         synchronized(artworkLock) {
             artworkCache.clear()
             pendingArtworkRequests.clear()
             failedArtworkRequests.clear()
             artworkDiagnosticStateByPackage.clear()
         }
+    }
+
+    /**
+     * 注销会话观察者并整体复位快照，让下次调用重新初始化。
+     * 只注销回调而不置空 mediaSessionManager 时，ensureSessionSnapshot 会提前返回，缓存将不再失效。
+     */
+    private fun releaseSessionObservers() {
+        synchronized(sessionLock) {
+            controllerCallbacks.values.forEach { entry ->
+                runCatching { entry.controller.unregisterCallback(entry.callback) }
+            }
+            controllerCallbacks.clear()
+            mediaSessionManager?.let { manager ->
+                runCatching { manager.removeOnActiveSessionsChangedListener(activeSessionsListener) }
+            }
+            mediaSessionManager = null
+            activeControllers = emptyList()
+            lastSessionRefreshByPackage.clear()
+            lastTrackSignatureByPackage.clear()
+        }
+        clearMediaInfoCache()
     }
 
     fun currentArtworkCaptureToken(
@@ -241,6 +314,21 @@ object MediaMetadataHelper {
         if (!OfficialProviderCatalog.supportsNextTrackPreview(packageName)) {
             return NextMediaLookup(reason = "next_track_unsupported")
         }
+        // 预览窗口内每个位置 tick 都会调用；失败结果短缓存，避免反复做跨进程查询。
+        val failureKey = nextLookupFailureKey(packageName, current)
+        cachedNextLookupFailure(failureKey)?.let { return it }
+        val result = lookupNextMedia(context, packageName, current)
+        if (result.mediaInfo.title.isBlank()) {
+            rememberNextLookupFailure(failureKey, result)
+        }
+        return result
+    }
+
+    private fun lookupNextMedia(
+        context: Context,
+        packageName: String,
+        current: MediaInfo,
+    ): NextMediaLookup {
         return try {
             val controller = findController(context, packageName)
                 ?: return NextMediaLookup(reason = "controller_missing")
@@ -290,6 +378,31 @@ object MediaMetadataHelper {
             )
         } catch (_: Exception) {
             NextMediaLookup(reason = "lookup_exception")
+        }
+    }
+
+    private fun nextLookupFailureKey(packageName: String, current: MediaInfo): String =
+        "$packageName\u001F${current.title}\u001F${current.artist}\u001F${current.duration}"
+
+    private fun cachedNextLookupFailure(key: String): NextMediaLookup? =
+        synchronized(nextLookupFailureLock) {
+            val cached = nextLookupFailures[key] ?: return@synchronized null
+            val now = SystemClock.uptimeMillis()
+            if (now - cached.recordedAtMs < NEXT_LOOKUP_FAILURE_CACHE_MS) {
+                cached.lookup
+            } else {
+                nextLookupFailures.remove(key)
+                null
+            }
+        }
+
+    private fun rememberNextLookupFailure(key: String, lookup: NextMediaLookup) {
+        val now = SystemClock.uptimeMillis()
+        synchronized(nextLookupFailureLock) {
+            nextLookupFailures.entries.removeAll {
+                now - it.value.recordedAtMs >= NEXT_LOOKUP_FAILURE_CACHE_MS
+            }
+            nextLookupFailures[key] = CachedNextLookupFailure(lookup, now)
         }
     }
 
@@ -351,8 +464,18 @@ object MediaMetadataHelper {
     private fun findController(context: Context, packageName: String): MediaController? {
         ensureSessionSnapshot(context)
         selectController(activeControllers, packageName)?.let { return it }
-        refreshSessionSnapshot()
+        refreshSessionSnapshotForPackage(packageName)
         return selectController(activeControllers, packageName)
+    }
+
+    private fun refreshSessionSnapshotForPackage(packageName: String) {
+        val now = SystemClock.elapsedRealtime()
+        synchronized(sessionLock) {
+            val previous = lastSessionRefreshByPackage[packageName]
+            if (previous != null && now - previous < SESSION_REFRESH_COOLDOWN_MS) return
+            lastSessionRefreshByPackage[packageName] = now
+        }
+        refreshSessionSnapshot()
     }
 
     private fun selectController(
@@ -380,10 +503,15 @@ object MediaMetadataHelper {
             if (mediaSessionManager != null) return
             val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
             mediaSessionManager = manager
-            activeControllers = runCatching { manager.getActiveSessions(null) }.getOrDefault(emptyList())
+            updateActiveControllers(
+                runCatching { manager.getActiveSessions(null) }.getOrDefault(emptyList())
+            )
             val registerListener: () -> Unit = {
-                runCatching {
-                    manager.addOnActiveSessionsChangedListener(activeSessionsListener, null)
+                // 释放可能与已排队的注册交错，只在快照仍是本次初始化时登记监听。
+                if (mediaSessionManager === manager) {
+                    runCatching {
+                        manager.addOnActiveSessionsChangedListener(activeSessionsListener, null)
+                    }
                 }
                 Unit
             }
@@ -397,14 +525,111 @@ object MediaMetadataHelper {
 
     private fun refreshSessionSnapshot() {
         val manager = mediaSessionManager ?: return
-        activeControllers = runCatching { manager.getActiveSessions(null) }.getOrDefault(activeControllers)
+        updateActiveControllers(
+            runCatching { manager.getActiveSessions(null) }.getOrDefault(activeControllers)
+        )
+    }
+
+    private fun updateActiveControllers(controllers: List<MediaController>) {
+        synchronized(sessionLock) {
+            val previousTokens = controllerCallbacks.keys.toHashSet()
+            activeControllers = controllers
+            syncControllerCallbacksLocked(controllers)
+            if (previousTokens != controllerCallbacks.keys) {
+                clearMediaInfoCache()
+            }
+        }
+    }
+
+    private fun syncControllerCallbacksLocked(controllers: List<MediaController>) {
+        val activeTokens = HashSet<MediaSession.Token>(controllers.size)
+        controllers.forEach { controller ->
+            val token = runCatching { controller.sessionToken }.getOrNull() ?: return@forEach
+            activeTokens += token
+            if (controllerCallbacks.containsKey(token)) return@forEach
+            val packageName = runCatching { controller.packageName }.getOrNull() ?: return@forEach
+            val callback = object : MediaController.Callback() {
+                var lastPlaying = runCatching {
+                    controller.playbackState?.state == PlaybackState.STATE_PLAYING
+                }.getOrDefault(false)
+
+                override fun onPlaybackStateChanged(state: PlaybackState?) {
+                    // 部分播放器会周期性上报位置，只在播放态真正翻转时失效缓存。
+                    val playing = state?.state == PlaybackState.STATE_PLAYING
+                    if (playing != lastPlaying) {
+                        lastPlaying = playing
+                        invalidateMediaInfo(packageName)
+                    }
+                }
+
+                override fun onMetadataChanged(metadata: MediaMetadata?) {
+                    invalidateMediaInfo(packageName)
+                    val snapshot = metadata?.let { runCatching { it.snapshot() }.getOrNull() }
+                    val signature = snapshot?.let {
+                        trackIdentitySignature(
+                            packageName = packageName,
+                            mediaId = it.mediaId,
+                            title = it.title,
+                            artist = it.artist,
+                            album = it.album,
+                            duration = it.duration,
+                            hasDirectArtwork = it.directArtwork != null,
+                        )
+                    }
+                    val identityChanged = synchronized(sessionLock) {
+                        if (signature == null) {
+                            lastTrackSignatureByPackage.remove(packageName) != null
+                        } else {
+                            lastTrackSignatureByPackage.put(packageName, signature) != signature
+                        }
+                    }
+                    // 逐句改写标题的播放器会高频更新元数据，只有曲目身份变化才值得整岛重刷。
+                    if (identityChanged) notifyMediaInfoChanged(packageName)
+                }
+
+                override fun onSessionDestroyed() {
+                    invalidateMediaInfo(packageName)
+                    synchronized(sessionLock) {
+                        controllerCallbacks.remove(token)
+                        lastTrackSignatureByPackage.remove(packageName)
+                    }
+                }
+            }
+            if (runCatching { controller.registerCallback(callback, mainHandler) }.isSuccess) {
+                controllerCallbacks[token] = ControllerCallback(controller, callback)
+            }
+        }
+        val iterator = controllerCallbacks.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key !in activeTokens) {
+                runCatching { entry.value.controller.unregisterCallback(entry.value.callback) }
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun invalidateMediaInfo(packageName: String) {
+        synchronized(mediaInfoLock) {
+            mediaInfoCache.remove(packageName)
+            mediaInfoGeneration += 1
+        }
+    }
+
+    private fun clearMediaInfoCache() {
+        synchronized(mediaInfoLock) { clearMediaInfoCacheLocked() }
+    }
+
+    private fun clearMediaInfoCacheLocked() {
+        mediaInfoCache.clear()
+        mediaInfoGeneration += 1
     }
 
     private fun MediaMetadata.toMediaInfo(
         context: Context,
         packageName: String,
         logger: HyperLogger?,
-    ): MediaInfo {
+    ): MediaInfoResult {
         val snapshot = snapshot()
         val cacheKey = buildArtworkCacheKey(
             packageName = packageName,
@@ -422,13 +647,16 @@ object MediaMetadataHelper {
             artworkUri = snapshot.artworkUri,
             logger = logger,
         )
-        return MediaInfo(
-            title = snapshot.title,
-            artist = snapshot.artist,
-            album = snapshot.album,
-            albumArt = artwork?.bitmap,
-            duration = snapshot.duration,
-            artworkSource = artwork?.source ?: ArtworkSource.NONE,
+        return MediaInfoResult(
+            info = MediaInfo(
+                title = snapshot.title,
+                artist = snapshot.artist,
+                album = snapshot.album,
+                albumArt = artwork?.bitmap,
+                duration = snapshot.duration,
+                artworkSource = artwork?.source ?: ArtworkSource.NONE,
+            ),
+            artworkPending = artwork == null && !snapshot.artworkUri.isNullOrBlank(),
         )
     }
 
@@ -691,7 +919,15 @@ object MediaMetadataHelper {
         }
     }
 
+    private fun notifyMediaInfoChanged(packageName: String) {
+        val listener = mediaInfoChangedListener ?: return
+        mainHandler.post {
+            runCatching { listener(packageName) }
+        }
+    }
+
     private fun notifyArtworkResolved() {
+        clearMediaInfoCache()
         val listener = artworkResolvedListener ?: return
         mainHandler.post {
             runCatching(listener)
@@ -782,6 +1018,39 @@ object MediaMetadataHelper {
         }
     }
 
+    /**
+     * 曲目身份签名：优先用 mediaId，其次用“歌手 + 时长”，两者都没有时才退回封面键规则。
+     * 比封面缓存键更宽松，避免缺专辑或时长为 0 的“歌词写进标题”播放器每句触发整岛重刷。
+     */
+    internal fun trackIdentitySignature(
+        packageName: String,
+        mediaId: String,
+        title: String,
+        artist: String,
+        album: String,
+        duration: Long,
+        hasDirectArtwork: Boolean,
+    ): String? {
+        val normalizedPackage = packageName.trim()
+        if (normalizedPackage.isEmpty()) return null
+        val normalizedArtist = normalizeArtworkIdentityText(artist)
+        val identity = when {
+            mediaId.isNotBlank() -> "$normalizedPackage\u001Fid\u001F${mediaId.trim()}"
+            // 时长基本能区分曲目；有歌手和时长时不再看标题和专辑。
+            duration > 0L && normalizedArtist.isNotEmpty() ->
+                "$normalizedPackage\u001Fad\u001F$normalizedArtist\u001F$duration"
+            else -> buildArtworkCacheKey(
+                packageName = packageName,
+                mediaId = mediaId,
+                title = title,
+                artist = artist,
+                album = album,
+                duration = duration,
+            )
+        } ?: return null
+        return identity + if (hasDirectArtwork) "\u001Fart" else "\u001Fno-art"
+    }
+
     private fun normalizeArtworkIdentityText(value: String): String {
         return value.trim()
             .lowercase(Locale.ROOT)
@@ -804,6 +1073,26 @@ object MediaMetadataHelper {
         val duration: Long,
         val directArtwork: ResolvedArtwork?,
         val artworkUri: String?,
+    )
+
+    private data class MediaInfoResult(
+        val info: MediaInfo,
+        val artworkPending: Boolean,
+    )
+
+    private data class CachedMediaInfo(
+        val info: MediaInfo,
+        val expiresAtMs: Long,
+    )
+
+    private data class CachedNextLookupFailure(
+        val lookup: NextMediaLookup,
+        val recordedAtMs: Long,
+    )
+
+    private data class ControllerCallback(
+        val controller: MediaController,
+        val callback: MediaController.Callback,
     )
 
     private data class ResolvedArtwork(

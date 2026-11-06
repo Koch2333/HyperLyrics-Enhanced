@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.text.TextPaint
 import android.util.TypedValue
 import android.view.View
+import android.view.ViewGroup
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.root.utils.AppleMetadataFlowDiagnostics
 import com.juren233.hyperlyricsenhanced.common.RootConstants
@@ -44,6 +45,7 @@ import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
 import com.juren233.hyperlyricsenhanced.root.utils.LyricStyleHelper
 import com.juren233.hyperlyricsenhanced.root.utils.TranslationHelper
 import java.io.File
+import java.util.Collections
 import java.util.WeakHashMap
 
 internal object IslandSlotContentAssembler {
@@ -77,6 +79,10 @@ internal object IslandSlotContentAssembler {
     private var splitMeasureEnvCache: Pair<SplitMeasureKey, SplitMeasureEnv>? = null
 
     private val lastContentSignatures = WeakHashMap<View, String>()
+    // 下首预览已写入内容的槽位。预览期间常规内容（含 force 刷新、形态提交、动画落地）
+    // 一律不得覆盖它；按 View 记录，避免预览登记表按宿主 key 查找时因宿主身份不一致而漏拦。
+    private val nextSongPreviewContentViews =
+        Collections.newSetFromMap(WeakHashMap<View, Boolean>())
     private val lastStyleSignatures = WeakHashMap<View, String>()
     // Keep the applied value across global invalidations so equal refreshes do not rebind style.
     private val lastAppliedStyles = WeakHashMap<View, LyricViewStyle>()
@@ -106,6 +112,17 @@ internal object IslandSlotContentAssembler {
         val showRoma: Boolean = false
     )
 
+    /** 结构比较替代每帧 joinToString：只分配一个短生命周期对象。 */
+    private data class LyricTransitionKey(
+        val continuous: Boolean,
+        val version: Int,
+        val lineSignature: Int,
+        val styleSignature: String,
+        val title: String,
+        val artist: String,
+        val album: String,
+    )
+
     fun invalidate(view: View? = null) {
         if (view == null) {
             synchronized(lastContentSignatures) { lastContentSignatures.clear() }
@@ -119,6 +136,53 @@ internal object IslandSlotContentAssembler {
         followStatusBarColor(view, false)
         synchronized(lastLyricAvailability) { lastLyricAvailability.remove(view) }
     }
+
+    internal fun isNextSongPreviewContent(view: View): Boolean =
+        synchronized(nextSongPreviewContentViews) { nextSongPreviewContentViews.contains(view) }
+
+    internal fun hasAnyNextSongPreviewContent(): Boolean =
+        synchronized(nextSongPreviewContentViews) { nextSongPreviewContentViews.isNotEmpty() }
+
+    private fun markNextSongPreviewContent(view: View) {
+        synchronized(nextSongPreviewContentViews) { nextSongPreviewContentViews.add(view) }
+    }
+
+    /** 预览结束/失败时释放标记；返回是否真的释放了内容归属。 */
+    internal fun clearNextSongPreviewContent(views: Collection<View?>): Boolean {
+        synchronized(nextSongPreviewContentViews) {
+            var removed = false
+            views.forEach { view ->
+                if (view != null && nextSongPreviewContentViews.remove(view)) removed = true
+            }
+            return removed
+        }
+    }
+
+    internal fun clearAllNextSongPreviewContent() {
+        synchronized(nextSongPreviewContentViews) { nextSongPreviewContentViews.clear() }
+    }
+
+    /** 同一宿主另一槽是否仍持有预览内容；有成对形态提交时必须跳过，避免动画遮住预览。 */
+    private fun hasNextSongPreviewContentInHost(view: View): Boolean {
+        if (synchronized(nextSongPreviewContentViews) { nextSongPreviewContentViews.isEmpty() }) {
+            return false
+        }
+        var parent = view.parent as? ViewGroup
+        while (parent != null) {
+            val left = parent.findViewWithTag<View>(IslandProbeUtils.LEFT_TEST_VIEW_TAG)
+            val right = parent.findViewWithTag<View>(IslandProbeUtils.RIGHT_TEST_VIEW_TAG)
+            if (left != null && right != null) {
+                return isNextSongPreviewContent(left) || isNextSongPreviewContent(right)
+            }
+            parent = parent.parent as? ViewGroup
+        }
+        return false
+    }
+
+    private fun previewBlockCaller(): String =
+        Throwable().stackTrace.drop(2).take(4).joinToString(" <- ") {
+            "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+        }
 
     fun configureView(
         view: View,
@@ -345,18 +409,64 @@ internal object IslandSlotContentAssembler {
         // Cancelling an older YoYo bind can synchronously request native layout. Its
         // reentrant refresh must not interrupt the pair that is being committed now.
         if (IslandContentUpdateCoordinator.deferContent(view)) return false
+        if (isNextSongPreviewContent(view)) {
+            // 预览内容必须保持到切歌；任何常规/强制刷新都不得改写这个槽。
+            if (BuildConfig.DEBUG) {
+                HookLogger.i(
+                    "IslandSlotContentAssembler",
+                    "[NextPreviewGuardDiag] blocked tag=${view.tag} force=$force mode=$mode " +
+                        "cached=${lastContentSignatures[view]?.take(24)}, caller=${previewBlockCaller()}"
+                )
+            }
+            return false
+        }
         if (IslandSeparatedLyricTransition.isApplying(view) && !separatedMorphCommit) return false
+        val isLeft = view.tag == IslandProbeUtils.LEFT_TEST_VIEW_TAG
         val independentSlots = usesIndependentLyricSlots(view, prefs, config)
+        val effectiveMode = IslandFullIslandGapPolicy.contentMode(
+            mode = mode,
+            isLeft = isLeft,
+            independentSlots = independentSlots
+        )
+        // 间奏极简只隐藏非指示器槽位（联播时为左槽歌曲信息），右槽间奏点保留。
+        // 极简窗口内不走成对形变，避免空白槽参与过渡。
+        if (isInterludeMinimalDisplayActive(config)) {
+            IslandSeparatedLyricTransition.cancel(view)
+            IslandShortLyricTransition.cancel(view)
+            if (effectiveMode != 7) {
+                return applyInterludeMinimalContent(
+                    view, prefs, config, effectiveMode, playbackActive, mediaInfo, force
+                )
+            }
+            configureView(view, prefs, config, effectiveMode, mediaInfo, force)
+            return applyLyricContent(
+                view = view,
+                prefs = prefs,
+                config = config,
+                lineOverride = lineOverride ?: buildSlotLyricLine(view, prefs, config, isLeft),
+                force = force,
+                playbackActive = playbackActive,
+                suppressAnimation = suppressAnimation
+            )
+        }
+        // 同一宿主另一槽仍是预览内容时，成对形态提交会在落地时把当前歌词画回预览槽。
+        val previewContentInHost = hasNextSongPreviewContentInHost(view)
         if (!IslandSeparatedLyricTransition.isApplying(view)) {
             val previewEnabled = isNextLinePreviewEnabled(prefs, config)
-            if (config.isSeparatedMode && mode == 7 && !suppressAnimation &&
+            if (config.isSeparatedMode && mode == 7 && !suppressAnimation && !previewContentInHost &&
                 (config.lyricAnimationEnabled || previewEnabled)
             ) {
                 applyPlaybackActive(view, playbackActive)
                 val wholeLine = displayLyricLine(prefs, processedRawLine(prefs, config))
-                val key = listOf(!independentSlots, LyriconDataBridge.versionCounter.get(),
-                    lineContentSignature(wholeLine), config.styleSignature,
-                    mediaInfo.title, mediaInfo.artist, mediaInfo.album).joinToString("|")
+                val key = LyricTransitionKey(
+                    continuous = !independentSlots,
+                    version = LyriconDataBridge.versionCounter.get(),
+                    lineSignature = lineContentSignature(wholeLine),
+                    styleSignature = config.styleSignature,
+                    title = mediaInfo.title,
+                    artist = mediaInfo.artist,
+                    album = mediaInfo.album,
+                )
                 val result = IslandSeparatedLyricTransition.update(
                     view, !independentSlots, key,
                     if (previewEnabled) 220L else (300L * config.switchAnimRateFactor).toLong().coerceAtLeast(1L),
@@ -375,17 +485,23 @@ internal object IslandSlotContentAssembler {
         if (!IslandShortLyricTransition.isApplying(view)) {
             val previewEnabled = config.isFullIslandMode && isNextLinePreviewEnabled(prefs, config)
             val canTransitionRoles = config.isFullIslandMode && (config.shortLyricSongInfo || config.nextLineOnRight) &&
-                mode == 7 && !suppressAnimation &&
+                mode == 7 && !suppressAnimation && !previewContentInHost &&
                 (config.lyricAnimationEnabled || previewEnabled) &&
                 hasVisibleLyricContent(LyriconDataBridge.currentLyricLine) &&
                 !isInterludeIndicatorLine(LyriconDataBridge.currentLyricLine)
             if (canTransitionRoles) {
                 applyPlaybackActive(view, playbackActive)
-                val key = listOf(
-                    !independentSlots, LyriconDataBridge.versionCounter.get(),
-                    lineContentSignature(lineOverride ?: processedRawLine(prefs, config)),
-                    config.styleSignature, mediaInfo.title, mediaInfo.artist, mediaInfo.album,
-                ).joinToString("|")
+                val key = LyricTransitionKey(
+                    continuous = !independentSlots,
+                    version = LyriconDataBridge.versionCounter.get(),
+                    lineSignature = lineContentSignature(
+                        lineOverride ?: processedRawLine(prefs, config)
+                    ),
+                    styleSignature = config.styleSignature,
+                    title = mediaInfo.title,
+                    artist = mediaInfo.artist,
+                    album = mediaInfo.album,
+                )
                 val duration = if (previewEnabled || config.nextLineOnRight) 220L
                     else (300L * config.switchAnimRateFactor).toLong().coerceAtLeast(1L)
                 val transitionResult = IslandShortLyricTransition.update(
@@ -408,11 +524,6 @@ internal object IslandSlotContentAssembler {
                 IslandShortLyricTransition.cancel(view)
             }
         }
-        val effectiveMode = IslandFullIslandGapPolicy.contentMode(
-            mode = mode,
-            isLeft = view.tag == IslandProbeUtils.LEFT_TEST_VIEW_TAG,
-            independentSlots = independentSlots
-        )
         configureView(view, prefs, config, effectiveMode, mediaInfo, force)
         return if (effectiveMode == 7) {
             applyLyricContent(view, prefs, config, lineOverride, force, playbackActive, suppressAnimation)
@@ -567,10 +678,6 @@ internal object IslandSlotContentAssembler {
         playbackActive: Boolean
     ): Boolean {
         if (IslandContentUpdateCoordinator.deferContent(view)) return false
-        IslandShortLyricTransition.cancel(view)
-        IslandSeparatedLyricTransition.cancel(view)
-        IslandSeparatedLyricTransition.contentApplied(view, null)
-        configureView(view, prefs, config, mode = 5)
         val signature = listOf(
             signaturePrefix,
             *signatureParts.toTypedArray(),
@@ -578,6 +685,18 @@ internal object IslandSlotContentAssembler {
         ).joinToString("|")
         val contentChanged = hasViewLineContentChanged(view, line)
         val viewContentLost = isLyricViewContentLost(view, line)
+        // 预览内容没变时保持原样：不取消转场、不重配样式，避免每次进度回调都重建样式签名。
+        if (isNextSongPreviewContent(view) &&
+            lastContentSignatures[view] == signature &&
+            !viewContentLost
+        ) {
+            return false
+        }
+        IslandShortLyricTransition.cancel(view)
+        IslandSeparatedLyricTransition.cancel(view)
+        IslandSeparatedLyricTransition.contentApplied(view, null)
+        configureView(view, prefs, config, mode = 5)
+        markNextSongPreviewContent(view)
         if (shouldSkipContentRefresh(false, lastContentSignatures[view], signature, viewContentLost)) return false
 
         applyContentUpdate(view, config, contentChanged = contentChanged) { target ->
@@ -793,6 +912,33 @@ internal object IslandSlotContentAssembler {
     internal fun isInterludeIndicatorLine(line: IRichLyricLine?): Boolean =
         line?.metadata?.getBoolean(LyricMetadataKeys.INSTRUMENTAL) == true
 
+    internal fun isInterludeMinimalDisplayActive(config: IslandSlotRuntimeConfig): Boolean =
+        config.usesInterludeMinimalDisplay(LyriconDataBridge.currentInterludeType != null)
+
+    private fun minimalInterludeLine(): IRichLyricLine =
+        RichLyricLine(text = "", words = emptyList())
+
+    private fun applyInterludeMinimalContent(
+        view: View,
+        prefs: SharedPreferences,
+        config: IslandSlotRuntimeConfig,
+        mode: Int,
+        playbackActive: Boolean,
+        mediaInfo: MediaMetadataHelper.MediaInfo,
+        force: Boolean,
+    ): Boolean {
+        configureView(view, prefs, config, mode, mediaInfo, force)
+        return applyLyricContent(
+            view = view,
+            prefs = prefs,
+            config = config,
+            lineOverride = minimalInterludeLine(),
+            force = true,
+            playbackActive = playbackActive,
+            suppressAnimation = true,
+        )
+    }
+
     private fun usesIndependentLyricSlots(
         view: View,
         prefs: SharedPreferences,
@@ -880,6 +1026,7 @@ internal object IslandSlotContentAssembler {
         playbackActive: Boolean,
         suppressAnimation: Boolean
     ): Boolean {
+        if (isNextSongPreviewContent(view)) return false
         val sourceLine = lineOverride ?: buildSlotLyricLine(
             view = view,
             prefs = prefs,

@@ -21,6 +21,7 @@ import com.juren233.hyperlyricsenhanced.root.island.IslandMusicWaveColorHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandProgressGlowController
 import com.juren233.hyperlyricsenhanced.root.island.IslandRuntimePreferenceOverrides
 import com.juren233.hyperlyricsenhanced.root.island.IslandRuntimePreferenceReader
+import com.juren233.hyperlyricsenhanced.root.island.IslandSlotRuntimeConfig
 import com.juren233.hyperlyricsenhanced.root.island.IslandModuleRestoreHooker
 import com.juren233.hyperlyricsenhanced.root.island.SystemUIHookRegistry
 import com.juren233.hyperlyricsenhanced.root.island.IslandWidthHooker
@@ -97,6 +98,7 @@ class HookEntry : XposedModule() {
 
         private val HYPER_ISLAND_RUNTIME_REFRESH_KEYS = setOf(
             RootConstants.KEY_HOOK_ISLAND_SHORT_LYRIC_SONG_INFO,
+            RootConstants.KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY,
             RootConstants.KEY_HOOK_ISLAND_CONTENT_LEFT,
             RootConstants.KEY_HOOK_ISLAND_CONTENT_RIGHT,
             RootConstants.KEY_HOOK_ISLAND_LEFT_PADDING_LEFT,
@@ -560,12 +562,18 @@ class HookEntry : XposedModule() {
             }
             optionalRuntime("font_weight", { IslandSystemFontWeight.stop() }) {
                 IslandSystemFontWeight.start(app) {
+                    IslandSlotRuntimeConfig.invalidate()
                     if (IslandRuntimePreferenceReader.getFontWeightMode(prefs) ==
                         IslandFontWeightMode.SYSTEM
                     ) BaseIslandRenderer.refreshActiveIsland()
                 }
             }
             MediaMetadataHelper.setArtworkResolvedListener(BaseIslandRenderer::refreshActiveIsland)
+            MediaMetadataHelper.setMediaInfoChangedListener { packageName ->
+                if (packageName == LyriconDataBridge.currentLyricPackageName) {
+                    BaseIslandRenderer.refreshActiveIsland()
+                }
+            }
             registerPreferenceBroadcastReceiver(app)
 
             optionalRuntime("preference_diagnostics") {
@@ -658,6 +666,7 @@ class HookEntry : XposedModule() {
             val listenerEpoch = runtimeEpoch
             prefListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
                 if (SystemUiHookLifetime.retired || listenerEpoch != runtimeEpoch) return@OnSharedPreferenceChangeListener
+                IslandSlotRuntimeConfig.invalidate()
                 if (com.juren233.hyperlyricsenhanced.BuildConfig.DEBUG && key != null) {
                     val value = runCatching { prefs.all[key] }.getOrNull()
                     HookLogger.i(

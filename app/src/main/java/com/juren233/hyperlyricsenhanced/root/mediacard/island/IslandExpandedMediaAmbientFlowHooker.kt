@@ -16,6 +16,7 @@ import android.graphics.RuntimeShader
 import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -24,6 +25,7 @@ import android.widget.TextView
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.root.HookEntry
+import com.juren233.hyperlyricsenhanced.root.LyriconDataBridge
 import com.juren233.hyperlyricsenhanced.root.SystemUiEnhancementGate
 import com.juren233.hyperlyricsenhanced.root.island.IslandAlbumCoverStyleHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandBackgroundTraceDiagnostics
@@ -47,6 +49,7 @@ import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.HookHandle
 import io.github.libxposed.api.XposedInterface.Hooker
 import io.github.libxposed.api.XposedModule
+import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -73,6 +76,20 @@ object IslandExpandedMediaAmbientFlowHooker {
     internal const val CUSTOM_FLOW_VIEW_TAG = "hyperlyricsenhanced.island_expanded_media_custom_flow"
     internal const val CUSTOM_FAKE_FLOW_VIEW_TAG =
         "hyperlyricsenhanced.island_expanded_media_custom_fake_flow"
+    // 新 binder 刚出现时播放器可能尚未启动，isPlaying 会短暂为 false。
+    private const val BINDER_SWITCH_GRACE_MS = 1_000L
+
+    /** 记住上一次参与播放态上报的 binder，用来识别切歌瞬间的新 binder。 */
+    private var lastPlaybackBinder: WeakReference<Any>? = null
+
+    /**
+     * 每个 binder 的首次出现时间。只记“最后一个”会被交替回调的两个 binder 反复重置，
+     * 导致暂停永远落在宽限里。
+     */
+    private val playbackBinderFirstSeenAt = Collections.synchronizedMap(
+        WeakHashMap<Any, Long>()
+    )
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     private val hookedClassLoaders = Collections.synchronizedSet(
         Collections.newSetFromMap(WeakHashMap<ClassLoader, Boolean>())
@@ -328,9 +345,42 @@ object IslandExpandedMediaAmbientFlowHooker {
                     Action.DETACH -> Unit
                 }
                 if (action != Action.DETACH) {
-                    IslandAlbumCoverStyleHooker.onPlaybackStateChanged(
-                        requireNotNull(nativeApi).isPlaying(binder)
-                    )
+                    nativeApi?.let { api ->
+                        val playing = api.isPlaying(binder)
+                        val binderPackage = runCatching { api.getPackageName(binder) }.getOrNull()
+                        // 时间轴/渲染层驱动的播放态是合成后的权威状态；只要当前歌词包已有
+                        // 权威状态，就不能让同一播放器的 binder 瞬时值覆盖它。无歌词的
+                        // 播放器不会进入时间轴，展开态回调仍是它们唯一的暂停信号来源。
+                        val rendererOwns = !binderPackage.isNullOrEmpty() &&
+                            binderPackage == LyriconDataBridge.currentLyricPackageName &&
+                            LyriconDataBridge.currentPlaybackState != null
+                        // 无论本次是播放还是暂停，都要记录 binder 身份，否则稍后的第一次
+                        // 暂停会被误判为“刚切上来的瞬时 false”。
+                        val recentBinder = isRecentPlaybackBinder(binder)
+                        when {
+                            rendererOwns -> if (BuildConfig.DEBUG) {
+                                HookLogger.d(
+                                    TAG,
+                                    "展开态播放态跳过: 渲染层已接管 pkg=$binderPackage, " +
+                                        "playing=$playing, " +
+                                        "renderer=${LyriconDataBridge.currentPlaybackState}",
+                                )
+                            }
+
+                            playing || !recentBinder ->
+                                IslandAlbumCoverStyleHooker.onPlaybackStateChanged(playing)
+
+                            else -> {
+                                schedulePauseRecheck(binder, api)
+                                if (BuildConfig.DEBUG) {
+                                    HookLogger.d(
+                                        TAG,
+                                        "展开态播放态忽略切歌瞬时未播放: pkg=$binderPackage",
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }.onFailure { error ->
                 MediaCardDiagnosticLogger.log(
@@ -347,6 +397,40 @@ object IslandExpandedMediaAmbientFlowHooker {
                 details = "action=${action.name.lowercase()},binder=${MediaCardDiagnosticLogger.identity(binder)},coverStyle=${currentCoverStyle()},hideCover=${hideCoverSource()},hideDevice=${hideDeviceSwitch()},playing=${runCatching { nativeApi?.isPlaying(binder) }.getOrNull()},activeBinders=${synchronized(activeBinders) { activeBinders.size }}",
             )
             return result
+        }
+
+        /** 新 binder 切换上来的宽限期内忽略瞬时 false；同一 binder 只从首次出现起算。 */
+        private fun isRecentPlaybackBinder(binder: Any): Boolean {
+            val now = SystemClock.elapsedRealtime()
+            lastPlaybackBinder = WeakReference(binder)
+            val firstSeenAt = synchronized(playbackBinderFirstSeenAt) {
+                playbackBinderFirstSeenAt.getOrPut(binder) { now }
+            }
+            return now - firstSeenAt < BINDER_SWITCH_GRACE_MS
+        }
+
+        /**
+         * 宽限内被忽略的暂停之后通常不会再有任何回调，只能在这里补报。
+         * 宽限结束时重新查询：仍是同一个 binder、仍未播放、渲染层也未接管，才补报暂停。
+         */
+        private fun schedulePauseRecheck(binder: Any, api: NativeApi) {
+            val binderRef = WeakReference(binder)
+            mainHandler.postDelayed({
+                if (SystemUiHookLifetime.retired) return@postDelayed
+                if (!SystemUiEnhancementGate.isEnabled()) return@postDelayed
+                val current = binderRef.get() ?: return@postDelayed
+                if (lastPlaybackBinder?.get() !== current) return@postDelayed
+                val stillPaused = runCatching { !api.isPlaying(current) }.getOrDefault(false)
+                val binderPackage = runCatching { api.getPackageName(current) }.getOrNull()
+                val rendererOwns = !binderPackage.isNullOrEmpty() &&
+                    binderPackage == LyriconDataBridge.currentLyricPackageName &&
+                    LyriconDataBridge.currentPlaybackState != null
+                if (!stillPaused || rendererOwns) return@postDelayed
+                if (BuildConfig.DEBUG) {
+                    HookLogger.d(TAG, "展开态补报宽限内的暂停: pkg=$binderPackage")
+                }
+                IslandAlbumCoverStyleHooker.onPlaybackStateChanged(false)
+            }, BINDER_SWITCH_GRACE_MS)
         }
 
         private fun logFirstArtworkCallback(binder: Any) {

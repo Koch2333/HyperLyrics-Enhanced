@@ -109,6 +109,20 @@ object RootConstants {
      */
     const val KEY_ACTIVE_MEDIA_SESSION_PACKAGES = "key_active_media_session_packages"
     const val KEY_HOOK_LYRICON_PROVIDER_DELAY_PREFIX = "key_hook_lyricon_provider_delay_"
+
+    // --- 官方插件后台自动更新（HLE 插件化计划 1.3） ---
+    const val KEY_PROVIDER_AUTO_UPDATE_LAST_CHECK = "key_provider_auto_update_last_check"
+
+    /** 打开 App 时的检查节流间隔（小时）。0=不开启，24=仅后台 24 小时周期。 */
+    const val KEY_PROVIDER_AUTO_UPDATE_INTERVAL_HOURS = "key_provider_auto_update_interval_hours"
+    const val DEFAULT_PROVIDER_AUTO_UPDATE_INTERVAL_HOURS = 6
+
+    /** 已废弃的布尔开关，仅用于一次性迁移到间隔偏好。 */
+    const val KEY_PROVIDER_AUTO_UPDATE = "key_provider_auto_update"
+
+    /** 目标进程插件状态快照的本地缓存（root 读回成功后写入，后台更新直接使用）。 */
+    const val KEY_PROVIDER_TARGET_STATE_CACHE = "key_provider_target_state_cache"
+
     const val KEY_HOOK_REMOVE_CJK_LYRIC_SPACES =
         "key_hook_remove_cjk_lyric_spaces"
 
@@ -124,6 +138,8 @@ object RootConstants {
     const val KEY_HOOK_ISLAND_ALBUM_COVER_STYLE = "key_hook_island_album_cover_style"
     const val KEY_HOOK_ISLAND_ALBUM_COVER_STYLE_APP_WHITELIST =
         "key_hook_island_album_cover_style_app_whitelist"
+    const val KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY =
+        "key_hook_island_interlude_minimal_display"
     const val KEY_HOOK_ISLAND_CONTENT_LEFT = "key_hook_island_content_left"
     const val KEY_HOOK_ISLAND_CONTENT_RIGHT = "key_hook_island_content_right"
     const val KEY_HOOK_ISLAND_LEFT_PADDING_LEFT = "key_hook_island_left_padding_left"
@@ -461,6 +477,7 @@ object RootConstants {
     const val ISLAND_ALBUM_COVER_STYLE_ROTATING_CIRCLE = 3
     const val ISLAND_ALBUM_COVER_STYLE_GRADIENT = 4
     const val DEFAULT_HOOK_ISLAND_ALBUM_COVER_STYLE = ISLAND_ALBUM_COVER_STYLE_DEFAULT
+    const val DEFAULT_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY = false
     const val DEFAULT_HOOK_MAX_LEFT_WIDTH = 100
     const val DEFAULT_HOOK_REMOVE_FOCUS_WHITELIST = false
     const val DEFAULT_HOOK_REMOVE_ISLAND_WHITELIST = false

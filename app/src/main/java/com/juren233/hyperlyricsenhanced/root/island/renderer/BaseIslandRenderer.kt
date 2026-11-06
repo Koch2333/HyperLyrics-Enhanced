@@ -7,10 +7,12 @@ import android.view.ViewGroup
 import com.juren233.hyperlyricsenhanced.BuildConfig
 import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.media.MediaMetadataHelper
+import com.juren233.hyperlyricsenhanced.lyric.model.Song
 import com.juren233.hyperlyricsenhanced.lyric.view.RichLyricLineView
 import com.juren233.hyperlyricsenhanced.lyric.view.SpaceGateRichLyricLineView
 import com.juren233.hyperlyricsenhanced.root.HookEntry
 import com.juren233.hyperlyricsenhanced.root.LyriconDataBridge
+import com.juren233.hyperlyricsenhanced.root.SystemUiScreenStateMonitor
 import com.juren233.hyperlyricsenhanced.root.island.IslandAlbumCoverStyleHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandContentUpdateCoordinator
 import com.juren233.hyperlyricsenhanced.root.island.IslandHostFacade
@@ -21,6 +23,7 @@ import com.juren233.hyperlyricsenhanced.root.island.IslandMusicWaveColorHooker
 import com.juren233.hyperlyricsenhanced.root.island.IslandProbeUtils
 import com.juren233.hyperlyricsenhanced.root.island.IslandProgressGlowController
 import com.juren233.hyperlyricsenhanced.root.island.IslandReattachAssistant
+import com.juren233.hyperlyricsenhanced.root.island.IslandReflect
 import com.juren233.hyperlyricsenhanced.root.island.IslandSlotContentAssembler
 import com.juren233.hyperlyricsenhanced.root.island.IslandSlotRuntimeConfig
 import com.juren233.hyperlyricsenhanced.root.island.IslandViewRegistry
@@ -39,6 +42,7 @@ object BaseIslandRenderer : IslandRenderer {
         retiredForReload = true
         mainHandler.removeCallbacksAndMessages(null)
         IslandContentUpdateCoordinator.release()
+        IslandReflect.clear()
     }
 
     private const val REFRESH_DEBOUNCE_MS = 32L
@@ -56,6 +60,9 @@ object BaseIslandRenderer : IslandRenderer {
     private val pauseRestoreRunnable = Runnable { commitDeferredNativeRestore() }
     private val nextSongPreviewActive = WeakHashMap<ViewGroup, NextSongPreviewState>()
     private val nextSongPreviewFailures = WeakHashMap<ViewGroup, String>()
+    private var lyricTimingSong: Song? = null
+    private var lyricTimingLastLineStart = -1L
+    private var lyricTimingLastSyllableEnd: Long? = null
 
     // 宿主仍附着但注入锚点丢失时重注入必败；连续失败计数用于区分暂态窗口
     // （fake/real 过渡、原生重排）与结构性失效，达到阈值才注销并触发重挂。
@@ -75,6 +82,10 @@ object BaseIslandRenderer : IslandRenderer {
 
     @Volatile
     private var screenRefreshGeneration = 0
+
+    // 息屏期间跳过了逐字推进，亮屏后首个位置更新要先对齐而不是补动画。
+    @Volatile
+    private var pendingScreenOnSeek = false
 
     /**
      * Source lifecycle events are the authority for lyric rendering state.
@@ -108,6 +119,7 @@ object BaseIslandRenderer : IslandRenderer {
 
     fun onScreenInteractive() {
         if (retiredForReload) return
+        pendingScreenOnSeek = true
         val generation = ++screenRefreshGeneration
         SCREEN_ON_REFRESH_DELAYS_MS.forEach { delay ->
             mainHandler.postDelayed(
@@ -125,17 +137,17 @@ object BaseIslandRenderer : IslandRenderer {
                 delay,
             )
         }
-        DisplayDiagnosticLogger.log(
+        DisplayDiagnosticLogger.logLazy(
             channel = "ISLAND",
             result = "pending",
             reason = "screen_on_refresh_scheduled",
-            extra = "attempts=${SCREEN_ON_REFRESH_DELAYS_MS.size}",
             dedupeKey = "ISLAND/screen_on",
-        )
+        ) { "attempts=${SCREEN_ON_REFRESH_DELAYS_MS.size}" }
     }
 
     fun onScreenNonInteractive() {
         screenRefreshGeneration++
+        pendingScreenOnSeek = false
         DisplayDiagnosticLogger.clear("ISLAND/screen_on")
     }
 
@@ -152,7 +164,7 @@ object BaseIslandRenderer : IslandRenderer {
         // to re-apply their current line, which is the visible "两侧内容不断刷新更新" churn.
         val fullRefresh = fullRefreshPending || !refreshWidth
         if (BuildConfig.DEBUG) {
-            HookLogger.d("IslandDynamicLimit", "刷新类型: full=$fullRefresh width=$refreshWidth")
+            HookLogger.dLazy("IslandDynamicLimit") { "刷新类型: full=$fullRefresh width=$refreshWidth" }
         }
         dynamicWidthRefreshPending = false
         fullRefreshPending = false
@@ -229,26 +241,26 @@ object BaseIslandRenderer : IslandRenderer {
                         "hostWidth=$width, hostHeight=$height") to
                         "$injected|$shown|$attached|$visibility|${width > 0}|${height > 0}"
                 }.getOrDefault("hostState=unavailable" to "unavailable") else "" to ""
-                DisplayDiagnosticLogger.log(
+                DisplayDiagnosticLogger.logLazy(
                     channel = "ISLAND",
                     result = if (injected) "present" else "skipped",
                     reason = if (injected) "injected_view_present" else "injection_unavailable",
-                    extra = "targetViews=${activeViews.size}, injectionChanged=$injectionChanged, " +
-                        "playbackActive=$playbackActive, ${hostDiagnostic.first}",
                     dedupeKey = "ISLAND/refresh",
                     infoState = hostDiagnostic.second,
-                )
+                ) {
+                    "targetViews=${activeViews.size}, injectionChanged=$injectionChanged, " +
+                        "playbackActive=$playbackActive, ${hostDiagnostic.first}"
+                }
             }
         }
 
-        HookLogger.d("BaseIslandRenderer", "已刷新活动媒体岛: 数量=${activeViews.size}")
-        DisplayDiagnosticLogger.log(
+        HookLogger.dLazy("BaseIslandRenderer") { "已刷新活动媒体岛: 数量=${activeViews.size}" }
+        DisplayDiagnosticLogger.logLazy(
             channel = "ISLAND",
             result = "pending",
             reason = "refresh_scheduled",
-            extra = "targetViews=${activeViews.size}, playbackActive=$playbackActive",
             dedupeKey = "ISLAND/refresh_pending",
-        )
+        ) { "targetViews=${activeViews.size}, playbackActive=$playbackActive" }
     }
 
     override fun updateLyricLine() {
@@ -335,23 +347,23 @@ object BaseIslandRenderer : IslandRenderer {
                             } else {
                                 injectionRecoveryFailures[cv] = consecutiveFailures
                             }
-                            DisplayDiagnosticLogger.log(
+                            DisplayDiagnosticLogger.logLazy(
                                 channel = "ISLAND",
                                 result = "skipped",
                                 reason = "injected_view_recovery_failed",
-                                extra = "targetViews=${activeViews.size}, injectionChanged=$injectionChanged, " +
-                                    "consecutiveFailures=$consecutiveFailures",
                                 dedupeKey = "ISLAND/line",
-                            )
+                            ) {
+                                "targetViews=${activeViews.size}, injectionChanged=$injectionChanged, " +
+                                    "consecutiveFailures=$consecutiveFailures"
+                            }
                             return@post
                         }
-                        DisplayDiagnosticLogger.log(
+                        DisplayDiagnosticLogger.logLazy(
                             channel = "ISLAND",
                             result = "shown",
                             reason = "injected_view_recovered",
-                            extra = "targetViews=${activeViews.size}, injectionChanged=$injectionChanged",
                             dedupeKey = "ISLAND/line",
-                        )
+                        ) { "targetViews=${activeViews.size}, injectionChanged=$injectionChanged" }
                     }
                     val contentChanged = updateLyricContentForView(cv, prefs, config)
                     if (injectionRecovered) {
@@ -361,28 +373,35 @@ object BaseIslandRenderer : IslandRenderer {
                     }
                     // 任意健康路径（重注入成功或视图本就存在）都清零暂态失败计数。
                     injectionRecoveryFailures.remove(cv)
-                    DisplayDiagnosticLogger.log(
+                    DisplayDiagnosticLogger.logLazy(
                         channel = "ISLAND",
                         result = "shown",
                         reason = "lyric_line_updated",
-                        extra = "targetViews=${activeViews.size}, playbackActive=$playbackActive",
                         dedupeKey = "ISLAND/line",
-                    )
+                    ) { "targetViews=${activeViews.size}, playbackActive=$playbackActive" }
                 }
             }
     }
 
     override fun updatePosition(position: Long) {
         if (retiredForReload) return
+        if (pendingScreenOnSeek) {
+            pendingScreenOnSeek = false
+            updatePositionForActiveViews(position, isSeek = true)
+            return
+        }
         updatePositionForActiveViews(position, isSeek = false)
     }
 
     override fun seekTo(position: Long) {
         if (retiredForReload) return
+        pendingScreenOnSeek = false
         updatePositionForActiveViews(position, isSeek = true)
     }
 
     private fun updatePositionForActiveViews(position: Long, isSeek: Boolean) {
+        // 息屏时超级岛不可见，位置、光效和下一首预览都不必处理；息屏歌词走独立路径。
+        if (!SystemUiScreenStateMonitor.isInteractive()) return
         val prefs = HookEntry.instance?.prefs ?: return
         if (!prefs.getBoolean(RootConstants.KEY_HOOK_ENABLE_HYPER_ISLAND, RootConstants.DEFAULT_HOOK_ENABLE_HYPER_ISLAND)) return
         if (!shouldRenderInjectedIsland()) return
@@ -399,6 +418,8 @@ object BaseIslandRenderer : IslandRenderer {
                         }
                         return@post
                     }
+                    val config = IslandSlotRuntimeConfig.from(prefs)
+                    val interludeMinimal = IslandSlotContentAssembler.isInterludeMinimalDisplayActive(config)
                     if (indexedViews.isEmpty()) {
                         updateViewPosition(
                             cv.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG),
@@ -414,8 +435,11 @@ object BaseIslandRenderer : IslandRenderer {
                     } else {
                         indexedViews.forEach { view -> updateViewPosition(view, position, isSeek) }
                     }
-                    IslandHostFacade.updateProgressGlow(cv, lyricPkg, prefs)
-                    val config = IslandSlotRuntimeConfig.from(prefs)
+                    if (interludeMinimal) {
+                        IslandProgressGlowController.clear(cv)
+                    } else {
+                        IslandHostFacade.updateProgressGlow(cv, lyricPkg, prefs)
+                    }
                     val previewChanged = updateEndOfSongPreview(
                         cv,
                         lyricPkg,
@@ -595,6 +619,7 @@ object BaseIslandRenderer : IslandRenderer {
         }
         IslandViewRegistry.releaseForReload()
         nextSongPreviewActive.clear()
+        IslandSlotContentAssembler.clearAllNextSongPreviewContent()
         injectionRecoveryFailures.clear()
     }
 
@@ -660,7 +685,11 @@ object BaseIslandRenderer : IslandRenderer {
         // 律动取色与歌词/光效同源：内容刷新即喂入最新媒体信息，切歌后颜色实时跟随
         IslandMusicWaveColorHooker.onMediaArtworkUpdated(mediaInfo)
         IslandHostFacade.updateHostGlow(cv, mediaInfo.albumArt, prefs)
-        IslandHostFacade.updateProgressGlow(cv, packageName, mediaInfo, prefs)
+        if (IslandSlotContentAssembler.isInterludeMinimalDisplayActive(config)) {
+            IslandProgressGlowController.clear(cv)
+        } else {
+            IslandHostFacade.updateProgressGlow(cv, packageName, mediaInfo, prefs)
+        }
         val leftChanged = updateSlot(cv, IslandProbeUtils.LEFT_TEST_VIEW_TAG, config.leftMode, prefs, config, mediaInfo)
         val rightChanged = updateSlot(cv, IslandProbeUtils.RIGHT_TEST_VIEW_TAG, config.rightMode, prefs, config, mediaInfo)
         val previewChanged = updateEndOfSongPreview(cv, packageName, prefs, config, LyriconDataBridge.currentPosition)
@@ -675,6 +704,13 @@ object BaseIslandRenderer : IslandRenderer {
         val packageName = LyriconDataBridge.currentLyricPackageName.orEmpty()
         if (updateEndOfSongPreview(cv, packageName, prefs, config, LyriconDataBridge.currentPosition)) {
             return true
+        }
+        if (IslandSlotContentAssembler.isInterludeMinimalDisplayActive(config)) {
+            // 换句路径也要处理非歌词槽，否则单侧模式下残留的歌曲信息不会被隐藏。
+            val mediaInfo = MediaMetadataHelper.getMediaInfo(cv.context, packageName, HookLogger)
+            val leftChanged = updateSlot(cv, IslandProbeUtils.LEFT_TEST_VIEW_TAG, config.leftMode, prefs, config, mediaInfo)
+            val rightChanged = updateSlot(cv, IslandProbeUtils.RIGHT_TEST_VIEW_TAG, config.rightMode, prefs, config, mediaInfo)
+            return leftChanged || rightChanged
         }
         if (config.adjacentBackgroundTranslation && config.supportsAdjacentBackgroundTranslation) {
             val mediaInfo = MediaMetadataHelper.getMediaInfo(cv.context, packageName, HookLogger)
@@ -771,21 +807,33 @@ object BaseIslandRenderer : IslandRenderer {
         )
     }
 
-    private fun updateEndOfSongPreview(
+    /** 预览结束或无法显示时，先解除槽位内容归属，常规歌词才能写回；返回是否真的释放了标记。 */
+    private fun clearNextSongPreviewContentMarkers(cv: ViewGroup): Boolean {
+        if (!IslandSlotContentAssembler.hasAnyNextSongPreviewContent()) return false
+        return IslandSlotContentAssembler.clearNextSongPreviewContent(
+            listOf(
+                cv.findViewWithTag(IslandProbeUtils.LEFT_TEST_VIEW_TAG),
+                cv.findViewWithTag(IslandProbeUtils.RIGHT_TEST_VIEW_TAG),
+            )
+        )
+    }
+
+    private fun restoreSlotsAfterPreviewRelease(
         cv: ViewGroup,
-        packageName: String,
         prefs: android.content.SharedPreferences,
         config: IslandSlotRuntimeConfig,
-        position: Long
+        mediaInfo: MediaMetadataHelper.MediaInfo
     ): Boolean {
-        val mediaInfo = MediaMetadataHelper.getMediaInfo(cv.context, packageName, HookLogger)
-        val song = LyriconDataBridge.currentSong
-        val duration = NextSongPreviewPolicy.resolveTrackDuration(
-            mediaDurationMs = mediaInfo.duration,
-            lyricDurationMs = song?.duration ?: -1L
-        )
-        val lastLyricStart = song?.lyrics?.maxOfOrNull { it.begin } ?: -1L
-        val lastSyllableEnd = song?.lyrics
+        val leftRestored = updateSlot(cv, IslandProbeUtils.LEFT_TEST_VIEW_TAG, config.leftMode, prefs, config, mediaInfo)
+        val rightRestored = updateSlot(cv, IslandProbeUtils.RIGHT_TEST_VIEW_TAG, config.rightMode, prefs, config, mediaInfo)
+        return leftRestored || rightRestored
+    }
+
+    private fun refreshLyricTimingCache(song: Song?) {
+        if (song === lyricTimingSong) return
+        lyricTimingSong = song
+        lyricTimingLastLineStart = song?.lyrics?.maxOfOrNull { it.begin } ?: -1L
+        lyricTimingLastSyllableEnd = song?.lyrics
             .orEmpty()
             .asSequence()
             .flatMap { line ->
@@ -799,23 +847,54 @@ object BaseIslandRenderer : IslandRenderer {
                 }
             }
             .maxOrNull()
-        val shouldShow = config.nextSongPreviewEnabled && NextSongPreviewPolicy.shouldShow(
-            positionMs = position,
-            durationMs = duration,
-            lastLyricStartMs = lastLyricStart,
-            lastSyllableEndMs = lastSyllableEnd,
-            previewDurationMs = config.nextSongDurationMs,
-            force = config.shouldForceNextSongPreview
-        )
+    }
+
+    private fun updateEndOfSongPreview(
+        cv: ViewGroup,
+        packageName: String,
+        prefs: android.content.SharedPreferences,
+        config: IslandSlotRuntimeConfig,
+        position: Long
+    ): Boolean {
+        if (IslandSlotContentAssembler.isInterludeMinimalDisplayActive(config)) return false
         var previewState = synchronized(nextSongPreviewActive) {
             nextSongPreviewActive[cv]
         }
+        if (!config.nextSongPreviewEnabled && previewState == null) {
+            synchronized(nextSongPreviewFailures) { nextSongPreviewFailures.remove(cv) }
+            if (!clearNextSongPreviewContentMarkers(cv)) return false
+            // 标记真的被释放时必须立刻写回歌词，不能等下一次进度回调。
+            val mediaInfo = MediaMetadataHelper.getMediaInfo(cv.context, packageName, HookLogger)
+            return restoreSlotsAfterPreviewRelease(cv, prefs, config, mediaInfo)
+        }
+
+        val song = LyriconDataBridge.currentSong
+        refreshLyricTimingCache(song)
+        // getMediaInfo 按包名缓存，元数据未变化时只有一次缓存读取。
+        val mediaInfo = MediaMetadataHelper.getMediaInfo(cv.context, packageName, HookLogger)
+        val duration = NextSongPreviewPolicy.resolveTrackDuration(
+            mediaDurationMs = mediaInfo.duration,
+            lyricDurationMs = song?.duration ?: -1L
+        )
+        val shouldShow = config.nextSongPreviewEnabled && NextSongPreviewPolicy.shouldShow(
+            positionMs = position,
+            durationMs = duration,
+            lastLyricStartMs = lyricTimingLastLineStart,
+            lastSyllableEndMs = lyricTimingLastSyllableEnd,
+            previewDurationMs = config.nextSongDurationMs,
+            force = config.shouldForceNextSongPreview
+        )
 
         if (!shouldShow) {
             synchronized(nextSongPreviewFailures) { nextSongPreviewFailures.remove(cv) }
-            if (previewState == null) return false
-            synchronized(nextSongPreviewActive) { nextSongPreviewActive.remove(cv) }
-            if (BuildConfig.DEBUG) {
+            val hadPreviewState = synchronized(nextSongPreviewActive) {
+                nextSongPreviewActive.remove(cv) != null
+            }
+            val releasedSlots = clearNextSongPreviewContentMarkers(cv)
+            // 整岛刷新会先清掉预览状态但保留槽位标记；这里只要标记被释放就必须恢复歌词，
+            // 否则切歌/前奏期间“下一首”会一直留在岛上，直到下一句歌词到来。
+            if (!hadPreviewState && !releasedSlots) return false
+            if (BuildConfig.DEBUG && hadPreviewState) {
                 val leftView = cv.findViewWithTag<View>(IslandProbeUtils.LEFT_TEST_VIEW_TAG)
                 val rightView = cv.findViewWithTag<View>(IslandProbeUtils.RIGHT_TEST_VIEW_TAG)
                 HookLogger.i(
@@ -827,16 +906,15 @@ object BaseIslandRenderer : IslandRenderer {
                         "position=$position, duration=$duration, attached=${cv.isAttachedToWindow}"
                 )
             }
-            val leftRestored = updateSlot(cv, IslandProbeUtils.LEFT_TEST_VIEW_TAG, config.leftMode, prefs, config, mediaInfo)
-            val rightRestored = updateSlot(cv, IslandProbeUtils.RIGHT_TEST_VIEW_TAG, config.rightMode, prefs, config, mediaInfo)
-            if (BuildConfig.DEBUG) {
+            val restored = restoreSlotsAfterPreviewRelease(cv, prefs, config, mediaInfo)
+            if (BuildConfig.DEBUG && hadPreviewState) {
                 HookLogger.i(
                     "BaseIslandRenderer",
-                    "[PreviewEndDiag] restored left=$leftRestored, right=$rightRestored"
+                    "[PreviewEndDiag] restored=$restored"
                 )
             }
-            HookLogger.i("BaseIslandRenderer", "已结束下首歌曲信息预览")
-            return false
+            if (hadPreviewState) HookLogger.i("BaseIslandRenderer", "已结束下首歌曲信息预览")
+            return restored
         }
 
         val expectedTargetIsLeft = if (
@@ -851,6 +929,8 @@ object BaseIslandRenderer : IslandRenderer {
                 state.targetIsLeft == expectedTargetIsLeft
         } == true
         if (!previewStateMatches) {
+            // 样式/目标侧变更会换槽：旧槽的预览归属必须先释放，否则常规歌词写不回去。
+            clearNextSongPreviewContentMarkers(cv)
             synchronized(nextSongPreviewActive) { nextSongPreviewActive.remove(cv) }
             previewState = null
         } else if (
@@ -879,7 +959,11 @@ object BaseIslandRenderer : IslandRenderer {
                             "当前歌曲=${mediaInfo.title}",
                     )
                 }
-                return false
+                return if (clearNextSongPreviewContentMarkers(cv)) {
+                    restoreSlotsAfterPreviewRelease(cv, prefs, config, mediaInfo)
+                } else {
+                    false
+                }
             }
             synchronized(nextSongPreviewFailures) { nextSongPreviewFailures.remove(cv) }
             val createdState = NextSongPreviewState(
@@ -919,9 +1003,11 @@ object BaseIslandRenderer : IslandRenderer {
                 config = config,
                 mediaInfo = mediaInfo
             )
-            if (previewStateMatches) return true
+            // 预览必须保持到切歌：每次刷新都重申预览内容并重新认领槽位，
+            // 视图被重建后也能自愈（内容未变时签名检查会直接跳过）。
             val target = cv.findViewWithTag<View>(targetTag) ?: run {
                 synchronized(nextSongPreviewActive) { nextSongPreviewActive.remove(cv) }
+                clearNextSongPreviewContentMarkers(cv)
                 return false
             }
             IslandSlotContentAssembler.applyHalfNextSongPreviewContent(

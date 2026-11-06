@@ -76,6 +76,7 @@ internal data class IslandSlotRuntimeConfig(
     val wordMotionLatinWave: Float,
     val dynamicLimitEnabled: Boolean = false,
     val shortLyricSongInfo: Boolean = RootConstants.DEFAULT_HOOK_ISLAND_SHORT_LYRIC_SONG_INFO,
+    val interludeMinimalDisplay: Boolean = RootConstants.DEFAULT_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY,
     val fullIslandNextLineMode: Int = IslandNextLineMode.resolve(IslandNextLineMode.UNSPECIFIED, nextLyricLine),
     val fontWeightMode: Int = IslandFontWeightMode.CUSTOM,
     val systemFontWeight: IslandSystemFontWeight.State? = null,
@@ -88,6 +89,10 @@ internal data class IslandSlotRuntimeConfig(
 
     val translationDisplay: Boolean
         get() = translationDisplayMode != RootConstants.TRANSLATION_PRONUNCIATION_DISPLAY_OFF
+
+    /** 极简显示依赖至少一个可见的原生元素；两者都关闭时保持常规内容，避免出现空岛。 */
+    fun usesInterludeMinimalDisplay(interludeActive: Boolean): Boolean =
+        interludeMinimalDisplay && (showAlbum || showRhythm) && interludeActive
 
     val isSingleSideMode: Boolean
         get() = activeMode == RootConstants.HOOK_LYRIC_MODE_SINGLE_SIDE
@@ -153,66 +158,68 @@ internal data class IslandSlotRuntimeConfig(
     val switchAnimRateFactor: Float
         get() = RootConstants.resolveSwitchAnimRateFactor(switchAnimRate, switchAnimCustomRate)
 
-    val styleSignature: String = listOf(
-        activeMode,
-        shortLyricSongInfo,
-        textSizeSp,
-        dynamicWidthEnabled,
-        duetFixedLengthEnabled,
-        dynamicLimitEnabled,
-        textSizeRatio,
-        fontWeight,
-        fontWeightMode,
-        systemFontWeight,
-        fontItalic,
-        fadingEdgeLength,
-        gradientProgress,
-        leftLyricPosition,
-        rightLyricPosition,
-        centerGroupVocals,
-        lyricAnimationEnabled,
-        lyricAnimationId,
-        switchAnimRate,
-        switchAnimCustomRate,
-        lyricMarqueeEnabled,
-        lyricMarqueeSpeed,
-        lyricMarqueeDelay,
-        lyricMarqueeLoopDelay,
-        lyricMarqueeInfinite,
-        lyricMarqueeStopEnd,
-        metadataMarqueeEnabled,
-        metadataMarqueeSpeed,
-        metadataMarqueeDelay,
-        metadataMarqueeLoopDelay,
-        metadataMarqueeInfinite,
-        syllableRelative,
-        syllableHighlight,
-        translationDisplayMode,
-        translationFallback,
-        translationOnly,
-        swapTranslation,
-        nextLyricLine,
-        fullIslandNextLineMode,
-        adjacentBackgroundTranslation,
-        forceNextSongAtEnd,
-        nextSongDurationSeconds,
-        nextSongPreviewStyle,
-        nextSongPreviewPosition,
-        nextSongPreviewWeight,
-        extractCoverTextColor,
-        extractCoverTextGradient,
-        customTextColorEnabled,
-        customTextColor,
-        monetTextColorEnabled,
-        statusBarTextColorEnabled,
-        customFontPath,
-        narrowLatinFont,
-        wordMotionEnabled,
-        wordMotionCjkLift,
-        wordMotionCjkWave,
-        wordMotionLatinLift,
-        wordMotionLatinWave
-    ).joinToString("|")
+    val styleSignature: String by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        listOf(
+            activeMode,
+            shortLyricSongInfo,
+            textSizeSp,
+            dynamicWidthEnabled,
+            duetFixedLengthEnabled,
+            dynamicLimitEnabled,
+            textSizeRatio,
+            fontWeight,
+            fontWeightMode,
+            systemFontWeight,
+            fontItalic,
+            fadingEdgeLength,
+            gradientProgress,
+            leftLyricPosition,
+            rightLyricPosition,
+            centerGroupVocals,
+            lyricAnimationEnabled,
+            lyricAnimationId,
+            switchAnimRate,
+            switchAnimCustomRate,
+            lyricMarqueeEnabled,
+            lyricMarqueeSpeed,
+            lyricMarqueeDelay,
+            lyricMarqueeLoopDelay,
+            lyricMarqueeInfinite,
+            lyricMarqueeStopEnd,
+            metadataMarqueeEnabled,
+            metadataMarqueeSpeed,
+            metadataMarqueeDelay,
+            metadataMarqueeLoopDelay,
+            metadataMarqueeInfinite,
+            syllableRelative,
+            syllableHighlight,
+            translationDisplayMode,
+            translationFallback,
+            translationOnly,
+            swapTranslation,
+            nextLyricLine,
+            fullIslandNextLineMode,
+            adjacentBackgroundTranslation,
+            forceNextSongAtEnd,
+            nextSongDurationSeconds,
+            nextSongPreviewStyle,
+            nextSongPreviewPosition,
+            nextSongPreviewWeight,
+            extractCoverTextColor,
+            extractCoverTextGradient,
+            customTextColorEnabled,
+            customTextColor,
+            monetTextColorEnabled,
+            statusBarTextColorEnabled,
+            customFontPath,
+            narrowLatinFont,
+            wordMotionEnabled,
+            wordMotionCjkLift,
+            wordMotionCjkWave,
+            wordMotionLatinLift,
+            wordMotionLatinWave
+        ).joinToString("|")
+    }
 
     fun modeForTag(tag: String): Int {
         return if (tag == IslandProbeUtils.LEFT_TEST_VIEW_TAG) leftMode else rightMode
@@ -315,6 +322,33 @@ internal data class IslandSlotRuntimeConfig(
     }
 
     companion object {
+        private val configCacheLock = Any()
+        private var cachedConfig: IslandSlotRuntimeConfig? = null
+        private var cachedPrefs: SharedPreferences? = null
+        private var cachedVersion = -1L
+        private val configVersion = java.util.concurrent.atomic.AtomicLong(0L)
+
+        /** 设置、运行时覆盖或系统字重变化后调用；下一次 from() 会重建配置。 */
+        fun invalidate() {
+            configVersion.incrementAndGet()
+        }
+
+        fun from(prefs: SharedPreferences): IslandSlotRuntimeConfig {
+            val version = configVersion.get()
+            synchronized(configCacheLock) {
+                cachedConfig?.let { config ->
+                    if (cachedVersion == version && cachedPrefs === prefs) return config
+                }
+            }
+            val config = build(prefs)
+            synchronized(configCacheLock) {
+                cachedConfig = config
+                cachedPrefs = prefs
+                cachedVersion = version
+            }
+            return config
+        }
+
         /** 音频律动开启时，右槽注入内容与律动图标之间的固定间隔。 */
         internal const val RHYTHM_TRAILING_GAP_DP = 6
 
@@ -376,7 +410,7 @@ internal data class IslandSlotRuntimeConfig(
             }
         }
 
-        fun from(prefs: SharedPreferences): IslandSlotRuntimeConfig {
+        private fun build(prefs: SharedPreferences): IslandSlotRuntimeConfig {
             val dynamicLimitEnabled = runtimeBoolean(prefs,
                 RootConstants.KEY_HOOK_ISLAND_DYNAMIC_LIMIT,
                 RootConstants.DEFAULT_HOOK_ISLAND_DYNAMIC_LIMIT)
@@ -399,6 +433,11 @@ internal data class IslandSlotRuntimeConfig(
                     prefs,
                     RootConstants.KEY_HOOK_ISLAND_SHORT_LYRIC_SONG_INFO,
                     RootConstants.DEFAULT_HOOK_ISLAND_SHORT_LYRIC_SONG_INFO,
+                ),
+                interludeMinimalDisplay = runtimeBoolean(
+                    prefs,
+                    RootConstants.KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY,
+                    RootConstants.DEFAULT_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY,
                 ),
                 leftMode = if (activeMode == RootConstants.HOOK_LYRIC_MODE_SINGLE_SIDE) runtimeInt(
                     prefs,

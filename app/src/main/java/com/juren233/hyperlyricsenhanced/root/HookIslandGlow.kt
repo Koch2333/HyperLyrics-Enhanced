@@ -9,6 +9,7 @@ import com.juren233.hyperlyricsenhanced.common.IslandProgressColorMode
 import com.juren233.hyperlyricsenhanced.common.RootConstants
 import com.juren233.hyperlyricsenhanced.common.media.MediaMetadataHelper
 import com.juren233.hyperlyricsenhanced.root.island.IslandProbeUtils
+import com.juren233.hyperlyricsenhanced.root.island.IslandReflect
 import com.juren233.hyperlyricsenhanced.root.island.IslandRuntimePreferenceReader
 import com.juren233.hyperlyricsenhanced.root.utils.CoverColorHelper
 import com.juren233.hyperlyricsenhanced.root.utils.HookLogger
@@ -16,6 +17,7 @@ import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import io.github.libxposed.api.XposedModule
 import org.json.JSONObject
+import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
 @SuppressLint("DiscouragedPrivateApi", "PrivateApi")
@@ -29,6 +31,16 @@ object HookIslandGlow {
         java.util.Collections.newSetFromMap(java.util.WeakHashMap<ClassLoader, Boolean>())
     )
     private val lastGlowEnabledByView = WeakHashMap<View, Boolean>()
+
+    /** 同一媒体身份 + 封面对象复用已经解析好的高亮色字符串。 */
+    @Volatile
+    private var cachedHighlightColorKey: String? = null
+    @Volatile
+    private var cachedHighlightColor: String? = null
+    @Volatile
+    private var cachedHighlightBitmap: WeakReference<Bitmap>? = null
+    @Volatile
+    private var cachedHighlightBitmapGeneration = 0
 
     private val prefs: SharedPreferences?
         get() = if (::module.isInitialized) (module as? HookEntry)?.prefs else null
@@ -114,6 +126,16 @@ object HookIslandGlow {
                 diagnosticSource = "island_host_glow"
             )
             val useGradient = IslandProgressColorMode.usesCoverGradient(colorMode)
+            val colorCacheKey = "$mediaColorKey|$useGradient"
+            val generationId = albumArt.generationId
+            cachedHighlightColor?.let { cached ->
+                if (colorCacheKey == cachedHighlightColorKey &&
+                    cachedHighlightBitmap?.get() === albumArt &&
+                    cachedHighlightBitmapGeneration == generationId
+                ) {
+                    return@runCatching cached
+                }
+            }
             val color = runCatching {
                 CoverColorHelper.resolveTextColors(albumArt, useGradient, mediaColorKey)
                     ?.colors
@@ -123,7 +145,12 @@ object HookIslandGlow {
                 ?: CoverColorHelper.fallbackArtworkColor(albumArt)
                 ?: return@runCatching null
 
-            String.format("#%08X", color)
+            val resolved = String.format("#%08X", color)
+            cachedHighlightColorKey = colorCacheKey
+            cachedHighlightBitmap = WeakReference(albumArt)
+            cachedHighlightBitmapGeneration = generationId
+            cachedHighlightColor = resolved
+            resolved
         }.onFailure { e ->
             HookLogger.e(TAG, "解析媒体岛光效颜色失败", e)
         }.getOrNull()
@@ -132,17 +159,22 @@ object HookIslandGlow {
     private fun injectTickerDataHighlightColor(islandData: Any?, color: String) {
         runCatching {
             val receiver = islandData ?: return
-            val getTickerData = receiver.javaClass.methods.find {
-                it.name == "getTickerData" && it.parameterTypes.isEmpty()
-            } ?: return
-            val setTickerData = receiver.javaClass.methods.find {
-                it.name == "setTickerData" &&
-                    it.parameterTypes.size == 1 &&
-                    it.parameterTypes[0] == String::class.java
-            } ?: return
+            val getTickerData = IslandReflect.noArgMethod(receiver.javaClass, "getTickerData")
+                ?: return
+            val setTickerData = IslandReflect.method(
+                receiver.javaClass,
+                "setTickerData",
+                String::class.java,
+            ) ?: return
 
             val tickerData = getTickerData.invoke(receiver) as? String ?: return
             if (tickerData.isBlank()) return
+            // 颜色没变时跳过整段 JSON 解析/序列化；两种常见分隔格式都兼容。
+            if (tickerData.contains("\"highlightColor\":\"$color\"") ||
+                tickerData.contains("\"highlightColor\": \"$color\"")
+            ) {
+                return
+            }
 
             val json = JSONObject(tickerData)
             json.put("highlightColor", color)
@@ -183,9 +215,8 @@ object HookIslandGlow {
     private fun refreshTemplateForCurrentIsland(view: View) {
         runCatching {
             val islandData = IslandProbeUtils.getCurrentIslandData(view) ?: return
-            val updateTemplate = view.javaClass.methods.find {
-                it.name == "updateTemplate" && it.parameterTypes.size == 1
-            } ?: return
+            val updateTemplate = IslandReflect.methodByArity(view.javaClass, "updateTemplate", 1)
+                ?: return
             updateTemplate.invoke(view, islandData)
         }.onFailure { e ->
             HookLogger.e(TAG, "刷新媒体岛光效模板失败", e)
@@ -196,18 +227,16 @@ object HookIslandGlow {
         runCatching {
             view ?: return
             val template = findFieldInHierarchy(view.javaClass, "template")?.get(view)
-            template?.javaClass?.methods
-                ?.find {
-                    it.name == "setHighlightColor" &&
-                        it.parameterTypes.size == 1 &&
-                        it.parameterTypes[0] == String::class.java
-                }
-                ?.invoke(template, null)
+            template?.let { target ->
+                IslandReflect.method(target.javaClass, "setHighlightColor", String::class.java)
+                    ?.invoke(target, null)
+            }
 
             val highlightState = findFieldInHierarchy(view.javaClass, "_highlightColor")?.get(view)
-            highlightState?.javaClass?.methods
-                ?.find { it.name == "setValue" && it.parameterTypes.size == 1 }
-                ?.invoke(highlightState, null)
+            highlightState?.let { target ->
+                IslandReflect.methodByArity(target.javaClass, "setValue", 1)
+                    ?.invoke(target, null)
+            }
         }.onFailure { e ->
             HookLogger.e(TAG, "清除视图 highlightColor 失败", e)
         }

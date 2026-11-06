@@ -10,6 +10,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ComposeShader
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.PorterDuff
@@ -27,9 +28,31 @@ internal class TextDrawer {
     private var hlColors = intArrayOf(Color.WHITE)
 
     var cjkLiftFactor = DEFAULT_CJK_LIFT_FACTOR
+        set(value) {
+            field = value
+            rebuildMotionSpecs()
+        }
+
     var cjkWaveFactor = DEFAULT_CJK_WAVE_FACTOR
+        set(value) {
+            field = value
+            rebuildMotionSpecs()
+        }
+
     var latinLiftFactor = DEFAULT_LATIN_LIFT_FACTOR
+        set(value) {
+            field = value
+            rebuildMotionSpecs()
+        }
+
     var latinWaveFactor = DEFAULT_LATIN_WAVE_FACTOR
+        set(value) {
+            field = value
+            rebuildMotionSpecs()
+        }
+
+    private var cjkMotionSpec = MotionSpec(true, cjkLiftFactor, cjkWaveFactor)
+    private var latinMotionSpec = MotionSpec(false, latinLiftFactor, latinWaveFactor)
 
     var typefaceSelector: ((Char) -> Typeface)? = null
 
@@ -41,6 +64,13 @@ internal class TextDrawer {
 
     private var cachedRainbowShader: LinearGradient? = null
     private var cachedAlphaMaskShader: LinearGradient? = null
+    private var cachedComposeShader: ComposeShader? = null
+    private var cachedComposeBase: Shader? = null
+    private var cachedComposeMask: Shader? = null
+    private var cachedSolidHighlightShader: LinearGradient? = null
+    private var cachedSolidHighlightColor = Int.MIN_VALUE
+    private var cachedSolidHighlightEdge = -1f
+    private val highlightShaderMatrix = Matrix()
     private var lastTotalWidth = -1f
     private var lastHighlightWidth = -1f
     private var lastColorsHash = 0
@@ -58,6 +88,12 @@ internal class TextDrawer {
     fun clearShaderCache() {
         cachedRainbowShader = null
         cachedAlphaMaskShader = null
+        cachedComposeShader = null
+        cachedComposeBase = null
+        cachedComposeMask = null
+        cachedSolidHighlightShader = null
+        cachedSolidHighlightColor = Int.MIN_VALUE
+        cachedSolidHighlightEdge = -1f
         lastTotalWidth = -1f
     }
 
@@ -156,17 +192,19 @@ internal class TextDrawer {
                 //val atEnd = highlightWidth >= model.width
                 val atEnd = false
                 if (useGradient && !atEnd) {
-                    val baseShader = if (isRainbowHl) {
-                        getOrCreateRainbowShader(model.width, hlColors)
+                    if (isRainbowHl) {
+                        val baseShader = getOrCreateRainbowShader(model.width, hlColors)
+                        val maskShader = getOrCreateAlphaMaskShader(model.width, highlightWidth)
+                        hlPaint.shader = getOrCreateComposeShader(baseShader, maskShader)
                     } else {
-                        LinearGradient(
-                            0f, 0f, model.width, 0f,
-                            hlPaint.color, hlPaint.color,
-                            Shader.TileMode.CLAMP
+                        val shader = getOrCreateSolidHighlightShader(
+                            color = hlPaint.color,
+                            edgePosition = highlightEdgePosition(model.width, highlightWidth),
                         )
+                        highlightShaderMatrix.setScale(highlightWidth, 1f)
+                        shader.setLocalMatrix(highlightShaderMatrix)
+                        hlPaint.shader = shader
                     }
-                    val maskShader = getOrCreateAlphaMaskShader(model.width, highlightWidth)
-                    hlPaint.shader = ComposeShader(baseShader, maskShader, PorterDuff.Mode.DST_IN)
                 } else {
                     if (isRainbowHl) {
                         hlPaint.shader = getOrCreateRainbowShader(model.width, hlColors)
@@ -415,29 +453,12 @@ internal class TextDrawer {
         return maxOffset * (1f - easeOutQuint(phase))
     }
 
-    private fun WordModel.motionSpec(): MotionSpec {
-        return if (text.any { it.isCjk() }) {
-            MotionSpec(animateByChar = true, liftFactor = cjkLiftFactor, waveFactor = cjkWaveFactor)
-        } else {
-            MotionSpec(
-                animateByChar = false,
-                liftFactor = latinLiftFactor,
-                waveFactor = latinWaveFactor
-            )
-        }
-    }
+    private fun WordModel.motionSpec(): MotionSpec =
+        if (hasCjk) cjkMotionSpec else latinMotionSpec
 
-    private fun Char.isCjk(): Boolean {
-        val block = Character.UnicodeBlock.of(this)
-        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
-                block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A ||
-                block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_B ||
-                block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS ||
-                block == Character.UnicodeBlock.HIRAGANA ||
-                block == Character.UnicodeBlock.KATAKANA ||
-                block == Character.UnicodeBlock.HANGUL_SYLLABLES ||
-                block == Character.UnicodeBlock.HANGUL_JAMO ||
-                block == Character.UnicodeBlock.HANGUL_COMPATIBILITY_JAMO
+    private fun rebuildMotionSpecs() {
+        cjkMotionSpec = MotionSpec(animateByChar = true, liftFactor = cjkLiftFactor, waveFactor = cjkWaveFactor)
+        latinMotionSpec = MotionSpec(animateByChar = false, liftFactor = latinLiftFactor, waveFactor = latinWaveFactor)
     }
 
     private fun easeOutQuint(value: Float): Float {
@@ -476,6 +497,43 @@ internal class TextDrawer {
             lastHighlightWidth = highlightWidth
         }
         return cachedAlphaMaskShader!!
+    }
+
+    /**
+     * 单位宽度的纯色高亮渐变；调用方用 localMatrix 缩放到当前高亮宽度。
+     * 遮罩软边位置在整行前 90% 恒为 0.9，只有颜色或边界变化时才重建。
+     */
+    private fun getOrCreateSolidHighlightShader(color: Int, edgePosition: Float): LinearGradient {
+        if (
+            cachedSolidHighlightShader == null ||
+            cachedSolidHighlightColor != color ||
+            cachedSolidHighlightEdge != edgePosition
+        ) {
+            cachedSolidHighlightShader = LinearGradient(
+                0f, 0f, 1f, 0f,
+                // 尾色保留同色 RGB、只把透明度降到 0；用 Color.TRANSPARENT 会让软边插值成黑色。
+                intArrayOf(color, color, color and 0x00FFFFFF),
+                floatArrayOf(0f, edgePosition, 1f),
+                Shader.TileMode.CLAMP
+            )
+            cachedSolidHighlightColor = color
+            cachedSolidHighlightEdge = edgePosition
+        }
+        return cachedSolidHighlightShader!!
+    }
+
+    private fun highlightEdgePosition(totalWidth: Float, highlightWidth: Float): Float {
+        if (totalWidth <= 0f) return 0.9f
+        return max(highlightWidth / totalWidth, 0.9f).coerceAtMost(1f)
+    }
+
+    private fun getOrCreateComposeShader(base: Shader, mask: Shader): ComposeShader {
+        if (cachedComposeShader == null || cachedComposeBase !== base || cachedComposeMask !== mask) {
+            cachedComposeShader = ComposeShader(base, mask, PorterDuff.Mode.DST_IN)
+            cachedComposeBase = base
+            cachedComposeMask = mask
+        }
+        return cachedComposeShader!!
     }
 
     private companion object {

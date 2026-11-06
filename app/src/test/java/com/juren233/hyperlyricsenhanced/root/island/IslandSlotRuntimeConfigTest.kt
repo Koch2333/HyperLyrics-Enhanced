@@ -8,6 +8,8 @@ import com.juren233.hyperlyricsenhanced.common.IslandFontWeightMode
 import com.juren233.hyperlyricsenhanced.lyric.view.line.resolvePlainTextOffset
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -88,6 +90,54 @@ class IslandSlotRuntimeConfigTest {
         assertFalse(IslandSlotRuntimeConfig.from(preferences(mapOf(
             RootConstants.KEY_HOOK_ISLAND_SHORT_LYRIC_SONG_INFO to false,
         ))).shortLyricSongInfo)
+    }
+
+    @Test
+    fun `interlude minimal display follows live overrides and needs a visible native element`() {
+        val prefs = preferences(emptyMap())
+        val before = IslandSlotRuntimeConfig.from(prefs)
+        assertFalse(before.interludeMinimalDisplay)
+        assertFalse(before.usesInterludeMinimalDisplay(interludeActive = true))
+
+        IslandRuntimePreferenceOverrides.put(
+            RootConstants.KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY,
+            true,
+        )
+        val enabled = IslandSlotRuntimeConfig.from(prefs)
+        assertTrue(enabled.interludeMinimalDisplay)
+        assertTrue(enabled.usesInterludeMinimalDisplay(interludeActive = true))
+        assertFalse(enabled.usesInterludeMinimalDisplay(interludeActive = false))
+
+        val withoutCoverOrRhythm = preferences(mapOf(
+            RootConstants.KEY_HOOK_ISLAND_LEFT_ALBUM to false,
+            RootConstants.KEY_HOOK_ISLAND_RIGHT_ICON to false,
+        ))
+        assertFalse(
+            IslandSlotRuntimeConfig.from(withoutCoverOrRhythm)
+                .usesInterludeMinimalDisplay(interludeActive = true)
+        )
+    }
+
+    @Test
+    fun `next line preview is suppressed during interlude minimal display`() {
+        IslandRuntimePreferenceOverrides.put(RootConstants.KEY_HOOK_NEXT_LYRIC_LINE, true)
+        val normalPrefs = preferences(mapOf(
+            RootConstants.KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY to false,
+        ))
+        val normalConfig = IslandSlotRuntimeConfig.from(normalPrefs)
+        val minimalPrefs = preferences(mapOf(
+            RootConstants.KEY_HOOK_ISLAND_INTERLUDE_MINIMAL_DISPLAY to true,
+        ))
+        val minimalConfig = IslandSlotRuntimeConfig.from(minimalPrefs)
+        assertTrue(normalConfig.nextLineEnabled)
+        assertTrue(minimalConfig.interludeMinimalDisplay)
+
+        assertTrue(IslandSlotContentAssembler.isNextLinePreviewEnabled(
+            normalPrefs, normalConfig, interludeActive = true
+        ))
+        assertFalse(IslandSlotContentAssembler.isNextLinePreviewEnabled(
+            minimalPrefs, minimalConfig, interludeActive = true
+        ))
     }
 
     @Test
@@ -265,6 +315,27 @@ class IslandSlotRuntimeConfigTest {
         assertFalse(config.usesSpaceGateView)
         assertEquals(5, config.leftMode)
         assertEquals(6, config.rightMode)
+    }
+
+    @Test
+    fun `config is reused until invalidated`() {
+        val prefs = preferences(mapOf(RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH to true))
+        val first = IslandSlotRuntimeConfig.from(prefs)
+        assertSame(first, IslandSlotRuntimeConfig.from(prefs))
+        IslandSlotRuntimeConfig.invalidate()
+        assertNotSame(first, IslandSlotRuntimeConfig.from(prefs))
+    }
+
+    @Test
+    fun `different preference sources do not share a cached config`() {
+        val first = IslandSlotRuntimeConfig.from(preferences(mapOf(
+            RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH to true,
+        )))
+        val second = IslandSlotRuntimeConfig.from(preferences(mapOf(
+            RootConstants.KEY_HOOK_ISLAND_DYNAMIC_WIDTH to false,
+        )))
+        assertTrue(first.dynamicWidthEnabled)
+        assertFalse(second.dynamicWidthEnabled)
     }
 
     private fun preferences(values: Map<String, Any>): SharedPreferences {
